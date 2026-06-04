@@ -210,13 +210,10 @@ func newConstantinopleInstructionSet() JumpTable {
 	return validate(instructionSet)
 }
 
-// newQuarkChainHistoryInstructionSet returns the old goquarkchain historical
-// EVM instruction set: Constantinople opcodes with goquarkchain's legacy SSTORE
-// gas accounting.
+// newQuarkChainHistoryInstructionSet returns the old QuarkChain historical
+// EVM instruction set of Petersburg/ConstantinopleFix.
 func newQuarkChainHistoryInstructionSet() JumpTable {
-	instructionSet := newConstantinopleInstructionSet()
-	instructionSet[SSTORE].dynamicGas = gasSStoreQuarkChainHistory
-	return validate(instructionSet)
+	return newConstantinopleInstructionSet()
 }
 
 // newByzantiumInstructionSet returns the frontier, homestead and
