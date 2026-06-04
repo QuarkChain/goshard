@@ -24,7 +24,7 @@ func (c evmBlockContextChain) GetHeaderByNumber(uint64) *types.Header      { ret
 func (c evmBlockContextChain) GetHeaderByHash(common.Hash) *types.Header   { return nil }
 func (c evmBlockContextChain) Engine() consensus.Engine                    { return nil }
 
-func TestNewEVMBlockContextRandomRequiresPostMerge(t *testing.T) {
+func TestNewEVMBlockContextRandomQuarkChainHistory(t *testing.T) {
 	author := common.HexToAddress("0x1")
 	random := common.HexToHash("0x1234")
 	header := &types.Header{
