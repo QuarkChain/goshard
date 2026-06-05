@@ -60,7 +60,7 @@ func NewEVMBlockContext(header *types.Header, chain ChainContext, author *common
 	if header.ExcessBlobGas != nil {
 		blobBaseFee = eip4844.CalcBlobFee(chain.Config(), header)
 	}
-	if header.Difficulty.Sign() == 0 && (chain == nil || !chain.Config().QuarkChainHistory) {
+	if header.Difficulty.Sign() == 0 {
 		random = &header.MixDigest
 	}
 	if header.SlotNumber != nil {

@@ -269,21 +269,6 @@ var (
 		Clique:                  &CliqueConfig{Period: 0, Epoch: 30000},
 	}
 
-	// QuarkChainHistoryChainConfig matches goquarkchain's historical EVM baseline.
-	QuarkChainHistoryChainConfig = &ChainConfig{
-		ChainID:             big.NewInt(1),
-		HomesteadBlock:      big.NewInt(0),
-		DAOForkBlock:        big.NewInt(0),
-		DAOForkSupport:      false,
-		EIP150Block:         big.NewInt(0),
-		EIP155Block:         big.NewInt(0),
-		EIP158Block:         big.NewInt(0),
-		ByzantiumBlock:      big.NewInt(0),
-		ConstantinopleBlock: big.NewInt(0),
-		PetersburgBlock:     big.NewInt(0),
-		QuarkChainHistory:   true,
-	}
-
 	// TestChainConfig contains every protocol change (EIPs) introduced
 	// and accepted by the Ethereum core developers for testing purposes.
 	TestChainConfig = &ChainConfig{
@@ -502,11 +487,6 @@ type ChainConfig struct {
 	// those cases.
 	EnableUBTAtGenesis bool `json:"enableUBTAtGenesis,omitempty"`
 
-	// QuarkChainHistory enables the goquarkchain historical EVM compatibility
-	// mode. It pins execution to goquarkchain's old Constantinople-era opcode
-	// semantics and must not be used for Ethereum mainnet-compatible chains.
-	QuarkChainHistory bool `json:"quarkChainHistory,omitempty"`
-
 	// Various consensus engines
 	Ethash             *EthashConfig       `json:"ethash,omitempty"`
 	Clique             *CliqueConfig       `json:"clique,omitempty"`
@@ -583,10 +563,6 @@ func (c *ChainConfig) String() string {
 	if c.MergeNetsplitBlock != nil {
 		result += fmt.Sprintf(", MergeNetsplitBlock: %v", c.MergeNetsplitBlock)
 	}
-	if c.QuarkChainHistory {
-		result += ", QuarkChainHistory: true"
-	}
-
 	// Add timestamp-based forks
 	if c.ShanghaiTime != nil {
 		result += fmt.Sprintf(", ShanghaiTime: %v", *c.ShanghaiTime)
@@ -636,8 +612,6 @@ func (c *ChainConfig) Description() string {
 	}
 	banner += fmt.Sprintf("Chain ID:  %v (%s)\n", c.ChainID, network)
 	switch {
-	case c.QuarkChainHistory:
-		banner += "Consensus: QuarkChain history compatibility (EVM only)\n"
 	case c.Ethash != nil:
 		banner += "Consensus: Beacon (proof-of-stake), merged from Ethash (proof-of-work)\n"
 	case c.Clique != nil:
@@ -835,9 +809,6 @@ func (c *ChainConfig) IsTerminalPoWBlock(parentTotalDiff *big.Int, totalDiff *bi
 // Here we check the MergeNetsplitBlock to allow configuring networks with a PoW or
 // PoA chain for unit testing purposes.
 func (c *ChainConfig) IsPostMerge(blockNum uint64, timestamp uint64) bool {
-	if c.QuarkChainHistory {
-		return false
-	}
 	mergedAtGenesis := c.TerminalTotalDifficulty != nil && c.TerminalTotalDifficulty.Sign() == 0
 	return mergedAtGenesis ||
 		c.MergeNetsplitBlock != nil && blockNum >= c.MergeNetsplitBlock.Uint64() ||
@@ -1409,23 +1380,10 @@ type Rules struct {
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague, IsOsaka        bool
 	IsAmsterdam, IsUBT                                      bool
-	IsQuarkChainHistory                                     bool
 }
 
 // Rules ensures c's ChainID is not nil.
 func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules {
-	if c.QuarkChainHistory {
-		return Rules{
-			IsHomestead:         c.IsHomestead(num),
-			IsEIP150:            c.IsEIP150(num),
-			IsEIP155:            c.IsEIP155(num),
-			IsEIP158:            c.IsEIP158(num),
-			IsByzantium:         c.IsByzantium(num),
-			IsConstantinople:    c.IsConstantinople(num),
-			IsPetersburg:        c.IsPetersburg(num),
-			IsQuarkChainHistory: true,
-		}
-	}
 	// disallow setting Merge out of order
 	isMerge = isMerge && c.IsLondon(num)
 	isUBT := isMerge && c.IsUBT(num, timestamp)
