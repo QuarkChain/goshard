@@ -64,6 +64,7 @@ func TestPetersburgOnlyInstructionSet(t *testing.T) {
 	require.True(t, evm.chainRules.IsPetersburg)
 	require.False(t, evm.chainRules.IsMerge)
 	require.True(t, evm.table[CHAINID].undefined)
+	require.True(t, evm.table[BASEFEE].undefined)
 	require.True(t, evm.table[PUSH0].undefined)
 
 	stack := newStackForTesting()
