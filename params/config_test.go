@@ -139,9 +139,20 @@ func TestConfigRules(t *testing.T) {
 	}
 }
 
-func TestQuarkChainHistoryRules(t *testing.T) {
-	rules := QuarkChainHistoryChainConfig.Rules(big.NewInt(0), true, math.MaxUint64)
-	require.True(t, rules.IsQuarkChainHistory)
+func TestPetersburgOnlyRules(t *testing.T) {
+	config := &ChainConfig{
+		ChainID:             big.NewInt(1),
+		HomesteadBlock:      big.NewInt(0),
+		DAOForkBlock:        big.NewInt(0),
+		DAOForkSupport:      false,
+		EIP150Block:         big.NewInt(0),
+		EIP155Block:         big.NewInt(0),
+		EIP158Block:         big.NewInt(0),
+		ByzantiumBlock:      big.NewInt(0),
+		ConstantinopleBlock: big.NewInt(0),
+		PetersburgBlock:     big.NewInt(0),
+	}
+	rules := config.Rules(big.NewInt(0), true, math.MaxUint64)
 	require.True(t, rules.IsHomestead)
 	require.True(t, rules.IsEIP150)
 	require.True(t, rules.IsEIP155)
@@ -163,8 +174,8 @@ func TestQuarkChainHistoryRules(t *testing.T) {
 	require.False(t, rules.IsEIP2929)
 	require.False(t, rules.IsEIP4762)
 
-	require.True(t, QuarkChainHistoryChainConfig.IsPetersburg(big.NewInt(0)))
-	require.False(t, QuarkChainHistoryChainConfig.IsPostMerge(0, math.MaxUint64))
+	require.True(t, config.IsPetersburg(big.NewInt(0)))
+	require.False(t, config.IsPostMerge(0, math.MaxUint64))
 }
 
 func TestTimestampCompatError(t *testing.T) {

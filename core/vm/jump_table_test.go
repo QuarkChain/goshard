@@ -25,6 +25,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func petersburgOnlyChainConfig() *params.ChainConfig {
+	return &params.ChainConfig{
+		ChainID:             big.NewInt(1),
+		HomesteadBlock:      big.NewInt(0),
+		DAOForkBlock:        big.NewInt(0),
+		DAOForkSupport:      false,
+		EIP150Block:         big.NewInt(0),
+		EIP155Block:         big.NewInt(0),
+		EIP158Block:         big.NewInt(0),
+		ByzantiumBlock:      big.NewInt(0),
+		ConstantinopleBlock: big.NewInt(0),
+		PetersburgBlock:     big.NewInt(0),
+	}
+}
+
 // TestJumpTableCopy tests that deep copy is necessary to prevent modify shared jump table
 func TestJumpTableCopy(t *testing.T) {
 	tbl := newMergeInstructionSet()
@@ -37,16 +52,16 @@ func TestJumpTableCopy(t *testing.T) {
 	require.Equal(t, uint64(0), tbl[SLOAD].constantGas)
 }
 
-func TestQuarkChainHistoryInstructionSet(t *testing.T) {
+func TestPetersburgOnlyInstructionSet(t *testing.T) {
 	random := common.HexToHash("0xffff")
 	evm := NewEVM(BlockContext{
 		BlockNumber: big.NewInt(0),
 		Difficulty:  big.NewInt(7),
 		Random:      &random,
-	}, nil, params.QuarkChainHistoryChainConfig, Config{})
+	}, nil, petersburgOnlyChainConfig(), Config{})
 	defer evm.Release()
 
-	require.True(t, evm.chainRules.IsQuarkChainHistory)
+	require.True(t, evm.chainRules.IsPetersburg)
 	require.False(t, evm.chainRules.IsMerge)
 	require.True(t, evm.table[CHAINID].undefined)
 	require.True(t, evm.table[PUSH0].undefined)

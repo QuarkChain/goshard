@@ -48,23 +48,22 @@ type operation struct {
 }
 
 var (
-	frontierInstructionSet          = newFrontierInstructionSet()
-	homesteadInstructionSet         = newHomesteadInstructionSet()
-	tangerineWhistleInstructionSet  = newTangerineWhistleInstructionSet()
-	spuriousDragonInstructionSet    = newSpuriousDragonInstructionSet()
-	byzantiumInstructionSet         = newByzantiumInstructionSet()
-	constantinopleInstructionSet    = newConstantinopleInstructionSet()
-	quarkChainHistoryInstructionSet = newQuarkChainHistoryInstructionSet()
-	istanbulInstructionSet          = newIstanbulInstructionSet()
-	berlinInstructionSet            = newBerlinInstructionSet()
-	londonInstructionSet            = newLondonInstructionSet()
-	mergeInstructionSet             = newMergeInstructionSet()
-	shanghaiInstructionSet          = newShanghaiInstructionSet()
-	cancunInstructionSet            = newCancunInstructionSet()
-	verkleInstructionSet            = newVerkleInstructionSet()
-	pragueInstructionSet            = newPragueInstructionSet()
-	osakaInstructionSet             = newOsakaInstructionSet()
-	amsterdamInstructionSet         = newAmsterdamInstructionSet()
+	frontierInstructionSet         = newFrontierInstructionSet()
+	homesteadInstructionSet        = newHomesteadInstructionSet()
+	tangerineWhistleInstructionSet = newTangerineWhistleInstructionSet()
+	spuriousDragonInstructionSet   = newSpuriousDragonInstructionSet()
+	byzantiumInstructionSet        = newByzantiumInstructionSet()
+	constantinopleInstructionSet   = newConstantinopleInstructionSet()
+	istanbulInstructionSet         = newIstanbulInstructionSet()
+	berlinInstructionSet           = newBerlinInstructionSet()
+	londonInstructionSet           = newLondonInstructionSet()
+	mergeInstructionSet            = newMergeInstructionSet()
+	shanghaiInstructionSet         = newShanghaiInstructionSet()
+	cancunInstructionSet           = newCancunInstructionSet()
+	verkleInstructionSet           = newVerkleInstructionSet()
+	pragueInstructionSet           = newPragueInstructionSet()
+	osakaInstructionSet            = newOsakaInstructionSet()
+	amsterdamInstructionSet        = newAmsterdamInstructionSet()
 )
 
 // JumpTable contains the EVM opcodes supported at a given fork.
@@ -208,12 +207,6 @@ func newConstantinopleInstructionSet() JumpTable {
 		memorySize:  memoryCreate2,
 	}
 	return validate(instructionSet)
-}
-
-// newQuarkChainHistoryInstructionSet returns the old QuarkChain historical
-// EVM instruction set of Petersburg/ConstantinopleFix.
-func newQuarkChainHistoryInstructionSet() JumpTable {
-	return newConstantinopleInstructionSet()
 }
 
 // newByzantiumInstructionSet returns the frontier, homestead and

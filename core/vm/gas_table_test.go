@@ -112,7 +112,7 @@ func TestEIP2200(t *testing.T) {
 	}
 }
 
-func TestQuarkChainHistorySStoreGas(t *testing.T) {
+func TestPetersburgOnlySStoreGas(t *testing.T) {
 	address := common.BytesToAddress([]byte("contract"))
 
 	statedb, _ := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
@@ -126,7 +126,7 @@ func TestQuarkChainHistorySStoreGas(t *testing.T) {
 		BlockNumber: big.NewInt(0),
 		Difficulty:  big.NewInt(1),
 	}
-	evm := NewEVM(vmctx, statedb, params.QuarkChainHistoryChainConfig, Config{})
+	evm := NewEVM(vmctx, statedb, petersburgOnlyChainConfig(), Config{})
 	defer evm.Release()
 
 	initialGas := NewGasBudget(math.MaxUint64)
