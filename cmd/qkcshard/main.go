@@ -1,18 +1,16 @@
 // qkcshard is a minimal standalone runner for QuarkChain shardchains
-// (slavechains). It opens (or creates) one database per shard, commits each
-// shard's genesis minor block anchored to the configured root block, starts the
-// structural MinorBlockChains and, with --mine, produces blocks on all of them
-// in parallel — the same shape as a goquarkchain slave hosting its
-// FULL_SHARD_ID_LIST.
+// (slavechains) ported under qkc/. It plays the role of a goquarkchain *slave*
+// process: it hosts one or more shards (a FULL_SHARD_ID_LIST), each with its own
+// database, genesis and MinorBlockChain, and — with --mine — drives block
+// production through the qkc/miner module.
 //
-// Every shard gets its own database (in --datadir mode a per-shard
-// subdirectory): the qkc rawdb key schema (LastBlock, canonical mappings, ...)
-// is per-chain global state, so shards must not share one key space.
-//
+// Mining itself lives in qkc/miner (the internal miner loop plus the external
+// RPC GetWork/SubmitWork path), exactly as in goquarkchain; this runner only
+// wires it up by implementing miner.MinerAPI and forwarding chain-head events.
 // The consensus engine is selected per shard from its CONSENSUS_TYPE:
 //   - POW_DOUBLESHA256: real proof-of-work sealing (qkc/consensus/doublesha256)
-//   - anything else (POW_SIMULATE/NONE): timed block production at the shard's
-//     TARGET_BLOCK_TIME without a seal (FakeEngine)
+//   - anything else (POW_SIMULATE/NONE): paced production at TARGET_BLOCK_TIME
+//     (qkc/consensus/simulate)
 //
 // The cluster layer (master/slaves, p2p, RPC) stays on the original
 // goquarkchain code and is out of scope here; transaction execution plugs in
@@ -46,11 +44,14 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/consensus"
 	"github.com/ethereum/go-ethereum/qkc/consensus/doublesha256"
+	"github.com/ethereum/go-ethereum/qkc/consensus/simulate"
 	qkccore "github.com/ethereum/go-ethereum/qkc/core"
 	qkcrawdb "github.com/ethereum/go-ethereum/qkc/core/rawdb"
+	"github.com/ethereum/go-ethereum/qkc/miner"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
@@ -72,18 +73,54 @@ func main() {
 	}
 }
 
-// shardNode bundles everything one running shard needs.
-type shardNode struct {
+// shard bundles a running shard: its chain, engine and miner. It implements
+// miner.MinerAPI — the contract through which qkc/miner drives production.
+type shard struct {
 	id     uint32
 	db     ethdb.Database
 	chain  *qkccore.MinorBlockChain
 	engine consensus.Engine
-	isPoW  bool
+	miner  *miner.Miner
 	cfg    *config.ShardConfig
 	logger log.Logger
 }
 
-func (s *shardNode) close() {
+// --- miner.MinerAPI ---
+
+func (s *shard) GetDefaultCoinbaseAddress() account.Address {
+	return account.CreatEmptyAddress(s.id)
+}
+
+func (s *shard) CreateBlockToMine(addr *account.Address) (types.IBlock, *big.Int, uint64, error) {
+	parent := s.chain.CurrentBlock()
+	createTime := uint64(time.Now().Unix())
+	if createTime <= parent.Time() {
+		createTime = parent.Time() + 1
+	}
+	diff, err := s.engine.CalcDifficulty(s.chain, createTime, parent)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	next := parent.CreateBlockToAppend(&createTime, diff, addr, nil, nil, nil, nil, nil, nil)
+	// TODO(execution-issue): pull pending txs from the txpool, run the state
+	// processor and finalize with the real receipts/state root/coinbase amount.
+	next.Finalize(types.Receipts{}, types.EmptyTrieHash, nil, nil,
+		types.NewEmptyTokenBalances(), parent.Meta().XShardTxCursorInfo)
+	return next, diff, 1, nil
+}
+
+func (s *shard) InsertMinedBlock(block types.IBlock) error {
+	_, err := s.chain.InsertChain([]types.IBlock{block}, false)
+	return err
+}
+
+func (s *shard) IsSyncing() bool { return false }
+func (s *shard) GetTip() uint64  { return s.chain.CurrentBlock().NumberU64() }
+
+func (s *shard) close() {
+	if s.miner != nil {
+		s.miner.Stop()
+	}
 	s.chain.Stop()
 	s.db.Close()
 }
@@ -111,24 +148,24 @@ func run() error {
 	rootBlock := gspec.CreateRootBlock()
 
 	// ---- start every shard ------------------------------------------------
-	shards := make([]*shardNode, 0, len(ids))
+	shards := make([]*shard, 0, len(ids))
 	defer func() {
 		for _, s := range shards {
 			s.close()
 		}
 	}()
 	for _, id := range ids {
-		shard, err := startShard(clusterCfg, gspec, rootBlock, id, *datadirFlag)
+		s, err := startShard(clusterCfg, gspec, rootBlock, id, *datadirFlag)
 		if err != nil {
 			return fmt.Errorf("shard %#x: %w", id, err)
 		}
-		shards = append(shards, shard)
+		shards = append(shards, s)
 
-		branch := shard.chain.GetBranch()
-		head := shard.chain.CurrentBlock()
-		shard.logger.Info("Shardchain started",
+		branch := s.chain.GetBranch()
+		head := s.chain.CurrentBlock()
+		s.logger.Info("Shardchain started",
 			"chain", branch.GetChainID(), "shard", branch.GetShardID(),
-			"consensus", shard.cfg.ConsensusType,
+			"consensus", s.cfg.ConsensusType,
 			"head", head.NumberU64(), "headHash", head.Hash(),
 			"db", databaseDesc(*datadirFlag, id),
 		)
@@ -139,7 +176,7 @@ func run() error {
 		return nil
 	}
 
-	// ---- mine on all shards until interrupted -----------------------------
+	// ---- mine on all shards until interrupted / target reached -----------
 	stop := make(chan struct{})
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM)
@@ -150,25 +187,20 @@ func run() error {
 	}()
 
 	var wg sync.WaitGroup
-	errs := make([]error, len(shards))
-	for i, s := range shards {
+	for _, s := range shards {
 		wg.Add(1)
-		go func(i int, s *shardNode) {
+		go func(s *shard) {
 			defer wg.Done()
-			errs[i] = mine(s, stop)
-		}(i, s)
+			driveShard(s, stop)
+		}(s)
 	}
 	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			return fmt.Errorf("shard %#x: %w", shards[i].id, err)
-		}
-	}
 	return nil
 }
 
-// startShard opens the shard database, sets up genesis and the chain object.
-func startShard(clusterCfg *config.ClusterConfig, gspec *qkccore.Genesis, rootBlock *types.RootBlock, fullShardID uint32, datadir string) (*shardNode, error) {
+// startShard opens the shard database, sets up genesis, the chain object, the
+// engine and the miner (not yet started).
+func startShard(clusterCfg *config.ClusterConfig, gspec *qkccore.Genesis, rootBlock *types.RootBlock, fullShardID uint32, datadir string) (*shard, error) {
 	shardCfg := clusterCfg.Quarkchain.GetShardConfigByFullShardID(fullShardID)
 	logger := log.New("fullShardId", fmt.Sprintf("%#x", fullShardID))
 
@@ -186,101 +218,65 @@ func startShard(clusterCfg *config.ClusterConfig, gspec *qkccore.Genesis, rootBl
 		logger.Info("Shard genesis ready", "hash", hash, "prevRootBlock", rootBlock.Hash())
 	}
 
-	// Consensus engine, selected by the shard's CONSENSUS_TYPE.
-	diffCalc := &consensus.EthDifficultyCalculator{
-		AdjustmentCutoff:  shardCfg.DifficultyAdjustmentCutoffTime,
-		AdjustmentFactor:  shardCfg.DifficultyAdjustmentFactor,
-		MinimumDifficulty: new(big.Int).SetUint64(shardCfg.Genesis.Difficulty),
-	}
-	var (
-		engine consensus.Engine
-		isPoW  bool
-	)
-	switch shardCfg.ConsensusType {
-	case config.PoWDoubleSha256:
-		engine, isPoW = doublesha256.New(diffCalc, false, nil), true
-	default: // POW_SIMULATE / NONE: timed production, no seal
-		engine, isPoW = consensus.NewFakeEngine(diffCalc), false
-	}
+	engine := newEngine(shardCfg)
 
 	chain, err := qkccore.NewMinorBlockChain(db, nil, nil, clusterCfg, engine, vm.Config{}, nil, fullShardID)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open minor block chain: %w", err)
 	}
-	return &shardNode{id: fullShardID, db: db, chain: chain, engine: engine, isPoW: isPoW, cfg: shardCfg, logger: logger}, nil
+	s := &shard{id: fullShardID, db: db, chain: chain, engine: engine, cfg: shardCfg, logger: logger}
+	if *mineFlag {
+		s.miner = miner.New(s, engine)
+	}
+	return s, nil
 }
 
-// mine produces blocks on one shard until the --blocks limit is reached or
-// stop is closed.
-func mine(s *shardNode, stop <-chan struct{}) error {
-	targetBlockTime := 3 * time.Second
-	if s.cfg.ConsensusConfig != nil && s.cfg.ConsensusConfig.TargetBlockTime > 0 {
-		targetBlockTime = time.Duration(s.cfg.ConsensusConfig.TargetBlockTime) * time.Second
+// newEngine builds the consensus engine for a shard from its CONSENSUS_TYPE.
+func newEngine(shardCfg *config.ShardConfig) consensus.Engine {
+	diffCalc := &consensus.EthDifficultyCalculator{
+		AdjustmentCutoff:  shardCfg.DifficultyAdjustmentCutoffTime,
+		AdjustmentFactor:  shardCfg.DifficultyAdjustmentFactor,
+		MinimumDifficulty: new(big.Int).SetUint64(shardCfg.Genesis.Difficulty),
 	}
-
-	for produced := 0; *blocksFlag == 0 || produced < *blocksFlag; {
-		parent := s.chain.CurrentBlock()
-
-		// Simulated consensus paces itself with the target block time.
-		if !s.isPoW {
-			select {
-			case <-time.After(targetBlockTime):
-			case <-stop:
-				return nil
-			}
+	switch shardCfg.ConsensusType {
+	case config.PoWDoubleSha256:
+		return doublesha256.New(diffCalc, false, nil)
+	default: // POW_SIMULATE / NONE
+		var blockInterval uint64 = 3
+		if shardCfg.ConsensusConfig != nil && shardCfg.ConsensusConfig.TargetBlockTime > 0 {
+			blockInterval = uint64(shardCfg.ConsensusConfig.TargetBlockTime)
 		}
+		return simulate.New(diffCalc, false, nil, blockInterval)
+	}
+}
 
-		createTime := uint64(time.Now().Unix())
-		if createTime <= parent.Time() {
-			createTime = parent.Time() + 1
-		}
-		diff, err := s.engine.CalcDifficulty(s.chain, createTime, parent)
-		if err != nil {
-			return fmt.Errorf("calc difficulty: %w", err)
-		}
+// driveShard starts the shard's miner and keeps it producing by forwarding
+// chain-head events to HandleNewTip — the same wiring a goquarkchain shard
+// uses. It stops after --blocks blocks or when stop is closed.
+func driveShard(s *shard, stop <-chan struct{}) {
+	headCh := make(chan qkccore.MinorChainHeadEvent, 16)
+	sub := s.chain.SubscribeChainHeadEvent(headCh)
+	defer sub.Unsubscribe()
 
-		next := parent.CreateBlockToAppend(&createTime, diff, nil, nil, nil, nil, nil, nil, nil)
-		// TODO(execution-issue): run the state processor over pending txs here
-		// and finalize with the real receipts/state root/coinbase amount.
-		next.Finalize(types.Receipts{}, types.EmptyTrieHash, nil, nil,
-			types.NewEmptyTokenBalances(), parent.Meta().XShardTxCursorInfo)
+	s.miner.SetMining(true)
 
-		sealed := next
-		if s.isPoW {
-			results := make(chan types.IBlock, 1)
-			sealStop := make(chan struct{})
-			start := time.Now()
-			if err := s.engine.Seal(nil, next, nil, 1, results, sealStop); err != nil {
-				return fmt.Errorf("seal: %w", err)
-			}
-			select {
-			case res := <-results:
-				sealed = res.(*types.MinorBlock)
-				s.logger.Debug("Sealed block", "elapsed", time.Since(start))
-			case <-stop:
-				close(sealStop)
-				return nil
-			}
-		}
-
-		if _, err := s.chain.InsertChain([]types.IBlock{sealed}, false); err != nil {
-			return fmt.Errorf("insert block #%d: %w", sealed.NumberU64(), err)
-		}
-		head := s.chain.CurrentBlock()
-		s.logger.Info("Mined block", "number", head.NumberU64(), "hash", head.Hash(),
-			"difficulty", head.Difficulty(), "nonce", head.Nonce(), "txs", len(head.Transactions()))
-		produced++
-
-		// Non-blocking stop check between blocks (PoW path has no pacing).
+	for produced := 0; ; {
 		select {
+		case ev := <-headCh:
+			produced++
+			s.logger.Info("Mined block", "number", ev.Block.NumberU64(), "hash", ev.Block.Hash(),
+				"difficulty", ev.Block.Difficulty(), "nonce", ev.Block.Nonce(), "txs", len(ev.Block.Transactions()))
+			if *blocksFlag > 0 && produced >= *blocksFlag {
+				s.logger.Info("Block target reached")
+				s.miner.SetMining(false)
+				return
+			}
+			s.miner.HandleNewTip()
 		case <-stop:
-			return nil
-		default:
+			return
 		}
 	}
-	s.logger.Info("Block target reached")
-	return nil
 }
 
 func parseShardIDs(s string) ([]uint32, error) {

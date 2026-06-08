@@ -64,13 +64,15 @@ default config (3 chains, shard size 2 per chain) the valid values are:
 
 ## Consensus
 
-The engine is selected **per shard** from the shard's `CONSENSUS_TYPE` in the
-cluster config:
+Block production runs in the `qkc/miner` module (the internal commit→seal→result
+loop plus the external `GetWork`/`SubmitWork` RPC path), not in this entry point;
+the runner only implements `miner.MinerAPI` and forwards chain-head events. The
+engine is selected **per shard** from the shard's `CONSENSUS_TYPE`:
 
 | `CONSENSUS_TYPE` | Engine | Behaviour |
 |---|---|---|
 | `POW_DOUBLESHA256` | `qkc/consensus/doublesha256` | Real proof-of-work: nonces are mined and seals are verified on import. |
-| anything else (`POW_SIMULATE`, `NONE`, …) | `FakeEngine` | Timed production: one block per `TARGET_BLOCK_TIME` seconds, no seal. |
+| anything else (`POW_SIMULATE`, `NONE`, …) | `qkc/consensus/simulate` | Paced production: the seal "search" sleeps ~`TARGET_BLOCK_TIME` seconds, then emits. |
 
 Block difficulty follows the shard's `EthDifficultyCalculator` parameters
 (`DIFFICULTY_ADJUSTMENT_CUTOFF_TIME` / `DIFFICULTY_ADJUSTMENT_FACTOR`) in both
