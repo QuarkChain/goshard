@@ -563,6 +563,7 @@ func (c *ChainConfig) String() string {
 	if c.MergeNetsplitBlock != nil {
 		result += fmt.Sprintf(", MergeNetsplitBlock: %v", c.MergeNetsplitBlock)
 	}
+
 	// Add timestamp-based forks
 	if c.ShanghaiTime != nil {
 		result += fmt.Sprintf(", ShanghaiTime: %v", *c.ShanghaiTime)
