@@ -107,6 +107,14 @@ func deserializeUint(bb *ByteBuffer, val reflect.Value, ts Tags) error {
 	}
 
 	if err == nil {
+		// Reject encodings wider than the destination. The variable-length
+		// reflect.Uint path (GetVarBytes, 1-byte length prefix) can otherwise
+		// deliver more bytes than the uint width, overflowing the uint64
+		// accumulator below and silently truncating the value. Fixed-width kinds
+		// always read exactly Bits()/8 bytes, so this never triggers for them.
+		if len(bytes) > val.Type().Bits()/8 {
+			return fmt.Errorf("deser: uint encoding too long: %d bytes exceeds the %d-bit destination width", len(bytes), val.Type().Bits())
+		}
 		var ui uint64 = 0
 		for i := 0; i < len(bytes); i++ {
 			ui = ui<<8 | uint64(bytes[i])
