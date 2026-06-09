@@ -42,7 +42,18 @@ func DeserializeWithTags(bb *ByteBuffer, val interface{}, ts Tags) error {
 }
 
 func DeserializeFromBytes(b []byte, val interface{}) error {
-	return Deserialize(NewByteBuffer(b), val)
+	bb := NewByteBuffer(b)
+	if err := Deserialize(bb, val); err != nil {
+		return err
+	}
+	// Reject inputs that decode successfully but leave bytes unconsumed: valid
+	// data followed by trailing garbage must not be silently accepted. (The
+	// lower-level Deserialize stays permissive so callers can stream multiple
+	// values from one buffer.)
+	if bb.Remaining() != 0 {
+		return fmt.Errorf("deser: %d trailing byte(s) after decoding", bb.Remaining())
+	}
+	return nil
 }
 
 func makeDeserializer(typ reflect.Type) (deserializer, error) {
