@@ -93,6 +93,16 @@ func serializeFixSizeBigUint(val *big.Int, size int, w *[]byte) error {
 		*w = append(*w, bytes...)
 		return nil
 	}
+	// big.Int.Bytes() returns the absolute value, so without this check a
+	// negative value would serialize identically to its positive counterpart
+	// (e.g. -1 as +1), silently changing it. Reject it, matching the
+	// variable-length serializeBigInt path. This is an intentional hardening
+	// divergence from the verbatim goquarkchain port, whose fixed-size path has
+	// the same silent sign loss; it does not change any valid (non-negative)
+	// encoding.
+	if val.Sign() < 0 {
+		return fmt.Errorf("ser: cannot serialize negative big.Int")
+	}
 	bytes, err := prefillByteArray(size, val.Bytes())
 	if err == nil {
 		*w = append(*w, bytes...)
