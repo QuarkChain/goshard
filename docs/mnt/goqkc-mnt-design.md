@@ -433,7 +433,9 @@ Execution flow (contracts.go:752-764):
 
 ### Scenario
 
-Account `0xA` (sender) sends 50 QKCUP tokens (tokenID=46347397) to account `0xB` via a standard EVM call. Both `TransferTokenID` and `GasTokenID` are set to QKCUP in the transaction.
+Account `0xA` (sender) sends 50 QKCUP tokens (tokenID=46347397) to account `0xB` via a standard EVM call. `TransferTokenID` is QKCUP; `GasTokenID` is QKC (the default token). This is the common case for non-QKC transfers — gas is still paid in QKC.
+
+> **Non-QKC gas token**: If `GasTokenID` were also set to QKCUP, `ApplyTransaction` would first call `PayNativeTokenAsGas` to convert QKCUP→QKC via the `GENERAL_NATIVE_TOKEN` reserve contract, deduct QKCUP from the sender via `buyGas`, and return unused gas as QKC. See Section 8 for that flow.
 
 ### 5.1 Transaction Structure
 
@@ -444,7 +446,7 @@ Transaction:
   value:     50 (in QKCUP, tokenID=46347397)
   gas:       21000
   gas_price: 1000000000
-  gas_token_id: 46347397    ← pay gas with QKCUP
+  gas_token_id: 35760        ← pay gas with QKC (default)
   transfer_token_id: 46347397  ← send QKCUP
 ```
 
@@ -454,25 +456,36 @@ Transaction:
 
 ```
 st.TransitionDb()
-  ├─ 1. st.preCheck()            // verify from has enough balance & nonce
+  ├─ 1. st.preCheck()
+  │       ├─ check nonce
+  │       └─ buyGas(): verify balance(0xA, GasTokenID=QKC) >= gas * gasPrice
+  │                    SubBalance(0xA, gas * gasPrice, QKC)   // pre-pay gas in QKC
+  │
   ├─ 2. IntrinsicGas()           // compute base gas (21000 for simple transfer)
-  ├─ 3. st.useGas(gas)           // deduct intrinsic gas
+  ├─ 3. st.useGas(gas)           // deduct intrinsic gas from st.gas counter
   │
   ├─ contractCreation = (msg.To() == nil) → false
   │
   ├─ 4. st.state.SetNonce(from, getNonce(from) + 1)  // increment nonce
   │
-  └─ 5. evm.Call(sender, to(), data, gas, value)
-       sender = vm.AccountRef(msg.From())
-       to()   = msg.To() = 0xB
-       data   = empty
-       gas    = remaining gas after intrinsic
-       value   = 50
+  ├─ 5. evm.Call(sender, to(), data, gas, value)
+  │       sender = vm.AccountRef(msg.From())
+  │       to()   = msg.To() = 0xB
+  │       data   = empty
+  │       gas    = remaining gas after intrinsic
+  │       value  = 50
+  │
+  ├─ 6. st.refundGas(vmerr)
+  │       // returns remaining * gasPrice QKC back to sender
+  │       // (vmerr==nil for successful transfer: also apply SSTORE refund cap)
+  │
+  └─ 7. st.chargeFee(gasUsed)
+         // AddBalance(coinbase, gasUsed * gasPrice * localFeeRate, QKC)
 ```
 
 ### 5.3 EVM.Call — Balance Check and Transfer
 
-**File:** `core/vm/evm.go:198-236`
+**File:** `core/vm/evm.go:198-267`
 
 ```
 evm.Call(caller=0xA, addr=0xB, input=[], gas=X, value=50)
@@ -480,21 +493,32 @@ evm.Call(caller=0xA, addr=0xB, input=[], gas=X, value=50)
   ├─ 1. if evm.depth > CallCreateDepth → revert (depth limit)
   │
   ├─ 2. if !evm.Context.CanTransfer(StateDB, 0xA, 50, evm.TransferTokenID=46347397)
-  │       → revert
+  │       → return ErrInsufficientBalance   // check TransferTokenID balance
   │
-  ├─ 3. if !evm.StateDB.Exist(0xB)
-  │       → evm.StateDB.CreateAccount(0xB)    // creates empty account
+  ├─ 3. if evm.Context.TransferFailureByPoswBalanceCheck(StateDB, 0xA, 50)
+  │       → return ErrPoSWSenderNotAllowed  // PoSW staking lock check
   │
-  ├─ 4. evm.Transfer(StateDB, 0xA, 0xB, value=50, tokenID=46347397)
+  ├─ 4. snapshot = evm.StateDB.Snapshot()
+  │
+  ├─ 5. if !evm.StateDB.Exist(0xB):
+  │       if value > 0:
+  │         evm.StateDB.CreateAccount(0xB)   // create account only when value > 0
+  │       else:
+  │         return nil (no-op for zero-value call to non-existent account)
+  │
+  ├─ 6. evm.Transfer(StateDB, 0xA, 0xB, value=50, tokenID=46347397)
   │       → core.Transfer(db, sender=0xA, recipient=0xB, amount=50, tokenID=46347397)
   │           → db.SubBalance(0xA, 50, 46347397)      // deduct from sender
   │           → db.AddBalance(0xB, 50, 46347397)      // credit to recipient
   │
-  ├─ 5. NewContract(caller, to, value, gas)    // create contract environment
-  ├─ 6. SetCallCode(&addr, codeHash, code)
+  ├─ 7. NewContract(caller, to, value, gas)    // create contract environment
+  ├─ 8. SetCallCode(&addr, codeHash, code)
   │
-  └─ 7. run(evm, contract, input, readOnly)
-       → Since 0xB has no code (just created), interpreter.Run returns STOP
+  ├─ 9. run(evm, contract, input, readOnly)
+  │      → Since 0xB has no code, interpreter.Run returns STOP immediately
+  │
+  └─ 10. checkTokenIDQueried(err, contract, evm.TransferTokenID=46347397, defaultTokenID=QKC)
+         → contract.Code is empty → no revert (check only applies to contracts with code)
 ```
 
 ### 5.4 SubBalance / AddBalance — Detail
