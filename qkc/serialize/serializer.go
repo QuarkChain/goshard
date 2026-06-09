@@ -124,6 +124,14 @@ func serializeBigInt(i *big.Int, w *[]byte) error {
 		bytes = i.Bytes()
 	}
 
+	// The length is written as a single byte, so a value needing more than 255
+	// bytes (>2040 bits) would have its length truncated by uint8() and decode
+	// to a different value — a non-roundtrippable encoding. Reject it. (Real
+	// QKC quantities are far below this; this guards the general codec.)
+	if len(bytes) > 255 {
+		return fmt.Errorf("ser: big.Int too large to serialize: %d bytes exceeds the single-byte length prefix (max 255)", len(bytes))
+	}
+
 	*w = append(*w, uint8(len(bytes)))
 	*w = append(*w, bytes...)
 	return nil
