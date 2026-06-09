@@ -275,6 +275,12 @@ func deserializePtr(bb *ByteBuffer, val reflect.Value, ts Tags) error {
 			val.Set(reflect.Zero(typ))
 			return nil
 		}
+		// The presence marker is written as exactly 0 or 1 (see serializePtr), so
+		// any other value is a non-canonical encoding and must be rejected —
+		// otherwise e.g. 0x05 would decode identically to 0x01.
+		if b != 1 {
+			return fmt.Errorf("deser: invalid nil-pointer presence marker %d (must be 0 or 1)", b)
+		}
 	}
 
 	newval := val

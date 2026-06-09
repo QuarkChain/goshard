@@ -120,7 +120,10 @@ var deserdata = []testDataForDeserialize{
 	// structs
 	{input: "0301020300", ptr: new(structForTest), value: newStructForTest(&[]byte{1, 2, 3}, nil)},
 	{input: "030102030103040506", ptr: new(structForTest), value: newStructForTest(&[]byte{1, 2, 3}, &[]byte{4, 5, 6})},
-	{input: "0301020303040506", ptr: new(structForTest), error: "deser: buffer is shorter than expected for serialize.structForTest.To"},
+	// To present (canonical marker 01) but its slice buffer is truncated. (The
+	// presence marker must be exactly 0 or 1; non-canonical markers like 03 are
+	// rejected — covered by TestDeserializeNilMarkerCanonical.)
+	{input: "0301020301040506", ptr: new(structForTest), error: "deser: buffer is shorter than expected for serialize.structForTest.To"},
 
 	// structs
 	{
