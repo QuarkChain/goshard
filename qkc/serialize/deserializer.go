@@ -211,14 +211,16 @@ func deserializeList(bb *ByteBuffer, val reflect.Value, ts Tags) error {
 		}
 
 		// Bound the element count by the bytes left in the buffer before
-		// allocating. Every list element consumes at least one byte, so a vlen
-		// larger than Remaining() can only come from a malformed/malicious
-		// input (it would fail below when reading elements anyway). Without this
-		// guard a tiny packet claiming a huge count (up to ~4B with
-		// bytesizeofslicelen:4) forces a massive MakeSlice allocation — an
-		// OOM/DoS vector, since this codec decodes blocks/headers straight from
-		// peers. This is an intentional hardening divergence from goquarkchain;
-		// it does not change the decoding of any valid input.
+		// allocating. Every element of a registrable slice consumes at least one
+		// byte — zero-byte element types are rejected at registration (see
+		// encodesZeroBytes in genTypeInfo) — so a vlen larger than Remaining() can
+		// only come from a malformed/malicious input (it would fail below when
+		// reading elements anyway). Without this guard a tiny packet claiming a
+		// huge count (up to ~4B with bytesizeofslicelen:4) forces a massive
+		// MakeSlice allocation — an OOM/DoS vector, since this codec decodes
+		// blocks/headers straight from peers. This is an intentional hardening
+		// divergence from goquarkchain; it does not change the decoding of any
+		// valid input.
 		if vlen > bb.Remaining() {
 			return fmt.Errorf("deser: list length %d exceeds remaining buffer %d", vlen, bb.Remaining())
 		}

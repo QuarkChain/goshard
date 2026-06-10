@@ -128,6 +128,74 @@ func parseStructTag(typ reflect.Type, fi int) (Tags, error) {
 	return ts, nil
 }
 
+// encodesZeroBytes reports whether a value of typ, serialized as a list element
+// (default tags, i.e. no nil marker), can encode to zero bytes — e.g. struct{},
+// a struct whose fields are all ignored/unexported, a zero-length array, or a
+// pointer/array/struct recursively composed of those. genTypeInfo rejects slices
+// of such elements: they carry no per-element byte cost, which both makes the
+// bytes-remaining bound in deserializeList reject a valid round-trip and leaves
+// that bound unable to limit allocation.
+//
+// It mirrors makeSerializer's dispatch and must stay lock-free (no cachedTypeInfo
+// / structFields), as it runs inside genTypeInfo while typeCacheMutex is held.
+// The visited set breaks reference cycles, conservatively treating an in-progress
+// type as non-zero. Serializable types are assumed non-zero, since their custom
+// encoding can't be inspected statically (QKC's all write >= 1 byte).
+func encodesZeroBytes(typ reflect.Type, visited map[reflect.Type]bool) bool {
+	if visited[typ] {
+		return false
+	}
+	visited[typ] = true
+
+	switch {
+	case typ.Kind() == reflect.Ptr:
+		// A list element pointer carries no nil marker, so it costs exactly what
+		// its element costs.
+		return encodesZeroBytes(typ.Elem(), visited)
+	case reflect.PtrTo(typ).Implements(serializableInterface):
+		return false
+	case typ.AssignableTo(bigInt):
+		return false
+	case isUint(typ.Kind()):
+		return false
+	case typ.Kind() == reflect.Bool:
+		return false
+	case typ.Kind() == reflect.String:
+		return false
+	case typ.Kind() == reflect.Slice:
+		// A slice always writes a length prefix (>= 1 byte).
+		return false
+	case typ.Kind() == reflect.Array:
+		if typ.Len() == 0 {
+			return true
+		}
+		if isByte(typ.Elem()) {
+			return false
+		}
+		return encodesZeroBytes(typ.Elem(), visited)
+	case typ.Kind() == reflect.Struct:
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.PkgPath != "" { // unexported fields are skipped by the codec
+				continue
+			}
+			tags, err := parseStructTag(typ, i)
+			if err != nil || tags.Ignored {
+				continue
+			}
+			if tags.NilOK {
+				return false // a nil marker byte is always written
+			}
+			if !encodesZeroBytes(f.Type, visited) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func genTypeInfo(typ reflect.Type) (info *typeinfo, err error) {
 	info = new(typeinfo)
 	if info.serializer, err = makeSerializer(typ); err != nil {
@@ -135,6 +203,15 @@ func genTypeInfo(typ reflect.Type) (info *typeinfo, err error) {
 	}
 	if info.deserializer, err = makeDeserializer(typ); err != nil {
 		return nil, err
+	}
+	// A slice whose element encodes to zero bytes is unsupported: such a list
+	// serializes to just its length prefix, so deserializeList's bytes-remaining
+	// bound would reject the valid round-trip (and could not bound allocation
+	// anyway). Reject it symmetrically here so serialize and deserialize agree.
+	// Byte slices are exempt (a byte is one byte); arrays are exempt (their length
+	// is fixed by the type, not read from input, so there is nothing to bound).
+	if typ.Kind() == reflect.Slice && !isByte(typ.Elem()) && encodesZeroBytes(typ.Elem(), make(map[reflect.Type]bool)) {
+		return nil, fmt.Errorf("ser: list element type %v encodes to zero bytes, which is unsupported", typ.Elem())
 	}
 	return info, nil
 }

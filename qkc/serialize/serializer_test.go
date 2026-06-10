@@ -164,7 +164,10 @@ var serdata = []testDataForSerialize{
 	{val: (*big.Int)(nil), output: "00"},
 	{val: (*[]string)(nil), output: "00"},
 	{val: (*[10]string)(nil), output: "00000000000000000000000000000000000000000000000000000000000000000000000000000000"},
-	{val: (*[]struct{ uint })(nil), output: "00"},
+	// Exported field so the element encodes to >= 1 byte: a slice whose element
+	// encodes to zero bytes (e.g. the embedded-unexported struct{ uint }) is now
+	// rejected at registration — see TestZeroByteListElementRejected.
+	{val: (*[]struct{ X uint })(nil), output: "00"},
 
 	// interfaces
 	// Serializer
