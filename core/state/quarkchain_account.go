@@ -75,7 +75,9 @@ type quarkChainTokenBalancePair struct {
 // NewQuarkChainMemoryTrieDB returns an ephemeral trie database suitable for
 // computing QKC state roots without polluting an existing chain database.
 func NewQuarkChainMemoryTrieDB() *triedb.Database {
-	return triedb.NewDatabase(rawdb.NewMemoryDatabase(), triedb.HashDefaults)
+	config := *triedb.HashDefaults
+	config.Preimages = true
+	return triedb.NewDatabase(rawdb.NewMemoryDatabase(), &config)
 }
 
 // QuarkChainTokenIDKey returns QKC's 32-byte big-endian token trie key.
