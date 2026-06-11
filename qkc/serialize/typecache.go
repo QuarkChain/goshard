@@ -145,7 +145,14 @@ func encodesZeroBytes(typ reflect.Type, visited map[reflect.Type]bool) bool {
 	if visited[typ] {
 		return false
 	}
+	// Mark typ only for the current recursion path and unmark on return, so the
+	// set tracks ancestors, not every type ever seen. Without the delete, the
+	// same zero-byte type used as repeated sibling fields (e.g.
+	// struct{ A empty; B empty }) would hit a stale mark on its second occurrence
+	// and be misclassified as non-zero, breaking serialize/deserialize symmetry.
+	// A type still on the path is a genuine cycle, kept conservatively as non-zero.
 	visited[typ] = true
+	defer delete(visited, typ)
 
 	switch {
 	case typ.Kind() == reflect.Ptr:

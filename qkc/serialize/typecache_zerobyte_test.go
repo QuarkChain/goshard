@@ -45,6 +45,29 @@ func TestZeroByteListElementRejected(t *testing.T) {
 	_ = allIgnoredFields{}.b // silence unused-field linters
 }
 
+type emptyElem struct{}
+
+// repeatedEmpties has two fields of the SAME zero-byte type, so it still encodes
+// to zero bytes. It exercises the visited-map reset in encodesZeroBytes: a stale
+// mark would misclassify the second field as non-zero, letting []repeatedEmpties
+// serialize to a bare length prefix that deserialize then rejects (an asymmetry).
+type repeatedEmpties struct {
+	A emptyElem
+	B emptyElem
+}
+
+// TestZeroByteRepeatedFieldTypeRejected pins that a slice whose element repeats a
+// zero-byte type is rejected SYMMETRICALLY (both serialize and deserialize fail).
+func TestZeroByteRepeatedFieldTypeRejected(t *testing.T) {
+	if _, err := SerializeToBytes([]repeatedEmpties{{}, {}}); err == nil {
+		t.Error("SerializeToBytes([]repeatedEmpties) should be rejected, got nil")
+	}
+	var v []repeatedEmpties
+	if err := DeserializeFromBytes([]byte{0x02}, &v); err == nil {
+		t.Error("DeserializeFromBytes into []repeatedEmpties should be rejected, got nil")
+	}
+}
+
 // TestNonZeroByteListStillRoundTrips guards against over-rejection: a slice
 // whose element consumes >= 1 byte must still encode and decode normally.
 func TestNonZeroByteListStillRoundTrips(t *testing.T) {
