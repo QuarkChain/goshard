@@ -5,6 +5,7 @@ package serialize
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 type ByteBuffer struct {
@@ -78,12 +79,26 @@ func (bb *ByteBuffer) getLen(byteSize int) (int, error) {
 		return 0, err
 	}
 
-	var size int = 0
+	// Accumulate in uint64 and bound the result. Using a signed int with an
+	// unbounded left shift let a high length-prefix byte land in the sign bit
+	// once the prefix reached the platform int width (4 bytes on 32-bit, 8 on
+	// 64-bit), silently yielding a NEGATIVE length. A negative length slips past
+	// downstream "len <= remaining" checks and then panics (slice bounds /
+	// reflect.MakeSlice: negative len) on attacker-controlled input. Reject any
+	// prefix that overflows uint64 or does not fit a non-negative int. Hardening
+	// divergence from goquarkchain; it does not change any representable length.
+	var size uint64 = 0
 	for i := 0; i < byteSize; i++ {
-		size = (size << 8) | int(b[i])
+		if size > math.MaxUint64>>8 {
+			return 0, fmt.Errorf("deser: length prefix of %d bytes overflows", byteSize)
+		}
+		size = (size << 8) | uint64(b[i])
+	}
+	if size > uint64(math.MaxInt) {
+		return 0, fmt.Errorf("deser: length prefix %d exceeds maximum %d", size, uint64(math.MaxInt))
 	}
 
-	return size, nil
+	return int(size), nil
 }
 
 func (bb *ByteBuffer) GetVarBytes(byteSizeOfSliceLen int) ([]byte, error) {
