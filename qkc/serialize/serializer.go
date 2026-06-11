@@ -10,11 +10,20 @@ import (
 	"reflect"
 )
 
+// errSerializeNil is returned when Serialize is given an untyped nil, which
+// carries no type to encode. Mirrors DeserializeWithTags rejecting a nil target
+// (rather than panicking in reflect.ValueOf(nil).Type()).
+var errSerializeNil = errors.New("ser: nil value given to Serialize")
+
 func Serialize(w *[]byte, val interface{}) error {
 	return SerializeWithTags(w, val, Tags{ByteSizeOfSliceLen: 1})
 }
 
 func SerializeWithTags(w *[]byte, val interface{}, ts Tags) error {
+	if val == nil {
+		return errSerializeNil
+	}
+
 	rval := reflect.ValueOf(val)
 	ti, err := cachedTypeInfo(rval.Type())
 	if err != nil {
