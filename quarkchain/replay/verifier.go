@@ -102,15 +102,14 @@ func (v *Verifier) VerifyBlock(block *MinorBlockInput) (*BlockResult, error) {
 		return nil, fmt.Errorf("block fullShardId mismatch: verifier %#x block %#x", v.fullShardID, block.FullShardID)
 	}
 	if block.Height > 0 {
-		if len(block.Transactions) != 0 {
-			return nil, &UnsupportedBlockError{
-				FullShardID:              block.FullShardID,
-				Height:                   block.Height,
-				BlockHash:                block.Hash,
-				TransactionCount:         len(block.Transactions),
-				XShardReceiveDepositCnt:  len(block.XShardReceiveDeposits),
-				XShardReceiveDepositHash: block.XShardReceiveDepositHashCnt,
-				Reason:                   "transaction execution is not implemented yet",
+		v.stateFullShardKey = 0
+		for idx := range block.Transactions {
+			tx := &block.Transactions[idx]
+			if tx.EVMTransaction == nil {
+				continue
+			}
+			if err := ValidateHistoricalTransaction(v.config, block, tx); err != nil {
+				return nil, fmt.Errorf("validate transaction %d: %w", idx, err)
 			}
 		}
 		for _, deposit := range block.XShardReceiveDeposits {
@@ -126,7 +125,26 @@ func (v *Verifier) VerifyBlock(block *MinorBlockInput) (*BlockResult, error) {
 				}
 			}
 		}
-		if err := v.applyCoinbase(block.Coinbase, block.CoinbaseAmountMap); err != nil {
+		gasUsed, feeTokens, err := v.applyTransactions(block)
+		if err != nil {
+			return nil, &UnsupportedBlockError{
+				FullShardID:              block.FullShardID,
+				Height:                   block.Height,
+				BlockHash:                block.Hash,
+				TransactionCount:         len(block.Transactions),
+				XShardReceiveDepositCnt:  len(block.XShardReceiveDeposits),
+				XShardReceiveDepositHash: block.XShardReceiveDepositHashCnt,
+				Reason:                   err.Error(),
+			}
+		}
+		if len(block.Transactions) != 0 && block.GasUsed != gasUsed {
+			return nil, fmt.Errorf("block gasUsed mismatch: got %d want %d", gasUsed, block.GasUsed)
+		}
+		coinbaseBalances, err := subtractTokenAmounts(block.CoinbaseAmountMap, feeTokens)
+		if err != nil {
+			return nil, err
+		}
+		if err := v.applyCoinbase(block.Coinbase, coinbaseBalances); err != nil {
 			return nil, err
 		}
 	}
@@ -180,11 +198,11 @@ func (v *Verifier) creditToken(to QKCAddress, tokenID uint64, amount *big.Int) e
 	if amount == nil || amount.Sign() == 0 {
 		return nil
 	}
-	account := v.accounts[to.Recipient]
+	account, exists := v.accounts[to.Recipient]
 	if account.TokenBalances == nil {
 		account.TokenBalances = make(map[uint64]*big.Int)
 	}
-	if account.FullShardKey == 0 {
+	if !exists {
 		account.FullShardKey = to.FullShardKey
 	}
 	if err := account.AddQuarkChainTokenBalance(tokenID, amount); err != nil {

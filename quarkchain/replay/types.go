@@ -3,6 +3,7 @@
 package replay
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -25,18 +26,28 @@ type TokenBalance struct {
 }
 
 type TransactionInput struct {
-	Hash             common.Hash
-	From             common.Address
-	To               *common.Address
-	Nonce            uint64
-	Value            *big.Int
-	GasPrice         *big.Int
-	Gas              uint64
-	FromFullShardKey uint32
-	ToFullShardKey   uint32
-	GasTokenID       uint64
-	TransferTokenID  uint64
-	RawEVMRLP        []byte
+	Hash                common.Hash
+	From                common.Address
+	RecoveredSender     common.Address
+	To                  *common.Address
+	Nonce               uint64
+	Value               *big.Int
+	GasPrice            *big.Int
+	Gas                 uint64
+	Data                []byte
+	NetworkID           uint32
+	FromFullShardKey    uint32
+	ToFullShardKey      uint32
+	GasTokenID          uint64
+	TransferTokenID     uint64
+	Version             uint32
+	V                   *big.Int
+	R                   *big.Int
+	S                   *big.Int
+	RawTypedTransaction []byte
+	RawEVMRLP           []byte
+	TypedTransaction    *TypedTransaction
+	EVMTransaction      *EVMTransaction
 }
 
 type XShardDepositInput struct {
@@ -57,6 +68,7 @@ type XShardDepositInput struct {
 type MinorBlockInput struct {
 	FullShardID                 uint32
 	Height                      uint64
+	Timestamp                   uint64
 	Hash                        common.Hash
 	ExpectedStateRoot           common.Hash
 	ExpectedReceiptRoot         common.Hash
@@ -72,6 +84,7 @@ type MinorBlockInput struct {
 type rpcBlock struct {
 	Hash                     string            `json:"hash"`
 	Height                   string            `json:"height"`
+	Timestamp                string            `json:"timestamp"`
 	FullShardID              string            `json:"fullShardId"`
 	Miner                    string            `json:"miner"`
 	Coinbase                 []rpcTokenBalance `json:"coinbase"`
@@ -90,18 +103,21 @@ type rpcTokenBalance struct {
 }
 
 type rpcTransaction struct {
-	Hash             string `json:"hash"`
-	From             string `json:"from"`
-	To               string `json:"to"`
-	Nonce            string `json:"nonce"`
-	Value            string `json:"value"`
-	GasPrice         string `json:"gasPrice"`
-	Gas              string `json:"gas"`
-	FromFullShardKey string `json:"fromFullShardKey"`
-	ToFullShardKey   string `json:"toFullShardKey"`
-	GasTokenID       string `json:"gasTokenId"`
-	TransferTokenID  string `json:"transferTokenId"`
-	RawEVMRLP        string `json:"rawEvmRlp"`
+	Hash                string `json:"hash"`
+	From                string `json:"from"`
+	To                  string `json:"to"`
+	Nonce               string `json:"nonce"`
+	Value               string `json:"value"`
+	GasPrice            string `json:"gasPrice"`
+	Gas                 string `json:"gas"`
+	NetworkID           string `json:"networkId"`
+	FromFullShardKey    string `json:"fromFullShardKey"`
+	ToFullShardKey      string `json:"toFullShardKey"`
+	GasTokenID          string `json:"gasTokenId"`
+	TransferTokenID     string `json:"transferTokenId"`
+	Version             string `json:"version"`
+	RawTypedTransaction string `json:"rawTypedTransaction"`
+	RawEVMRLP           string `json:"rawEvmRlp"`
 }
 
 type rpcXShardDeposit struct {
@@ -135,6 +151,10 @@ func normalizeRPCBlock(raw rpcBlock) (*MinorBlockInput, error) {
 	height, err := parseUint64(raw.Height)
 	if err != nil {
 		return nil, fmt.Errorf("parse height: %w", err)
+	}
+	timestamp, err := parseOptionalUint64(raw.Timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("parse timestamp: %w", err)
 	}
 	hash, err := parseHash(raw.Hash)
 	if err != nil {
@@ -178,6 +198,7 @@ func normalizeRPCBlock(raw rpcBlock) (*MinorBlockInput, error) {
 	return &MinorBlockInput{
 		FullShardID:                 fullShardID,
 		Height:                      height,
+		Timestamp:                   timestamp,
 		Hash:                        hash,
 		ExpectedStateRoot:           stateRoot,
 		ExpectedReceiptRoot:         receiptRoot,
@@ -295,6 +316,10 @@ func parseTransactions(rawTxs []json.RawMessage) ([]TransactionInput, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse transaction %d gas: %w", idx, err)
 		}
+		networkID, err := parseOptionalUint32(tx.NetworkID)
+		if err != nil {
+			return nil, fmt.Errorf("parse transaction %d networkId: %w", idx, err)
+		}
 		fromFullShardKey, err := parseUint32(tx.FromFullShardKey)
 		if err != nil {
 			return nil, fmt.Errorf("parse transaction %d fromFullShardKey: %w", idx, err)
@@ -311,26 +336,132 @@ func parseTransactions(rawTxs []json.RawMessage) ([]TransactionInput, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse transaction %d transferTokenId: %w", idx, err)
 		}
+		version, err := parseOptionalUint32(tx.Version)
+		if err != nil {
+			return nil, fmt.Errorf("parse transaction %d version: %w", idx, err)
+		}
+		rawTypedTransaction, err := parseOptionalBytes(tx.RawTypedTransaction)
+		if err != nil {
+			return nil, fmt.Errorf("parse transaction %d rawTypedTransaction: %w", idx, err)
+		}
 		rawEVMRLP, err := parseOptionalBytes(tx.RawEVMRLP)
 		if err != nil {
 			return nil, fmt.Errorf("parse transaction %d rawEvmRlp: %w", idx, err)
 		}
-		txs = append(txs, TransactionInput{
-			Hash:             hash,
-			From:             from,
-			To:               to,
-			Nonce:            nonce,
-			Value:            value,
-			GasPrice:         gasPrice,
-			Gas:              gas,
-			FromFullShardKey: fromFullShardKey,
-			ToFullShardKey:   toFullShardKey,
-			GasTokenID:       gasTokenID,
-			TransferTokenID:  transferTokenID,
-			RawEVMRLP:        rawEVMRLP,
-		})
+		input := TransactionInput{
+			Hash:                hash,
+			From:                from,
+			To:                  to,
+			Nonce:               nonce,
+			Value:               value,
+			GasPrice:            gasPrice,
+			Gas:                 gas,
+			NetworkID:           networkID,
+			FromFullShardKey:    fromFullShardKey,
+			ToFullShardKey:      toFullShardKey,
+			GasTokenID:          gasTokenID,
+			TransferTokenID:     transferTokenID,
+			Version:             version,
+			RawTypedTransaction: rawTypedTransaction,
+			RawEVMRLP:           rawEVMRLP,
+		}
+		if err := input.applySerializedTransaction(tx, idx); err != nil {
+			return nil, err
+		}
+		txs = append(txs, input)
 	}
 	return txs, nil
+}
+
+func (tx *TransactionInput) applySerializedTransaction(raw rpcTransaction, idx int) error {
+	if len(tx.RawTypedTransaction) != 0 {
+		typedTx, err := ParseTypedTransaction(tx.RawTypedTransaction)
+		if err != nil {
+			return fmt.Errorf("parse transaction %d rawTypedTransaction: %w", idx, err)
+		}
+		if typedTx.Hash != tx.Hash {
+			return fmt.Errorf("parse transaction %d rawTypedTransaction hash mismatch: json %s envelope %s", idx, tx.Hash, typedTx.Hash)
+		}
+		if len(tx.RawEVMRLP) != 0 && !bytes.Equal(tx.RawEVMRLP, typedTx.SerializedEVMRLP) {
+			return fmt.Errorf("parse transaction %d rawEvmRlp mismatch with typed transaction payload", idx)
+		}
+		tx.TypedTransaction = typedTx
+		tx.EVMTransaction = typedTx.EVM
+		tx.RawEVMRLP = common.CopyBytes(typedTx.SerializedEVMRLP)
+	} else if len(tx.RawEVMRLP) != 0 {
+		evmTx, err := ParseEVMTransactionRLP(tx.RawEVMRLP)
+		if err != nil {
+			return fmt.Errorf("parse transaction %d rawEvmRlp: %w", idx, err)
+		}
+		tx.EVMTransaction = evmTx
+	}
+	if tx.EVMTransaction == nil {
+		return nil
+	}
+	return tx.applyEVMTransaction(raw, idx)
+}
+
+func (tx *TransactionInput) applyEVMTransaction(raw rpcTransaction, idx int) error {
+	evmTx := tx.EVMTransaction
+	if tx.Nonce != evmTx.Nonce {
+		return fmt.Errorf("parse transaction %d nonce mismatch: json %d rlp %d", idx, tx.Nonce, evmTx.Nonce)
+	}
+	if tx.GasPrice.Cmp(evmTx.GasPrice) != 0 {
+		return fmt.Errorf("parse transaction %d gasPrice mismatch: json %s rlp %s", idx, tx.GasPrice, evmTx.GasPrice)
+	}
+	if tx.Gas != evmTx.Gas {
+		return fmt.Errorf("parse transaction %d gas mismatch: json %d rlp %d", idx, tx.Gas, evmTx.Gas)
+	}
+	if !sameAddressPtr(tx.To, evmTx.To) {
+		return fmt.Errorf("parse transaction %d to mismatch: json %v rlp %v", idx, tx.To, evmTx.To)
+	}
+	if tx.Value.Cmp(evmTx.Value) != 0 {
+		return fmt.Errorf("parse transaction %d value mismatch: json %s rlp %s", idx, tx.Value, evmTx.Value)
+	}
+	if raw.NetworkID != "" && tx.NetworkID != evmTx.NetworkID {
+		return fmt.Errorf("parse transaction %d networkId mismatch: json %d rlp %d", idx, tx.NetworkID, evmTx.NetworkID)
+	}
+	if tx.FromFullShardKey != evmTx.FromFullShardKey {
+		return fmt.Errorf("parse transaction %d fromFullShardKey mismatch: json %#x rlp %#x", idx, tx.FromFullShardKey, evmTx.FromFullShardKey)
+	}
+	if tx.ToFullShardKey != evmTx.ToFullShardKey {
+		return fmt.Errorf("parse transaction %d toFullShardKey mismatch: json %#x rlp %#x", idx, tx.ToFullShardKey, evmTx.ToFullShardKey)
+	}
+	if tx.GasTokenID != evmTx.GasTokenID {
+		return fmt.Errorf("parse transaction %d gasTokenId mismatch: json %d rlp %d", idx, tx.GasTokenID, evmTx.GasTokenID)
+	}
+	if tx.TransferTokenID != evmTx.TransferTokenID {
+		return fmt.Errorf("parse transaction %d transferTokenId mismatch: json %d rlp %d", idx, tx.TransferTokenID, evmTx.TransferTokenID)
+	}
+	if raw.Version != "" && tx.Version != evmTx.Version {
+		return fmt.Errorf("parse transaction %d version mismatch: json %d rlp %d", idx, tx.Version, evmTx.Version)
+	}
+	tx.Data = common.CopyBytes(evmTx.Data)
+	tx.NetworkID = evmTx.NetworkID
+	tx.Version = evmTx.Version
+	tx.V = copyBig(evmTx.V)
+	tx.R = copyBig(evmTx.R)
+	tx.S = copyBig(evmTx.S)
+	recovered, err := evmTx.RecoverSender()
+	if err != nil {
+		return fmt.Errorf("parse transaction %d sender: %w", idx, err)
+	}
+	if recovered != tx.From {
+		return fmt.Errorf("parse transaction %d sender mismatch: json %s signature %s", idx, tx.From, recovered)
+	}
+	tx.RecoveredSender = recovered
+	return nil
+}
+
+func sameAddressPtr(a *common.Address, b *common.Address) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return *a == *b
+	}
 }
 
 func parseTokenBalances(raw []rpcTokenBalance) ([]TokenBalance, error) {
@@ -409,6 +540,13 @@ func parseUint32(input string) (uint32, error) {
 		return 0, fmt.Errorf("uint32 overflow: %d", value)
 	}
 	return uint32(value), nil
+}
+
+func parseOptionalUint32(input string) (uint32, error) {
+	if input == "" {
+		return 0, nil
+	}
+	return parseUint32(input)
 }
 
 func parseOptionalUint64(input string) (uint64, error) {

@@ -18,22 +18,27 @@ import (
 )
 
 // QuarkChainClusterGenesisConfig is the minimal subset of a goquarkchain
-// cluster config needed to build QKC genesis EVM state roots.
+// cluster config needed by QKC genesis root and historical replay helpers.
 type QuarkChainClusterGenesisConfig struct {
 	GenesisDir *string                 `json:"GENESIS_DIR"`
 	QuarkChain QuarkChainGenesisConfig `json:"QUARKCHAIN"`
 }
 
 type QuarkChainGenesisConfig struct {
-	GenesisToken   string                   `json:"GENESIS_TOKEN"`
-	BaseEthChainID uint32                   `json:"BASE_ETH_CHAIN_ID"`
-	Chains         []QuarkChainGenesisChain `json:"CHAINS"`
+	GenesisToken                string                   `json:"GENESIS_TOKEN"`
+	BaseEthChainID              uint32                   `json:"BASE_ETH_CHAIN_ID"`
+	NetworkID                   uint32                   `json:"NETWORK_ID"`
+	EnableEIP155SignerTimestamp *uint64                  `json:"ENABLE_EIP155_SIGNER_TIMESTAMP"`
+	RewardTaxRate               json.Number              `json:"REWARD_TAX_RATE"`
+	Chains                      []QuarkChainGenesisChain `json:"CHAINS"`
 }
 
 type QuarkChainGenesisChain struct {
-	ChainID   uint32                  `json:"CHAIN_ID"`
-	ShardSize uint32                  `json:"SHARD_SIZE"`
-	Genesis   *QuarkChainShardGenesis `json:"GENESIS"`
+	ChainID           uint32                  `json:"CHAIN_ID"`
+	EthChainID        uint32                  `json:"ETH_CHAIN_ID"`
+	ShardSize         uint32                  `json:"SHARD_SIZE"`
+	DefaultChainToken string                  `json:"DEFAULT_CHAIN_TOKEN"`
+	Genesis           *QuarkChainShardGenesis `json:"GENESIS"`
 }
 
 type QuarkChainShardGenesis struct {
