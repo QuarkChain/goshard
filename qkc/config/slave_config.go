@@ -1,4 +1,7 @@
-// Ported verbatim from github.com/QuarkChain/goquarkchain/cluster/config (byte-compatible).
+// Ported from github.com/QuarkChain/goquarkchain/cluster/config. The WebSocket
+// JSON-RPC field is adapted to pyquarkchain's WEBSOCKET_JSON_RPC_PORT (a single
+// optional port) instead of goquarkchain's WEBSOCKET_JSON_RPC_PORT_LIST, since
+// the goshard slave reads a pyquarkchain master's cluster config.
 
 package config
 
@@ -13,7 +16,7 @@ type SlaveConfig struct {
 	IP                       string   `json:"HOST"` // DEFAULT_HOST
 	Port                     uint16   `json:"PORT"` // 38392
 	ID                       string   `json:"ID"`
-	WSPortList               []uint16 `json:"WEBSOCKET_JSON_RPC_PORT_LIST"`
+	WSPort                   *uint16  `json:"WEBSOCKET_JSON_RPC_PORT"` // pyquarkchain: optional (default None)
 	FullShardList            []uint32 `json:"-"`
 	ChainMaskListForBackward []uint32 `json:"-"`
 }
@@ -42,12 +45,6 @@ func (s *SlaveConfig) UnmarshalJSON(input []byte) error {
 		return err
 	}
 	*s = SlaveConfig(jsonConfig.SlaveConfigAlias)
-	if len(s.WSPortList) == 0 {
-		s.WSPortList = make([]uint16, len(s.FullShardList))
-		for i, shard := range s.FullShardList {
-			s.WSPortList[i] = DefaultWSPort + uint16(shard>>16)
-		}
-	}
 
 	if jsonConfig.ChainMaskListJson != nil && jsonConfig.FullShardListJson != nil {
 		return errors.New("Can only have either FULL_SHARD_ID_LIST or CHAIN_MASK_LIST")
