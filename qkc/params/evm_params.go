@@ -44,6 +44,11 @@ var (
 		DAOForkBlock:        big.NewInt(0),
 		ByzantiumBlock:      big.NewInt(0),
 		ConstantinopleBlock: big.NewInt(0),
+		// goquarkchain hard-codes legacy (pre-EIP-1283) SSTORE metering in its
+		// gasSStore via an `if true`, i.e. it runs Petersburg behavior in code.
+		// Stock geth gates that on PetersburgBlock, so set it to reproduce
+		// goquarkchain's EVM faithfully.
+		PetersburgBlock: big.NewInt(0),
 	}
 )
 
