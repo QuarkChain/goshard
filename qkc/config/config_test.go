@@ -143,15 +143,13 @@ func TestLoadClusterConfig(t *testing.T) {
 		if goChain.ShardSize != pyCHain.ShardSize {
 			t.Fatalf("go config chain size is not equal to python config")
 		}
-		if reflect.DeepEqual(goChain.Genesis, pyCHain.Genesis) {
-			t.Fatalf("go config Genesis is not equal to python config")
-		}
-		if reflect.DeepEqual(goChain.PoswConfig, pyCHain.PoswConfig) {
-			t.Fatalf("go config PoswConfig is not equal to python config")
-		}
-		if reflect.DeepEqual(goChain.ConsensusConfig, pyCHain.ConsensusConfig) {
-			t.Fatalf("go config ConsensusConfig is not equal to python config")
-		}
+		// NOTE: upstream goquarkchain (cluster/config/config_test.go:142-150) also
+		// compares Genesis/PoswConfig/ConsensusConfig here, but the comparisons are
+		// inverted (missing "!") and so validate nothing. They cannot be corrected
+		// by adding "!": test_config.json and the python cluster_config_template.json
+		// deliberately differ on those value fields, so equality would always fail.
+		// This test only verifies that the Go and Python configs describe the same
+		// cluster topology (slave list, chain count, per-chain CHAIN_ID/SHARD_SIZE).
 	}
 }
 
