@@ -29,7 +29,6 @@ const (
 	// PoWQkchash is the consensus type running qkchash algorithm.
 	PoWQkchash = "POW_QKCHASH"
 
-	DefaultGrpcPort    uint16 = 38191
 	DefaultP2PPort     uint16 = 38291
 	DefaultPubRpcPort  uint16 = 38391
 	DefaultPrivRpcPort uint16 = 38491
@@ -174,8 +173,6 @@ type RootConfig struct {
 	EpochInterval                  uint64          `json:"EPOCH_INTERVAL"`
 	DifficultyAdjustmentCutoffTime uint32          `json:"DIFFICULTY_ADJUSTMENT_CUTOFF_TIME"`
 	DifficultyAdjustmentFactor     uint32          `json:"DIFFICULTY_ADJUSTMENT_FACTOR"`
-	GRPCHost                       string          `json:"-"`
-	GRPCPort                       uint16          `json:"-"`
 	PoSWConfig                     *POSWConfig     `json:"POSW_CONFIG"`
 }
 
@@ -190,8 +187,6 @@ func NewRootConfig() *RootConfig {
 		EpochInterval:                  uint64(210000 * 10),
 		DifficultyAdjustmentCutoffTime: 40,
 		DifficultyAdjustmentFactor:     1024,
-		GRPCHost:                       "127.0.0.1",
-		GRPCPort:                       DefaultGrpcPort,
 		PoSWConfig:                     NewRootPOSWConfig(),
 	}
 }
