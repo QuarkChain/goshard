@@ -13,7 +13,7 @@ import (
 type ChainConfig struct {
 	ChainID           uint32 `json:"CHAIN_ID"`
 	ShardSize         uint32 `json:"SHARD_SIZE"`
-	DefaultChainToken string `json:"-"`
+	DefaultChainToken string `json:"DEFAULT_CHAIN_TOKEN"`
 	ConsensusType     string `json:"CONSENSUS_TYPE"`
 
 	// Only set when CONSENSUS_TYPE is not NONE
