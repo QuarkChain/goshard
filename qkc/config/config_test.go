@@ -153,6 +153,44 @@ func TestLoadClusterConfig(t *testing.T) {
 	}
 }
 
+// TestShardConfigDerivation checks that loading a cluster config derives each
+// per-shard config the way pyquarkchain's ClusterConfig.from_dict does (and
+// unlike goquarkchain, which copies the chain coinbase and the full alloc
+// verbatim): the coinbase is rewritten into the shard, and GENESIS.ALLOC is
+// filtered down to the addresses that belong to the shard. The goshard slave
+// shares its config with a pyquarkchain master, so it must match pyquarkchain.
+// See qkc/config/cluster_config.go (UnmarshalJSON).
+func TestShardConfigDerivation(t *testing.T) {
+	var c ClusterConfig
+	if err := loadConfig("./test_config.json", &c); err != nil {
+		t.Fatalf("Failed to load json file, err: %v", err)
+	}
+	q := c.Quarkchain
+
+	// (1) Coinbase rewritten into each shard: full-shard-key == the shard's full
+	// shard id, recipient preserved from the chain coinbase.
+	for fsid, sc := range q.shards {
+		if sc.CoinbaseAddress.FullShardKey != fsid {
+			t.Errorf("shard %d: coinbase full-shard-key = %d, want %d", fsid, sc.CoinbaseAddress.FullShardKey, fsid)
+		}
+		if want := q.Chains[sc.ChainID].CoinbaseAddress.Recipient; sc.CoinbaseAddress.Recipient != want {
+			t.Errorf("shard %d: coinbase recipient = %x, want %x (chain coinbase)", fsid, sc.CoinbaseAddress.Recipient, want)
+		}
+	}
+
+	// (2) GENESIS.ALLOC filtered by shard. In test_config.json only chain 2 has
+	// allocations (3 addresses, all with shard bits 0). With SHARD_SIZE=2 they all
+	// belong to shard 0, so shard 1 is filtered down to none.
+	shard0 := uint32(2)<<16 | 2 | 0
+	shard1 := uint32(2)<<16 | 2 | 1
+	if got := len(q.shards[shard0].Genesis.Alloc); got != 3 {
+		t.Errorf("chain 2 shard 0 alloc count = %d, want 3", got)
+	}
+	if got := len(q.shards[shard1].Genesis.Alloc); got != 0 {
+		t.Errorf("chain 2 shard 1 alloc count = %d, want 0 (filtered out)", got)
+	}
+}
+
 func TestShardGenesis(t *testing.T) {
 	var (
 		shardGensis ShardGenesis

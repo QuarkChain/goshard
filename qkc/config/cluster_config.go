@@ -228,7 +228,23 @@ func (q *QuarkChainConfig) UnmarshalJSON(input []byte) error {
 			shardCfg := NewShardConfig(cfg)
 			shardCfg.SetRootConfig(q.Root)
 			shardCfg.ShardID = shardID
-			shardCfg.CoinbaseAddress = chainCfg.CoinbaseAddress
+			// Follow pyquarkchain (ClusterConfig.from_dict): the per-shard config is
+			// derived from the chain config by (1) rewriting the coinbase into this
+			// shard and (2) filtering GENESIS.ALLOC down to the addresses that belong
+			// to this shard. goquarkchain's UnmarshalJSON does neither (it copies the
+			// chain coinbase and the full alloc verbatim), but the goshard slave shares
+			// its config with a pyquarkchain master, so the per-shard config must be
+			// derived exactly as pyquarkchain derives it.
+			shardCfg.CoinbaseAddress = chainCfg.CoinbaseAddress.AddressInShard(shardCfg.GetFullShardId())
+			if chainCfg.Genesis != nil && shardCfg.Genesis != nil {
+				alloc := make(map[account.Address]Allocation)
+				for addr, allocation := range chainCfg.Genesis.Alloc {
+					if addr.FullShardKey&(chainCfg.ShardSize-1) == shardID {
+						alloc[addr] = allocation
+					}
+				}
+				shardCfg.Genesis.Alloc = alloc
+			}
 			q.shards[shardCfg.GetFullShardId()] = shardCfg
 		}
 	}
