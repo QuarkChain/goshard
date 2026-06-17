@@ -148,7 +148,7 @@ type QuarkChainConfig struct {
 	TransactionQueueSizeLimitPerShard     uint64      `json:"TRANSACTION_QUEUE_SIZE_LIMIT_PER_SHARD"`
 	BlockExtraDataSizeLimit               uint32      `json:"BLOCK_EXTRA_DATA_SIZE_LIMIT"`
 	GuardianPublicKey                     []byte      `json:"-"`
-	RootSignerPrivateKey                  []byte      `json:"_"`
+	RootSignerPrivateKey                  []byte      `json:"-"`
 	P2PProtocolVersion                    uint32      `json:"P2P_PROTOCOL_VERSION"`
 	P2PCommandSizeLimit                   uint32      `json:"P2P_COMMAND_SIZE_LIMIT"`
 	SkipRootDifficultyCheck               bool        `json:"SKIP_ROOT_DIFFICULTY_CHECK"`
