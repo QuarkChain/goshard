@@ -366,8 +366,8 @@ func (q *QuarkChainConfig) initAndValidate() {
 		}
 	}
 	for i := uint32(0); i < q.ChainSize; i++ {
-		if i != chainIDMap[i] {
-			panic(fmt.Sprintf("chain id is not right, target=%d, actual=%d", i, chainIDMap[i]))
+		if _, ok := chainIDMap[i]; !ok {
+			panic(fmt.Sprintf("chain id %d is missing from the configuration", i))
 		}
 	}
 }
