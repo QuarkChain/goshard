@@ -8,156 +8,164 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// SlaveRPC is the typed, business-level adapter for cluster communication.
-// It wraps Slave (protocol-level connection manager) and mirrors Python's
-// SlaveServer class in cluster/slave.py.
-//
-// Two directions:
-//
-//	INBOUND  —  handlers:  Master/Slave → this Slave  (Mode 1, 2)
-//	OUTBOUND —  send methods:  this Slave → Master/other Slaves  (Mode 1, 2)
-//
-// The Shard layer should use SlaveRPC exclusively; never touch Slave directly.
+// SlaveRPC is the single entry point for all cluster communication.
+// It encapsulates *Slave entirely — business code never touches the raw
+// protocol layer.
 //
 // Quick start:
 //
-//	s, _ := NewSlave(&Config{
+//	rpc, err := NewSlaveRPC(&Config{
 //	    MasterAddr:  "127.0.0.1:38291",
 //	    OwnBranches: []uint32{0, 1},
 //	    ListenAddr:  "0.0.0.0:38292",
 //	})
-//	defer s.Close()
+//	if err != nil { ... }
+//	defer rpc.Close()
 //
-//	rpc := NewSlaveRPC(s)
 //	rpc.RegisterHandlers() // inbound handlers (all modes)
-//	go rpc.Serve()         // blocks until fatal error
-//
-//	// Shard calls outbound methods:
-//	rpc.SendMinorBlockHeaderToMaster(ctx, params)
-//	rpc.BroadcastXshardTxList(ctx, txList)
+//	rpc.Serve()            // blocks until fatal error
 type SlaveRPC struct {
 	slave *Slave
 	log   log.Logger
 }
 
-func NewSlaveRPC(slave *Slave) *SlaveRPC {
+// NewSlaveRPC creates, connects, and initialises the underlying Slave.
+func NewSlaveRPC(cfg *Config) (*SlaveRPC, error) {
+	slave, err := NewSlave(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &SlaveRPC{
 		slave: slave,
 		log:   log.New("module", "slave-rpc"),
-	}
+	}, nil
 }
 
-func (s *SlaveRPC) Slave() *Slave { return s.slave }
-
 // =========================================================================
-// Side A — INBOUND: Handler registration
+// INBOUND handler registration — three groups matching Python's opcode maps
 // =========================================================================
 //
-// What Master (or another Slave) sends to THIS slave.
+//	Python                    Go method                  Direction
+//	MASTER_OP_RPC_MAP         RegisterMasterHandlers     Master → Slave (Mode 1)
+//	MASTER_OP_NONRPC_MAP      (same)                     Master → Slave, no response
+//	SLAVE_OP_RPC_MAP          SetXshardHandlers           Other Slave → This Slave (Mode 2)
+//	OP_NONRPC_MAP + OP_RPC_MAP  SetPeerHandlers           Peer → Master → Slave (Mode 3)
 //
-// Python equivalents:
-//   MASTER_OP_RPC_MAP     —  master → slave (mode 1)
-//   MASTER_OP_NONRPC_MAP  —  master → slave, fire-and-forget (mode 1)
-//   SLAVE_OP_RPC_MAP      —  other slave → this slave (mode 2)
-//
-// # Mode mapping
-//
-//	Mode 1  Master → Slave        →  handles OP_PING, OP_ADD_ROOT_BLOCK_REQUEST, …
-//	Mode 2  Slave → Slave         →  handles OP_PING (xshard), OP_ADD_XSHARD_TX_LIST_REQUEST
-//	Mode 3  Peer → Master → Slave →  NOT registered here; per-PeerConn via RegisterPeerHandler()
+// RESPONSE opcodes (OP_PONG, OP_CONNECT_TO_SLAVES_RESPONSE, …) are NOT
+// registered — MasterConn.Handle() auto-generates them as request+1.
+// See protocol.go for the full opcode reference.
 
-// RegisterHandlers registers all INBOUND handlers (master commands + xshard + peer).
+// RegisterHandlers registers all INBOUND handlers for all three modes.
 // Call once before Serve().
 func (s *SlaveRPC) RegisterHandlers() {
-	// —— Master → Slave (MASTER_OP_RPC_MAP + MASTER_OP_NONRPC_MAP) ——
+
+	// =====================================================================
+	// Group 1: MASTER_OP_RPC_MAP + MASTER_OP_NONRPC_MAP
+	//   Mode 1, Master → Slave (cluster_peer_id == 0)
+	//   Arrives on MasterConn, dispatched by MasterConn.Handle().
+	//   Python: cluster/slave.py  lines 715-805
+	// =====================================================================
+
 	s.slave.RegisterMasterHandlers(map[byte]MasterHandler{
+
+		// -- Operational (implemented) --
 		OP_PING:                      s.handlePing,
 		OP_CONNECT_TO_SLAVES_REQUEST: s.handleConnectToSlaves,
 		OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST:  s.handleCreateClusterPeerConnection,
-		OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND: s.handleDestroyClusterPeerConnection,
+		OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND: s.handleDestroyClusterPeerConnection, // NON-RPC
 
-		OP_MINE_REQUEST:   s.stub("MINE_REQUEST"),
-		OP_GEN_TX_REQUEST: s.stub("GEN_TX_REQUEST"),
+		// -- Mining / test (stubs) --
+		OP_MINE_REQUEST:   s.stub(),
+		OP_GEN_TX_REQUEST: s.stub(),
 
-		OP_ADD_ROOT_BLOCK_REQUEST:          s.stub("ADD_ROOT_BLOCK_REQUEST"),
-		OP_ADD_MINOR_BLOCK_REQUEST:         s.stub("ADD_MINOR_BLOCK_REQUEST"),
-		OP_SYNC_MINOR_BLOCK_LIST_REQUEST:   s.stub("SYNC_MINOR_BLOCK_LIST_REQUEST"),
-		OP_CHECK_MINOR_BLOCK_REQUEST:       s.stub("CHECK_MINOR_BLOCK_REQUEST"),
-		OP_GET_UNCONFIRMED_HEADERS_REQUEST: s.stub("GET_UNCONFIRMED_HEADERS_REQUEST"),
+		// -- Blockchain updates (stubs) --
+		OP_ADD_ROOT_BLOCK_REQUEST:          s.stub(),
+		OP_ADD_MINOR_BLOCK_REQUEST:         s.stub(),
+		OP_SYNC_MINOR_BLOCK_LIST_REQUEST:   s.stub(),
+		OP_CHECK_MINOR_BLOCK_REQUEST:       s.stub(),
+		OP_GET_UNCONFIRMED_HEADERS_REQUEST: s.stub(),
 
-		OP_GET_ECO_INFO_LIST_REQUEST:               s.stub("GET_ECO_INFO_LIST_REQUEST"),
-		OP_GET_NEXT_BLOCK_TO_MINE_REQUEST:          s.stub("GET_NEXT_BLOCK_TO_MINE_REQUEST"),
-		OP_GET_ACCOUNT_DATA_REQUEST:                s.stub("GET_ACCOUNT_DATA_REQUEST"),
-		OP_ADD_TRANSACTION_REQUEST:                 s.stub("ADD_TRANSACTION_REQUEST"),
-		OP_EXECUTE_TRANSACTION_REQUEST:             s.stub("EXECUTE_TRANSACTION_REQUEST"),
-		OP_GET_TRANSACTION_RECEIPT_REQUEST:         s.stub("GET_TRANSACTION_RECEIPT_REQUEST"),
-		OP_GET_MINOR_BLOCK_REQUEST:                 s.stub("GET_MINOR_BLOCK_REQUEST"),
-		OP_GET_TRANSACTION_REQUEST:                 s.stub("GET_TRANSACTION_REQUEST"),
-		OP_GET_TRANSACTION_LIST_BY_ADDRESS_REQUEST: s.stub("GET_TRANSACTION_LIST_BY_ADDRESS_REQUEST"),
-		OP_GET_ALL_TRANSACTIONS_REQUEST:            s.stub("GET_ALL_TRANSACTIONS_REQUEST"),
-		OP_GET_LOG_REQUEST:                         s.stub("GET_LOG_REQUEST"),
-		OP_ESTIMATE_GAS_REQUEST:                    s.stub("ESTIMATE_GAS_REQUEST"),
-		OP_GET_STORAGE_REQUEST:                     s.stub("GET_STORAGE_REQUEST"),
-		OP_GET_CODE_REQUEST:                        s.stub("GET_CODE_REQUEST"),
-		OP_GAS_PRICE_REQUEST:                       s.stub("GAS_PRICE_REQUEST"),
-		OP_GET_WORK_REQUEST:                        s.stub("GET_WORK_REQUEST"),
-		OP_SUBMIT_WORK_REQUEST:                     s.stub("SUBMIT_WORK_REQUEST"),
-		OP_GET_ROOT_CHAIN_STAKES_REQUEST:           s.stub("GET_ROOT_CHAIN_STAKES_REQUEST"),
-		OP_GET_TOTAL_BALANCE_REQUEST:               s.stub("GET_TOTAL_BALANCE_REQUEST"),
+		// -- Blockchain queries (stubs) --
+		OP_GET_ECO_INFO_LIST_REQUEST:               s.stub(),
+		OP_GET_NEXT_BLOCK_TO_MINE_REQUEST:          s.stub(),
+		OP_GET_ACCOUNT_DATA_REQUEST:                s.stub(),
+		OP_ADD_TRANSACTION_REQUEST:                 s.stub(),
+		OP_EXECUTE_TRANSACTION_REQUEST:             s.stub(),
+		OP_GET_TRANSACTION_RECEIPT_REQUEST:         s.stub(),
+		OP_GET_MINOR_BLOCK_REQUEST:                 s.stub(),
+		OP_GET_TRANSACTION_REQUEST:                 s.stub(),
+		OP_GET_TRANSACTION_LIST_BY_ADDRESS_REQUEST: s.stub(),
+		OP_GET_ALL_TRANSACTIONS_REQUEST:            s.stub(),
+		OP_GET_LOG_REQUEST:                         s.stub(),
+		OP_ESTIMATE_GAS_REQUEST:                    s.stub(),
+		OP_GET_STORAGE_REQUEST:                     s.stub(),
+		OP_GET_CODE_REQUEST:                        s.stub(),
+		OP_GAS_PRICE_REQUEST:                       s.stub(),
+		OP_GET_WORK_REQUEST:                        s.stub(),
+		OP_SUBMIT_WORK_REQUEST:                     s.stub(),
+		OP_GET_ROOT_CHAIN_STAKES_REQUEST:           s.stub(),
+		OP_GET_TOTAL_BALANCE_REQUEST:               s.stub(),
 	})
 
-	// —— Other Slave → This Slave (SLAVE_OP_RPC_MAP, mode 2) ——
-	s.RegisterXshardHandlers()
+	// =====================================================================
+	// Group 2: SLAVE_OP_RPC_MAP
+	//   Mode 2, Other Slave → This Slave (direct xshard TCP)
+	//   Arrives on XshardConn, dispatched by XshardConn.readLoop().
+	//   Applied to every outbound and inbound XshardConn by
+	//   ConnectToSlaves() / startXshardServer().
+	//   Python: cluster/slave.py  lines 929-941
+	// =====================================================================
 
-	// —— Peer → Master → Slave (CommandOp, mode 3) ——
-	s.RegisterPeerHandlers()
-}
-
-// RegisterPeerHandlers registers the peer P2P command handlers (mode 3).
-//
-// These handle CommandOp messages that originate from external P2P peers,
-// are forwarded by Master through the cluster_peer_id multiplexing mechanism,
-// and arrive on PeerConn (not MasterConn).
-//
-// Python equivalents: OP_NONRPC_MAP + OP_RPC_MAP in cluster/shard.py
-//
-//	CommandOp.NEW_MINOR_BLOCK_HEADER_LIST            → stub
-//	CommandOp.NEW_TRANSACTION_LIST                   → stub
-//	CommandOp.NEW_BLOCK_MINOR                        → stub
-//	CommandOp.GET_MINOR_BLOCK_LIST_REQUEST           → stub
-//	CommandOp.GET_MINOR_BLOCK_HEADER_LIST_REQUEST    → stub
-//	CommandOp.GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST → stub
-func (s *SlaveRPC) RegisterPeerHandlers() {
-	s.slave.SetPeerHandlers(map[byte]MasterHandler{
-		OP_NEW_MINOR_BLOCK_HEADER_LIST:                   s.stub("NEW_MINOR_BLOCK_HEADER_LIST"),
-		OP_NEW_TRANSACTION_LIST:                          s.stub("NEW_TRANSACTION_LIST"),
-		OP_NEW_BLOCK_MINOR:                               s.stub("NEW_BLOCK_MINOR"),
-		OP_GET_MINOR_BLOCK_LIST_REQUEST:                  s.stub("GET_MINOR_BLOCK_LIST_REQUEST"),
-		OP_GET_MINOR_BLOCK_HEADER_LIST_REQUEST:           s.stub("GET_MINOR_BLOCK_HEADER_LIST_REQUEST"),
-		OP_GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST: s.stub("GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST"),
-	})
-}
-
-// RegisterXshardHandlers registers only the SLAVE_OP_RPC_MAP handlers (mode 2).
-// Called automatically by RegisterHandlers().  Exported separately for tests
-// that only need xshard communication without a full master connection.
-func (s *SlaveRPC) RegisterXshardHandlers() {
 	s.slave.SetXshardHandlers(map[byte]MasterHandler{
-		OP_PING:                             s.handleXshardPing,
-		OP_ADD_XSHARD_TX_LIST_REQUEST:       s.stub("ADD_XSHARD_TX_LIST_REQUEST"),
-		OP_BATCH_ADD_XSHARD_TX_LIST_REQUEST: s.stub("BATCH_ADD_XSHARD_TX_LIST_REQUEST"),
+		OP_PING:                             s.handleXshardPing, // real — mutual identification
+		OP_ADD_XSHARD_TX_LIST_REQUEST:       s.stub(),           // stub — needs CrossShardTransactionList
+		OP_BATCH_ADD_XSHARD_TX_LIST_REQUEST: s.stub(),
 	})
+
+	// =====================================================================
+	// Group 3: OP_NONRPC_MAP + OP_RPC_MAP (peer P2P commands)
+	//   Mode 3, External Peer → Master → Dispatcher → PeerConn → Shard
+	//   Arrives on MasterConn with cluster_peer_id != 0, dispatched by
+	//   Dispatcher.Dispatch() → PeerConn.HandleFrame().
+	//   Applied to every PeerConn created by HandleCreateClusterPeerConnection().
+	//   Python: cluster/shard.py  lines 329-349
+	// =====================================================================
+
+	s.slave.SetPeerHandlers(map[byte]MasterHandler{
+		// NON-RPC (fire-and-forget)
+		OP_NEW_MINOR_BLOCK_HEADER_LIST: s.stub(), // peer notifying us about a new minor block header
+		OP_NEW_TRANSACTION_LIST:        s.stub(), // peer broadcasting transactions
+		OP_NEW_BLOCK_MINOR:             s.stub(), // peer announcing a new minor block
+		// RPC (request → response)
+		OP_GET_MINOR_BLOCK_LIST_REQUEST:                  s.stub(),
+		OP_GET_MINOR_BLOCK_HEADER_LIST_REQUEST:           s.stub(),
+		OP_GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST: s.stub(),
+	})
+}
+
+// RegisterPeerHandler sets (or overrides) a handler for a peer-shard P2P
+// CommandOp.  It applies to all existing PeerConns on the given branch,
+// and persists so future PeerConns created by HandleCreateClusterPeerConnection
+// also get it.
+//
+// Shard layer calls this once per branch at initialisation time to replace
+// the stub handlers with real implementations.
+func (s *SlaveRPC) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHandler) {
+	s.slave.RegisterPeerHandler(branch, opcode, handler)
 }
 
 // stub returns a handler that logs "not implemented" and returns ErrNotImplemented.
-func (s *SlaveRPC) stub(name string) MasterHandler {
+func (s *SlaveRPC) stub() MasterHandler {
 	return func(frame *Frame) ([]byte, error) {
-		s.log.Debug("cluster RPC not implemented", "op", name, "opcode", frame.Opcode)
+		s.log.Debug("cluster RPC not implemented", "opcode", frame.Opcode)
 		return nil, ErrNotImplemented
 	}
 }
 
-// ── Master → Slave handlers ───────────────────────────────────────────
+// ── Group 1 handler implementations: Master → Slave (Mode 1) ────────────
+//
+// These handle frames received on MasterConn with cluster_peer_id == 0.
+// See RegisterHandlers() Group 1 for the full list.
 
 func (s *SlaveRPC) handlePing(frame *Frame) ([]byte, error) {
 	var req PingRequest
@@ -166,7 +174,6 @@ func (s *SlaveRPC) handlePing(frame *Frame) ([]byte, error) {
 		return nil, err
 	}
 	s.log.Debug("received PING from master", "id", string(req.ID), "shards", len(req.FullShardIDList))
-	// TODO: when Shard exists, call create_shards(ping.root_tip)
 	return serialize.SerializeToBytes(&PongResponse{
 		ID:              req.ID,
 		FullShardIDList: req.FullShardIDList,
@@ -188,10 +195,16 @@ func (s *SlaveRPC) handleDestroyClusterPeerConnection(frame *Frame) ([]byte, err
 	return s.slave.HandleDestroyClusterPeerConnection(frame)
 }
 
-// ── Other Slave → This Slave handlers (mode 2, xshard TCP) ────────────
+// ── Group 2 handler implementations: Other Slave → This Slave (Mode 2) ──
+//
+// These handle frames received on XshardConn (direct TCP to another slave).
+// See RegisterHandlers() Group 2 for the full list.
+//
+// Group 3 handlers (Mode 3, Peer → Master → Slave) are NOT declared here.
+// They are registered via SetPeerHandlers in RegisterHandlers(), applied to
+// every PeerConn by HandleCreateClusterPeerConnection(), and dispatched by
+// Dispatcher.Dispatch() → PeerConn.HandleFrame().
 
-// handleXshardPing handles OP_PING from another slave on a direct xshard
-// connection.  Used for mutual identification after TCP connect.
 func (s *SlaveRPC) handleXshardPing(frame *Frame) ([]byte, error) {
 	var req PingRequest
 	if err := serialize.Deserialize(serialize.NewByteBuffer(frame.Payload), &req); err != nil {
@@ -199,7 +212,6 @@ func (s *SlaveRPC) handleXshardPing(frame *Frame) ([]byte, error) {
 		return nil, err
 	}
 	s.log.Debug("received xshard PING", "remote_id", string(req.ID), "remote_shards", req.FullShardIDList)
-	// TODO: index connection in pool by fullShardID (Python: SlaveConnectionManager._add_slave_connection)
 	return serialize.SerializeToBytes(&PongResponse{
 		ID:              req.ID,
 		FullShardIDList: req.FullShardIDList,
@@ -207,38 +219,28 @@ func (s *SlaveRPC) handleXshardPing(frame *Frame) ([]byte, error) {
 }
 
 // =========================================================================
-// Side B — OUTBOUND: Typed send methods (Shard → SlaveRPC → wire)
+// OUTBOUND — typed send methods (Shard calls these)
 // =========================================================================
 //
-// These are the methods that Shard calls.  Python equivalents (SlaveServer):
+//	Python                                    Go                        Direction
+//	send_minor_block_header_to_master(…)      SendMinorBlockHeaderToMaster    → Master (Mode 1)
+//	broadcast_xshard_tx_list(…)               BroadcastXshardTxList          → Other Slave (Mode 2)
+//	batch_broadcast_xshard_tx_list(…)         BatchBroadcastXshardTxList     → Other Slave (Mode 2)
+//	send_minor_block_header_list_to_master(…) SendMinorBlockHeaderListToMaster → Master (Mode 1)
 //
-//	Python                                           Go                        Direction
-//	send_minor_block_header_to_master(…)             SendMinorBlockHeaderToMaster    → Master (mode 1)
-//	broadcast_xshard_tx_list(…)                      BroadcastXshardTxList          → other Slave (mode 2)
-//	batch_broadcast_xshard_tx_list(…)                BatchBroadcastXshardTxList     → other Slave (mode 2)
-//	send_minor_block_header_list_to_master(…)        SendMinorBlockHeaderListToMaster → Master (mode 1)
-//
-// In Python, broadcast_xshard_tx_list (mode 2) and send_minor_block_header_to_master
-// (mode 1) are always called together when a block is produced.  They are separate
-// operations: cross-shard tx data goes directly Slave→Slave; master gets notified
-// about the block header (not the xshard tx content).
+// broadcast_xshard_tx_list (Mode 2) and send_minor_block_header_to_master
+// (Mode 1) are called together when a block is produced.  They are separate:
+// xshard data goes directly Slave→Slave; master only learns about the block
+// header.
 
 // ====================================
 // Mode 1: This Slave → Master
 // ====================================
 
-// SendMinorBlockHeaderToMaster notifies master that a minor block was appended.
-//
-// Python: SlaveServer.send_minor_block_header_to_master().
-// Sent via master RPC (MasterConn.SendRPC), not xshard.
 func (s *SlaveRPC) SendMinorBlockHeaderToMaster(ctx context.Context) error {
 	return ErrNotImplemented // TODO: implement when MinorBlockHeader type is ported
 }
 
-// SendMinorBlockHeaderListToMaster notifies master about a batch of minor blocks.
-//
-// Python: SlaveServer.send_minor_block_header_list_to_master().
-// Sent via master RPC (MasterConn.SendRPC), not xshard.
 func (s *SlaveRPC) SendMinorBlockHeaderListToMaster(ctx context.Context) error {
 	return ErrNotImplemented // TODO: implement when MinorBlockHeader type is ported
 }
@@ -247,32 +249,10 @@ func (s *SlaveRPC) SendMinorBlockHeaderListToMaster(ctx context.Context) error {
 // Mode 2: This Slave → Other Slave
 // ====================================
 
-// BroadcastXshardTxList sends cross-shard transaction deposits to the slaves
-// that own the target shards.
-//
-// Python: SlaveServer.broadcast_xshard_tx_list().
-//
-// This is mode 2 (Slave↔Slave direct TCP).  Master is NOT involved — xshard
-// data goes directly through XshardConn.  Master only learns about the
-// resulting block later via SendMinorBlockHeaderToMaster (a separate call).
-//
-// Internal flow (matching Python):
-//  1. Group transactions by target fullShardID
-//  2. Local shards  →  ShardState.add_cross_shard_tx_list_by_minor_block_hash()
-//  3. Remote shards →  XshardConn via xshardPool.SendRPC()
-//
-// TODO: implement when CrossShardTransactionDeposit, MinorBlockHeader types ported.
 func (s *SlaveRPC) BroadcastXshardTxList(ctx context.Context) error {
-	return ErrNotImplemented
+	return ErrNotImplemented // TODO: implement when CrossShardTransactionDeposit type is ported
 }
 
-// BatchBroadcastXshardTxList sends batches of cross-shard transactions from
-// multiple blocks to the target shards' slaves.
-//
-// Python: SlaveServer.batch_broadcast_xshard_tx_list().
-// Same mode 2 as BroadcastXshardTxList, but optimized for multiple blocks.
-//
-// TODO: implement when business types are ported.
 func (s *SlaveRPC) BatchBroadcastXshardTxList(ctx context.Context) error {
 	return ErrNotImplemented
 }
@@ -281,8 +261,5 @@ func (s *SlaveRPC) BatchBroadcastXshardTxList(ctx context.Context) error {
 // Lifecycle
 // =========================================================================
 
-// Serve starts the slave and blocks until a fatal error occurs.
 func (s *SlaveRPC) Serve() error { return s.slave.Serve() }
-
-// Close shuts down all connections.
-func (s *SlaveRPC) Close() { s.slave.Close() }
+func (s *SlaveRPC) Close()       { s.slave.Close() }

@@ -6,6 +6,39 @@
 //	0x00 - 0x14  CommandOp   (peer-shard P2P, cluster_peer_id != 0)
 //	0x81 - 0xC4  ClusterOp   (master-slave + xshard, cluster_peer_id == 0)
 //	CLUSTER_OP_BASE = 128 in pyquarkchain rpc.py
+//
+// # REQUEST vs RESPONSE opcodes
+//
+// Every ClusterOp comes in REQUEST/RESPONSE pairs:  RESPONSE = REQUEST + 1.
+//
+//	OP_PING     = 0x81  (REQUEST — needs handler registration)
+//	OP_PONG     = 0x82  (RESPONSE — auto-generated, no handler needed)
+//
+// MasterConn.Handle() auto-generates the response opcode:
+//
+//	resp.Opcode = frame.Opcode + 1
+//
+// The RESPONSE constants exist for documentation, type-checking, and
+// response-matching on the sender side.  They are NOT registered as
+// handlers — only REQUEST opcodes need handler registration.
+//
+// # Handler registration map
+//
+// Who handles which opcodes:
+//
+//	ClusterOp  REQUEST        →  master→slave    → RegisterMasterHandlers()  [30 opcodes]
+//	ClusterOp  REQUEST        →  slave↔slave     → SetXshardHandlers()       [3 opcodes]
+//	CommandOp  (6 opcodes)    →  peer→master→slave → SetPeerHandlers()       [6 opcodes]
+//
+// The remaining CommandOp codes (HELLO, GET_PEER_LIST_REQUEST,
+// GET_ROOT_BLOCK_HEADER_LIST_REQUEST, PING_P2P, PONG_P2P, NEW_ROOT_BLOCK,
+// GET_ROOT_BLOCK_LIST_REQUEST, GET_ROOT_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST)
+// are handled by the Python Master's Peer class (simple_network.py:362-388)
+// for inter-cluster P2P communication.  They never reach the Go slave.
+//
+//	Master (Peer) handles:  HELLO, GET_PEER_LIST, GET_ROOT_BLOCK_*, PING_P2P, NEW_ROOT_BLOCK
+//	Master forwards to Slaves:  NEW_MINOR_BLOCK_HEADER_LIST, NEW_TRANSACTION_LIST, NEW_BLOCK_MINOR
+//	                                 + 3 GET_MINOR_BLOCK_* RPC requests
 package cluster
 
 // =============================================================================
@@ -103,27 +136,50 @@ const (
 // =============================================================================
 // CommandOp codes (peer-shard P2P, cluster_peer_id != 0)
 // Wire values: 0x00 - 0x14
+//
+// OWNERSHIP:
+//
+//	Master-only (handled by Python Master Peer, simple_network.py):
+//	  HELLO, GET_PEER_LIST, GET_ROOT_BLOCK_*, PING_P2P, PONG_P2P, NEW_ROOT_BLOCK
+//	Master forwards → Slave (handled by Go Slave's PeerConn):
+//	  NEW_MINOR_BLOCK_HEADER_LIST, NEW_TRANSACTION_LIST, NEW_BLOCK_MINOR
+//	  GET_MINOR_BLOCK_LIST_REQUEST, GET_MINOR_BLOCK_HEADER_LIST_REQUEST,
+//	  GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST
+//
 // =============================================================================
 const (
-	OP_HELLO                                          = 0x00 // CommandOp.HELLO
-	OP_NEW_MINOR_BLOCK_HEADER_LIST                    = 0x01 // CommandOp.NEW_MINOR_BLOCK_HEADER_LIST (NON-RPC)
-	OP_NEW_TRANSACTION_LIST                           = 0x02 // CommandOp.NEW_TRANSACTION_LIST (NON-RPC)
-	OP_GET_PEER_LIST_REQUEST                          = 0x03 // CommandOp.GET_PEER_LIST_REQUEST
-	OP_GET_PEER_LIST_RESPONSE                         = 0x04 // CommandOp.GET_PEER_LIST_RESPONSE
-	OP_GET_ROOT_BLOCK_HEADER_LIST_REQUEST             = 0x05
-	OP_GET_ROOT_BLOCK_HEADER_LIST_RESPONSE            = 0x06
-	OP_GET_ROOT_BLOCK_LIST_REQUEST                    = 0x07
-	OP_GET_ROOT_BLOCK_LIST_RESPONSE                   = 0x08
-	OP_GET_MINOR_BLOCK_LIST_REQUEST                   = 0x09
-	OP_GET_MINOR_BLOCK_LIST_RESPONSE                  = 0x0A
-	OP_GET_MINOR_BLOCK_HEADER_LIST_REQUEST            = 0x0B
-	OP_GET_MINOR_BLOCK_HEADER_LIST_RESPONSE           = 0x0C
-	OP_NEW_BLOCK_MINOR                                = 0x0D // CommandOp.NEW_BLOCK_MINOR (NON-RPC)
-	OP_PING_P2P                                       = 0x0E // CommandOp.PING
-	OP_PONG_P2P                                       = 0x0F // CommandOp.PONG
-	OP_GET_ROOT_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST   = 0x10
-	OP_GET_ROOT_BLOCK_HEADER_LIST_WITH_SKIP_RESPONSE  = 0x11
-	OP_NEW_ROOT_BLOCK                                 = 0x12 // NON-RPC
+	// ── Master-only (never forwarded to Slave) ──
+	OP_HELLO = 0x00 // CommandOp.HELLO
+
+	// ── Master → Slave (forwarded, NON-RPC) ──
+	OP_NEW_MINOR_BLOCK_HEADER_LIST = 0x01 // CommandOp.NEW_MINOR_BLOCK_HEADER_LIST (NON-RPC)
+	OP_NEW_TRANSACTION_LIST        = 0x02 // CommandOp.NEW_TRANSACTION_LIST (NON-RPC)
+
+	// ── Master-only ──
+	OP_GET_PEER_LIST_REQUEST               = 0x03 // CommandOp.GET_PEER_LIST_REQUEST
+	OP_GET_PEER_LIST_RESPONSE              = 0x04 // CommandOp.GET_PEER_LIST_RESPONSE
+	OP_GET_ROOT_BLOCK_HEADER_LIST_REQUEST  = 0x05
+	OP_GET_ROOT_BLOCK_HEADER_LIST_RESPONSE = 0x06
+	OP_GET_ROOT_BLOCK_LIST_REQUEST         = 0x07
+	OP_GET_ROOT_BLOCK_LIST_RESPONSE        = 0x08
+
+	// ── Master → Slave (forwarded, RPC) ──
+	OP_GET_MINOR_BLOCK_LIST_REQUEST         = 0x09
+	OP_GET_MINOR_BLOCK_LIST_RESPONSE        = 0x0A
+	OP_GET_MINOR_BLOCK_HEADER_LIST_REQUEST  = 0x0B
+	OP_GET_MINOR_BLOCK_HEADER_LIST_RESPONSE = 0x0C
+
+	// ── Master → Slave (forwarded, NON-RPC) ──
+	OP_NEW_BLOCK_MINOR = 0x0D // CommandOp.NEW_BLOCK_MINOR (NON-RPC)
+
+	// ── Master-only ──
+	OP_PING_P2P                                      = 0x0E // CommandOp.PING
+	OP_PONG_P2P                                      = 0x0F // CommandOp.PONG
+	OP_GET_ROOT_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST  = 0x10
+	OP_GET_ROOT_BLOCK_HEADER_LIST_WITH_SKIP_RESPONSE = 0x11
+	OP_NEW_ROOT_BLOCK                                = 0x12 // NON-RPC
+
+	// ── Master → Slave (forwarded, RPC) ──
 	OP_GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST  = 0x13
 	OP_GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_RESPONSE = 0x14
 )

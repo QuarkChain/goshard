@@ -17,26 +17,24 @@
 //
 // # Entry point
 //
-//	s, _ := NewSlave(&Config{
+//	rpc, err := NewSlaveRPC(&Config{
 //	    MasterAddr:  "127.0.0.1:38291",
 //	    OwnBranches: []uint32{0, 1},
 //	    ListenAddr:  "0.0.0.0:38292",
 //	})
-//	defer s.Close()
+//	if err != nil { ... }
+//	defer rpc.Close()
 //
-//	rpc := NewSlaveRPC(s)   // typed business adapter (slave_rpc.go)
 //	rpc.RegisterHandlers()  // must be called before Serve()
 //	rpc.Serve()             // blocks until connection error
 //
 // # Two-layer design
 //
-//	Slave     —  protocol-level: raw *Frame, opcode bytes, payload []byte
-//	SlaveRPC  —  business-level: typed Go methods, serialization
+//	Slave     —  protocol-level: raw *Frame, opcode bytes, payload []byte  (internal)
+//	SlaveRPC  —  business-level: typed Go methods, serialization           (public)
 //
-// Slave deals in raw *Frame, opcode bytes, and payload []byte.
-// SlaveRPC wraps it with typed Go methods that serialize/deserialize
-// message structs from messages.go.  Business code (Shard, etc.) should use
-// SlaveRPC, not Slave directly.
+// Slave is internal to the cluster package.  Business code should use
+// SlaveRPC exclusively — it creates and manages Slave internally.
 package cluster
 
 import (
