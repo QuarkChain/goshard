@@ -142,7 +142,7 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 	// Handle() runs the handler in a goroutine, so we use a channel to synchronize.
 	createDone := make(chan struct{})
 	slave.RegisterMasterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, func(frame *Frame) ([]byte, error) {
-		slave.handleCreateClusterPeerConnection(frame)
+		slave.HandleCreateClusterPeerConnection(frame)
 		close(createDone)
 		return nil, nil
 	})
@@ -170,7 +170,7 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 	// Destroy peer connection
 	destroyDone := make(chan struct{})
 	slave.RegisterMasterHandler(OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND, func(frame *Frame) ([]byte, error) {
-		slave.handleDestroyClusterPeerConnection(frame)
+		slave.HandleDestroyClusterPeerConnection(frame)
 		close(destroyDone)
 		return nil, nil
 	})
@@ -214,7 +214,7 @@ func TestSlaveDispatcherRoutingEndToEnd(t *testing.T) {
 	// Create a peer connection first (synchronous, via callback)
 	createDone := make(chan struct{})
 	slave.RegisterMasterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, func(frame *Frame) ([]byte, error) {
-		slave.handleCreateClusterPeerConnection(frame)
+		slave.HandleCreateClusterPeerConnection(frame)
 		close(createDone)
 		return nil, nil
 	})

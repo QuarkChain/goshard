@@ -111,8 +111,8 @@ func NewSlave(cfg *Config) (*Slave, error) {
 func (s *Slave) registerDefaultHandlers() {
 	s.masterConn.RegisterHandler(OP_PING, s.handlePing)
 	s.masterConn.RegisterHandler(OP_CONNECT_TO_SLAVES_REQUEST, s.handleConnectToSlaves)
-	s.masterConn.RegisterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, s.handleCreateClusterPeerConnection)
-	s.masterConn.RegisterHandler(OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND, s.handleDestroyClusterPeerConnection)
+	s.masterConn.RegisterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, s.HandleCreateClusterPeerConnection)
+	s.masterConn.RegisterHandler(OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND, s.HandleDestroyClusterPeerConnection)
 }
 
 func (s *Slave) handlePing(frame *Frame) ([]byte, error) {
@@ -126,7 +126,7 @@ func (s *Slave) handleConnectToSlaves(frame *Frame) ([]byte, error) {
 	return []byte("OK"), nil
 }
 
-func (s *Slave) handleCreateClusterPeerConnection(frame *Frame) ([]byte, error) {
+func (s *Slave) HandleCreateClusterPeerConnection(frame *Frame) ([]byte, error) {
 	clusterPeerID := frame.Meta.ClusterPeerID
 
 	s.mu.Lock()
@@ -144,7 +144,7 @@ func (s *Slave) handleCreateClusterPeerConnection(frame *Frame) ([]byte, error) 
 	return []byte("OK"), nil
 }
 
-func (s *Slave) handleDestroyClusterPeerConnection(frame *Frame) ([]byte, error) {
+func (s *Slave) HandleDestroyClusterPeerConnection(frame *Frame) ([]byte, error) {
 	clusterPeerID := frame.Meta.ClusterPeerID
 
 	s.mu.Lock()
@@ -176,9 +176,21 @@ func (s *Slave) SendRPCToMaster(ctx context.Context, opcode byte, payload []byte
 	return s.masterConn.SendRPC(ctx, opcode, payload)
 }
 
+// MasterHandler is a handler function for master cluster RPC opcodes.
+// It receives the decoded frame and returns the response payload bytes.
+type MasterHandler = func(*Frame) ([]byte, error)
+
 // RegisterMasterHandler registers a handler for a master cluster RPC opcode.
 func (s *Slave) RegisterMasterHandler(opcode byte, handler func(*Frame) ([]byte, error)) {
 	s.masterConn.RegisterHandler(opcode, handler)
+}
+
+// RegisterMasterHandlers is a convenience method to register multiple handlers
+// at once. This avoids dozens of individual RegisterMasterHandler calls.
+func (s *Slave) RegisterMasterHandlers(handlers map[byte]MasterHandler) {
+	for opcode, handler := range handlers {
+		s.masterConn.RegisterHandler(opcode, handler)
+	}
 }
 
 // ── Peer communication (cluster_peer_id != 0, virtual) ───────────────────
