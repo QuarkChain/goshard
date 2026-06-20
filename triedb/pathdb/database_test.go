@@ -393,7 +393,7 @@ func (t *tester) generate(parent common.Hash, rawStorageKey bool) (common.Hash, 
 			dirties[addrHash] = struct{}{}
 
 			root := t.generateStorage(ctx, addr)
-			ctx.accounts[addrHash] = types.SlimAccountRLP(generateAccount(root))
+			ctx.accounts[addrHash] = mustEncodeAccount(generateAccount(root))
 			ctx.accountOrigin[addr] = nil
 			t.preimages[addrHash] = addr.Bytes()
 
@@ -411,9 +411,11 @@ func (t *tester) generate(parent common.Hash, rawStorageKey bool) (common.Hash, 
 			}
 			dirties[addrHash] = struct{}{}
 
-			acct, _ := types.FullAccount(account)
+			// account is in QKC trie format; decode with QKC-aware decoder.
+			acct := new(types.StateAccount)
+			_ = rlp.DecodeBytes(account, acct)
 			stRoot := t.mutateStorage(ctx, addr, acct.Root)
-			newAccount := types.SlimAccountRLP(generateAccount(stRoot))
+			newAccount := mustEncodeAccount(generateAccount(stRoot))
 
 			ctx.accounts[addrHash] = newAccount
 			ctx.accountOrigin[addr] = account
@@ -433,7 +435,9 @@ func (t *tester) generate(parent common.Hash, rawStorageKey bool) (common.Hash, 
 			dirties[addrHash] = struct{}{}
 			deleted[addr] = struct{}{}
 
-			acct, _ := types.FullAccount(account)
+			// account is in QKC trie format; decode with QKC-aware decoder.
+			acct := new(types.StateAccount)
+			_ = rlp.DecodeBytes(account, acct)
 			if acct.Root != types.EmptyRootHash {
 				t.clearStorage(ctx, addr, acct.Root)
 			}
@@ -453,7 +457,7 @@ func (t *tester) generate(parent common.Hash, rawStorageKey bool) (common.Hash, 
 
 			addrHash := crypto.Keccak256Hash(addr.Bytes())
 			root := t.resurrectStorage(ctx, addr, t.storages[addrHash])
-			ctx.accounts[addrHash] = types.SlimAccountRLP(generateAccount(root))
+			ctx.accounts[addrHash] = mustEncodeAccount(generateAccount(root))
 			if _, exist := ctx.accountOrigin[addr]; !exist {
 				ctx.accountOrigin[addr] = nil
 			}
@@ -1099,4 +1103,14 @@ func TestDatabaseIndexRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// mustEncodeAccount encodes a StateAccount using the QKC 6-element format,
+// matching the format stored in the state trie (via StateAccount.EncodeRLP).
+func mustEncodeAccount(acc types.StateAccount) []byte {
+	data, err := rlp.EncodeToBytes(&acc)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }

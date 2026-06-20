@@ -33,6 +33,7 @@ type StateAccount struct {
 	Balance  *uint256.Int
 	Root     common.Hash // merkle root of the storage trie
 	CodeHash []byte
+	MntBalances *TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -50,11 +51,16 @@ func (acct *StateAccount) Copy() *StateAccount {
 	if acct.Balance != nil {
 		balance = new(uint256.Int).Set(acct.Balance)
 	}
+	var mnt *TokenBalances
+	if acct.MntBalances != nil {
+		mnt = acct.MntBalances.Copy()
+	}
 	return &StateAccount{
-		Nonce:    acct.Nonce,
-		Balance:  balance,
-		Root:     acct.Root,
-		CodeHash: common.CopyBytes(acct.CodeHash),
+		Nonce:       acct.Nonce,
+		Balance:     balance,
+		Root:        acct.Root,
+		CodeHash:    common.CopyBytes(acct.CodeHash),
+		MntBalances: mnt,
 	}
 }
 

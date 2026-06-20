@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
@@ -41,16 +40,16 @@ func randomHash() common.Hash {
 	return hash
 }
 
-// randomAccount generates a random account and returns it RLP encoded.
+// randomAccount generates a random account and returns it in slim-RLP format,
+// which is the encoding used by the snapshot layer.
 func randomAccount() []byte {
-	a := &types.StateAccount{
+	a := types.StateAccount{
 		Balance:  uint256.NewInt(rand.Uint64()),
 		Nonce:    rand.Uint64(),
 		Root:     randomHash(),
 		CodeHash: types.EmptyCodeHash[:],
 	}
-	data, _ := rlp.EncodeToBytes(a)
-	return data
+	return types.SlimAccountRLP(a)
 }
 
 // randomAccountSet generates a set of random accounts with the given strings as

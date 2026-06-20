@@ -70,7 +70,7 @@ func testEthTransferLogs(t *testing.T, value uint64) {
 		addr1      = crypto.PubkeyToAddress(key1.PublicKey)
 		addr2      = common.HexToAddress("cafebabe") // caller
 		addr3      = common.HexToAddress("deadbeef") // callee
-		addr4      = common.HexToAddress("12345678") // selfdestruct target
+		_ = common.HexToAddress("12345678") // selfdestruct target (addr4, unused in QKC fork)
 		testEvent  = crypto.Keccak256Hash([]byte("TestEvent()"))
 		testEvent2 = crypto.Keccak256Hash([]byte("TestEvent2()"))
 		config     = *params.MergedTestChainConfig
@@ -118,21 +118,14 @@ func testEthTransferLogs(t *testing.T, value uint64) {
 		return data
 	}
 
+	// QKC fork: Transfer() does not emit EthTransferLog (Ethereum-specific EIP-7708).
+	// The SELFDESTRUCT opcode still emits EthTransferLog when IsAmsterdam (instructions.go).
+	addr4 := common.HexToAddress("12345678") // selfdestruct target
 	var expLogs = []*types.Log{
-		{
-			Address: params.SystemAddress,
-			Topics:  []common.Hash{params.EthTransferLogEvent, addr2hash(addr1), addr2hash(addr2)},
-			Data:    u256(value),
-		},
 		{
 			Address: addr2,
 			Topics:  []common.Hash{testEvent},
 			Data:    nil,
-		},
-		{
-			Address: params.SystemAddress,
-			Topics:  []common.Hash{params.EthTransferLogEvent, addr2hash(addr2), addr2hash(addr3)},
-			Data:    u256(value / 2),
 		},
 		{
 			Address: addr3,
@@ -140,14 +133,15 @@ func testEthTransferLogs(t *testing.T, value uint64) {
 			Data:    nil,
 		},
 		{
+			// SELFDESTRUCT transfers addr3's balance to addr4
 			Address: params.SystemAddress,
 			Topics:  []common.Hash{params.EthTransferLogEvent, addr2hash(addr3), addr2hash(addr4)},
 			Data:    u256(value / 2),
 		},
 	}
 	if value == 0 {
-		// no ETH transfer logs expected with zero value
-		expLogs = []*types.Log{expLogs[1], expLogs[3]}
+		// no SELFDESTRUCT ETH transfer log with zero value
+		expLogs = expLogs[:2]
 	}
 	for i, log := range expLogs {
 		log.BlockNumber = 1

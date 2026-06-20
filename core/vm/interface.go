@@ -36,6 +36,11 @@ type StateDB interface {
 	AddBalance(common.Address, *uint256.Int, tracing.BalanceChangeReason) uint256.Int
 	GetBalance(common.Address) *uint256.Int
 
+	// MNT (Multi Native Token) balance methods
+	GetMntBalance(common.Address, uint64) *uint256.Int
+	AddMntBalance(common.Address, *uint256.Int, uint64)
+	SubMntBalance(common.Address, *uint256.Int, uint64)
+
 	GetNonce(common.Address) uint64
 	SetNonce(common.Address, uint64, tracing.NonceChangeReason)
 

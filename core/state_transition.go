@@ -234,6 +234,9 @@ type Message struct {
 	// - From is not verified to be an EOA
 	// - GasLimit is not checked against the protocol defined tx gaslimit
 	SkipTransactionChecks bool
+
+	GasTokenID      uint64 // token used for gas (0 = default QKC, 35760)
+	TransferTokenID uint64 // token used for value transfer (0 = default QKC, 35760)
 }
 
 // TransactionToMessage converts a transaction into a Message.
@@ -413,8 +416,18 @@ func (st *stateTransition) buyGas() error {
 			}
 		}
 	}
-	if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
-		return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
+	gasTokenID := normaliseTokenID(st.msg.GasTokenID)
+	if gasTokenID == 35760 {
+		// QKC gas: check native balance
+		if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
+			return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
+		}
+	} else {
+		// Non-QKC gas token: check MNT balance
+		if have := st.state.GetMntBalance(st.msg.From, gasTokenID); have.Cmp(balanceCheck) < 0 {
+			return fmt.Errorf("%w: address %v MNT gas token %d have %v want %v",
+				ErrInsufficientFunds, st.msg.From.Hex(), gasTokenID, have, balanceCheck)
+		}
 	}
 	if err := st.gp.SubGas(st.msg.GasLimit); err != nil {
 		return err
@@ -426,7 +439,11 @@ func (st *stateTransition) buyGas() error {
 	st.gasRemaining = vm.NewGasBudget(st.msg.GasLimit)
 	st.initialBudget = st.gasRemaining.Copy()
 
-	st.state.SubBalance(st.msg.From, mgval, tracing.BalanceDecreaseGasBuy)
+	if gasTokenID == 35760 {
+		st.state.SubBalance(st.msg.From, mgval, tracing.BalanceDecreaseGasBuy)
+	} else {
+		st.state.SubMntBalance(st.msg.From, mgval, gasTokenID)
+	}
 	return nil
 }
 
@@ -593,7 +610,7 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 	if value == nil {
 		value = new(uint256.Int)
 	}
-	if !value.IsZero() && !st.evm.Context.CanTransfer(st.state, msg.From, value) {
+	if !value.IsZero() && !st.evm.Context.CanTransfer(st.state, msg.From, value, normaliseTokenID(msg.TransferTokenID)) {
 		return nil, fmt.Errorf("%w: address %v", ErrInsufficientFundsForTransfer, msg.From.Hex())
 	}
 
