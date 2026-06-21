@@ -45,6 +45,9 @@ const listFormatPrefix = byte(0x00)
 // Deserialization of this format returns an error; serialization is unsupported.
 const trieFormatPrefix = byte(0x01)
 
+// DefaultTokenID is the QKC token ID (= TokenIDEncode("QKC") = 35760).
+const DefaultTokenID = uint64(35760)
+
 // TokenBalancePair is a (TokenID, Balance) pair used in list-format encoding.
 type TokenBalancePair struct {
 	TokenID uint64
@@ -195,4 +198,3 @@ func (t *TokenBalances) serializeListFormat() ([]byte, error) {
 	copy(out[1:], encoded)
 	return out, nil
 }
-

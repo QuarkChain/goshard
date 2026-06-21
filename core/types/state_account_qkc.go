@@ -25,9 +25,6 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// qkcTokenID is the QuarkChain native token ID used for the primary balance.
-const qkcTokenID = uint64(35760)
-
 // qkcAccountRLP is the wire struct for QuarkChain's 6-element account format:
 // [Nonce, TokenBal(bytes), Root, CodeHash, FullShardKey(4B fixed), Optional].
 // TokenBal is stored as raw serialized bytes (matching pyquarkchain's `binary` type),
@@ -54,7 +51,7 @@ func mergeQKCTokenBalances(balance *uint256.Int, mnt *TokenBalances) *TokenBalan
 		}
 	}
 	if balance != nil && !balance.IsZero() {
-		merged.SetValue(balance, qkcTokenID)
+		merged.SetValue(balance, DefaultTokenID)
 	}
 	return merged
 }
@@ -104,9 +101,9 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 		}
 		if !tb.IsBlank() {
 			balMap := tb.GetBalanceMap()
-			if qkcBal, ok := balMap[qkcTokenID]; ok {
+			if qkcBal, ok := balMap[DefaultTokenID]; ok {
 				acct.Balance.Set(qkcBal)
-				delete(balMap, qkcTokenID)
+				delete(balMap, DefaultTokenID)
 			}
 			if len(balMap) > 0 {
 				acct.MntBalances = &TokenBalances{balances: balMap}

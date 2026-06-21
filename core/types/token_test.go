@@ -26,7 +26,7 @@ import (
 
 func TestTokenBalancesListFormat(t *testing.T) {
 	tb := NewEmptyTokenBalances()
-	tb.SetValue(uint256.NewInt(1000), 35760)
+	tb.SetValue(uint256.NewInt(1000), DefaultTokenID)
 	tb.SetValue(uint256.NewInt(500), 100)
 
 	data, err := tb.SerializeToBytes()
@@ -35,16 +35,16 @@ func TestTokenBalancesListFormat(t *testing.T) {
 
 	tb2, err := NewTokenBalancesFromBytes(data)
 	require.NoError(t, err)
-	assert.Equal(t, uint256.NewInt(1000), tb2.GetTokenBalance(35760))
+	assert.Equal(t, uint256.NewInt(1000), tb2.GetTokenBalance(DefaultTokenID))
 	assert.Equal(t, uint256.NewInt(500), tb2.GetTokenBalance(100))
 }
 
 func TestTokenBalancesIsBlank(t *testing.T) {
 	tb := NewEmptyTokenBalances()
 	assert.True(t, tb.IsBlank())
-	tb.SetValue(uint256.NewInt(0), 35760)
+	tb.SetValue(uint256.NewInt(0), DefaultTokenID)
 	assert.True(t, tb.IsBlank(), "zero balance is blank")
-	tb.SetValue(uint256.NewInt(1), 35760)
+	tb.SetValue(uint256.NewInt(1), DefaultTokenID)
 	assert.False(t, tb.IsBlank())
 }
 
@@ -71,10 +71,10 @@ func TestTokenBalancesFromBytesTrieFormatUnsupported(t *testing.T) {
 
 func TestTokenBalancesCopy(t *testing.T) {
 	tb := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
-		35760: uint256.NewInt(1e18),
+		DefaultTokenID: uint256.NewInt(1e18),
 		100:   uint256.NewInt(500),
 	})
 	cp := tb.Copy()
-	cp.SetValue(uint256.NewInt(0), 35760)
-	assert.Equal(t, uint256.NewInt(1e18), tb.GetTokenBalance(35760), "original unaffected")
+	cp.SetValue(uint256.NewInt(0), DefaultTokenID)
+	assert.Equal(t, uint256.NewInt(1e18), tb.GetTokenBalance(DefaultTokenID), "original unaffected")
 }

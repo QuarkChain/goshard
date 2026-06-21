@@ -29,9 +29,6 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// canTransferDefaultTokenID is the QKC token ID (= TokenIDEncode("QKC") = 35760).
-const canTransferDefaultTokenID = uint64(35760)
-
 // ChainContext supports retrieving headers and consensus parameters from the
 // current blockchain to be used during transaction processing.
 type ChainContext interface {
@@ -92,18 +89,10 @@ func NewEVMTxContext(msg *Message) vm.TxContext {
 		Origin:          msg.From,
 		GasPrice:        msg.GasPrice,
 		BlobHashes:      msg.BlobHashes,
-		GasTokenID:      normaliseTokenID(msg.GasTokenID),
-		TransferTokenID: normaliseTokenID(msg.TransferTokenID),
+		GasTokenID:      msg.GasTokenID,
+		TransferTokenID: msg.TransferTokenID,
 	}
 	return ctx
-}
-
-// normaliseTokenID maps 0 (unset) to the QKC default (35760).
-func normaliseTokenID(id uint64) uint64 {
-	if id == 0 {
-		return 35760
-	}
-	return id
 }
 
 // GetHashFn returns a GetHashFunc which retrieves header hashes by number
@@ -148,7 +137,7 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 // CanTransfer checks whether there are enough funds in the address' account to make a transfer.
 // This does not take the necessary gas in to account to make the transfer valid.
 func CanTransfer(db vm.StateDB, addr common.Address, amount *uint256.Int, tokenID uint64) bool {
-	if tokenID == 0 || tokenID == canTransferDefaultTokenID {
+	if tokenID == 0 || tokenID == types.DefaultTokenID {
 		return db.GetBalance(addr).Cmp(amount) >= 0
 	}
 	return db.GetMntBalance(addr, tokenID).Cmp(amount) >= 0
@@ -156,7 +145,7 @@ func CanTransfer(db vm.StateDB, addr common.Address, amount *uint256.Int, tokenI
 
 // Transfer subtracts amount from sender and adds amount to recipient using the given Db
 func Transfer(db vm.StateDB, sender, recipient common.Address, amount *uint256.Int, rules *params.Rules, tokenID uint64) {
-	if tokenID == 0 || tokenID == canTransferDefaultTokenID {
+	if tokenID == 0 || tokenID == types.DefaultTokenID {
 		db.SubBalance(sender, amount, tracing.BalanceChangeTransfer)
 		db.AddBalance(recipient, amount, tracing.BalanceChangeTransfer)
 		// QKC fork: Transfer() does not emit EthTransferLog (Ethereum-specific

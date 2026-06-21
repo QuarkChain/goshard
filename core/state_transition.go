@@ -416,7 +416,7 @@ func (st *stateTransition) buyGas() error {
 			}
 		}
 	}
-	gasTokenID := normaliseTokenID(st.msg.GasTokenID)
+	gasTokenID := st.msg.GasTokenID
 	if gasTokenID == 35760 {
 		// QKC gas: check native balance
 		if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
@@ -610,7 +610,7 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 	if value == nil {
 		value = new(uint256.Int)
 	}
-	if !value.IsZero() && !st.evm.Context.CanTransfer(st.state, msg.From, value, normaliseTokenID(msg.TransferTokenID)) {
+	if !value.IsZero() && !st.evm.Context.CanTransfer(st.state, msg.From, value, msg.TransferTokenID) {
 		return nil, fmt.Errorf("%w: address %v", ErrInsufficientFundsForTransfer, msg.From.Hex())
 	}
 
