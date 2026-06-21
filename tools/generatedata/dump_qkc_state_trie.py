@@ -39,12 +39,6 @@ except ImportError:
     print("ERROR: 'rlp' package not found. Install with: pip install rlp", file=sys.stderr)
     sys.exit(1)
 
-try:
-    from rocksdict import Rdict, Options
-except ImportError:
-    print("ERROR: 'rocksdict' package not found. Install with: pip install rocksdict", file=sys.stderr)
-    sys.exit(1)
-
 
 # ── constants ──────────────────────────────────────────────────────────────────
 BLANK_ROOT = bytes.fromhex("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
@@ -54,20 +48,53 @@ NIBBLE_TERMINATOR = 16
 TOKEN_ID_QKC = 35760  # token_id_encode("QKC")
 
 
+
 # ── DB wrapper ────────────────────────────────────────────────────────────────
+try:
+    from rocksdict import Rdict, Options, AccessType, DBCompressionType
+except ImportError:
+    print("ERROR: rocksdict not found. Install with: pip install rocksdict", file=sys.stderr)
+    sys.exit(1)
+
+
 class RawDb:
-    """Read-only wrapper around a RocksDB path."""
+    """Read-only wrapper around a pyquarkchain shard RocksDB.
+
+    Options mirror pyquarkchain's PersistentDb exactly so the comparator
+    and compression always match what wrote the database.
+    """
 
     def __init__(self, path: str):
         opts = Options(raw_mode=True)
-        opts.set_max_open_files(10000)
-        self._db = Rdict(path, opts)
+        opts.create_if_missing(False)
+        opts.set_max_open_files(100000)
+        opts.set_write_buffer_size(128 * 1024 * 1024)
+        opts.set_max_write_buffer_number(3)
+        opts.set_target_file_size_base(67108864)
+        opts.set_compression_type(DBCompressionType.snappy())
+        self._db = Rdict(path, opts, access_type=AccessType.read_only())
 
     def get(self, key: bytes):
         return self._db.get(key)
 
     def close(self):
         self._db.close()
+
+    def scan_key_prefixes(self, n: int = 30) -> dict:
+        from collections import Counter
+        counts: Counter = Counter()
+        samples: dict = {}
+        try:
+            for i, k in enumerate(self._db.keys()):
+                if i >= 10000:
+                    break
+                if isinstance(k, bytes):
+                    p = k[:4]
+                    counts[p] += 1
+                    samples.setdefault(p, k)
+        except Exception as ex:
+            return {f"<iteration failed: {ex}>": 0}
+        return {samples[p].hex(): counts[p] for p, _ in counts.most_common(n)}
 
 
 # ── nibble / HP encoding helpers ──────────────────────────────────────────────
@@ -229,24 +256,29 @@ def decode_account(leaf_value: bytes) -> dict:
 
 
 # ── block lookup ──────────────────────────────────────────────────────────────
+#
+# pyquarkchain DB key schema:
+#   b"mi_%d" % height   → 32-byte minor block hash at that height
+#   b"mblock_" + hash   → serialized full MinorBlock bytes
+
+
 def get_state_root_from_db(db: RawDb, height: int | None) -> tuple[bytes, dict]:
     """
-    Look up state root from the DB.
-    Returns (state_root_bytes, block_meta_dict).
-    Requires pyquarkchain on PYTHONPATH for MinorBlock deserialization.
+    Look up state root from a pyquarkchain shard RocksDB.
+    Scans backwards from `height` (default: latest) to find the nearest
+    height whose state trie is actually persisted in the DB (~every 128 blocks).
     """
     try:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../pyquarkchain"))
         from quarkchain.core import MinorBlock
     except ImportError:
         raise RuntimeError(
             "pyquarkchain not found on PYTHONPATH. "
-            "Either add pyquarkchain to PYTHONPATH or pass --state-root directly."
+            "Add pyquarkchain to PYTHONPATH or pass --state-root directly."
         )
 
-    # Find the block hash for the given height
+    # ── find starting hash ─────────────────────────────────────────────────────
     if height is None:
-        # Scan backwards from a high height to find the latest
+        # Scan backwards from a high number to find the latest stored block.
         raw_hash = None
         for h in range(10_000_000, -1, -1):
             raw_hash = db.get(b"mi_%d" % h)
@@ -254,18 +286,47 @@ def get_state_root_from_db(db: RawDb, height: int | None) -> tuple[bytes, dict]:
                 height = h
                 break
         if raw_hash is None:
-            raise RuntimeError("Could not find any minor block in the DB")
+            print("DEBUG: no 'mi_N' key found. Scanning DB key prefixes...", file=sys.stderr)
+            prefixes = db.scan_key_prefixes()
+            for k_hex, cnt in prefixes.items():
+                readable = bytes.fromhex(k_hex).decode("utf-8", errors="replace")
+                print(f"  prefix={k_hex}  readable={readable!r}  count={cnt}", file=sys.stderr)
+            raise RuntimeError(
+                "Could not find any minor block hash key ('mi_N') in DB.\n"
+                "Check --db-path and make sure pyquarkchain is on PYTHONPATH."
+            )
     else:
         raw_hash = db.get(b"mi_%d" % height)
         if raw_hash is None:
-            raise RuntimeError(f"Block at height {height} not found in DB")
+            raise RuntimeError(f"Block at height {height} not found (key: mi_{height})")
 
-    raw_block = db.get(b"mblock_" + raw_hash)
-    if raw_block is None:
-        raise RuntimeError(f"Block bytes not found for hash {raw_hash.hex()}")
+    # ── scan backwards to a height whose state trie is persisted ──────────────
+    start_height = height
+    block = None
+    state_root = None
+    while height >= 0:
+        raw_block = db.get(b"mblock_" + raw_hash)
+        if raw_block is not None:
+            block = MinorBlock.deserialize(raw_block)
+            state_root = block.meta.hash_evm_state_root
+            if state_root != BLANK_ROOT and db.get(state_root) is not None:
+                if height != start_height:
+                    print(
+                        f"  State trie not persisted at height {start_height}; "
+                        f"using height {height}",
+                        flush=True,
+                    )
+                break
 
-    block = MinorBlock.deserialize(raw_block)
-    state_root = block.meta.hash_evm_state_root
+        height -= 1
+        if height < 0:
+            raise RuntimeError(
+                "Could not find any persisted state trie. "
+                "The DB may be pruned."
+            )
+        raw_hash = db.get(b"mi_%d" % height)
+        if raw_hash is None:
+            continue  # no canonical hash at this height, keep stepping
 
     meta = {
         "height":      height,
