@@ -369,36 +369,6 @@ func (s *Slave) AddXshardConnection(target FullShardID, addr string) error {
 	return nil
 }
 
-// ── Queries ─────────────────────────────────────────────────────────────
-
-// OwnsBranch checks if this slave owns the given branch.
-func (s *Slave) OwnsBranch(branch uint32) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.peerConns[branch]
-	return ok
-}
-
-// MasterConn returns the underlying master connection.
-func (s *Slave) MasterConn() *MasterConn { return s.masterConn }
-
-// XshardPool returns the xshard connection pool.
-func (s *Slave) XshardPool() *XshardPool { return s.xshardPool }
-
-// Dispatcher returns the dispatcher.
-func (s *Slave) Dispatcher() *Dispatcher { return s.dispatcher }
-
-// Branches returns the branches owned by this slave.
-func (s *Slave) Branches() []uint32 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	branches := make([]uint32, 0, len(s.peerConns))
-	for b := range s.peerConns {
-		branches = append(branches, b)
-	}
-	return branches
-}
-
 // ── Lifecycle ───────────────────────────────────────────────────────────
 
 // Serve blocks until the master connection encounters a fatal error.

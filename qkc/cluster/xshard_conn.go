@@ -100,7 +100,7 @@ func (s *XshardConn) readLoop() {
 			if frame.RPCID != 0 && respPayload != nil {
 				resp := &Frame{
 					Meta:    frame.Meta,
-					Opcode:  frame.Opcode,
+					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
 					RPCID:   frame.RPCID,
 					Payload: respPayload,
 				}
