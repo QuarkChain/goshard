@@ -57,3 +57,7 @@ cmd/geth/geth
 cmd/rlpdump/rlpdump
 cmd/workload/workload
 cmd/keeper/keeper
+
+# tools: local test artifacts
+tools/verify_state/trie_dump.json
+tools/verify_state/*.exe

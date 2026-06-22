@@ -1,10 +1,10 @@
-// verify_trie_root loads a trie node store exported by dump_qkc_state_trie.py
+// verify_state loads a trie node store exported by dump_state/dump_qkc_state_trie.py
 // and recomputes the trie root hash, confirming goshard produces the same
 // result as the original goquarkchain chain.
 //
 // Usage:
 //
-//	go run ./tools/verify_trie_root --input trie_dump.json
+//	go run ./tools/verify_state --input trie_dump.json
 package main
 
 import (

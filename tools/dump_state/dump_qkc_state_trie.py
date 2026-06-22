@@ -19,8 +19,7 @@ Dependencies (install via pip):
     rocksdict
     rlp
 
-pyquarkchain must be on PYTHONPATH if --height lookup is needed
-(for MinorBlock deserialization).  Otherwise pass --state-root directly.
+No pyquarkchain import needed — MinorBlock bytes are parsed directly.
 """
 
 import argparse
@@ -28,6 +27,67 @@ import hashlib
 import json
 import sys
 import os
+
+# ── MinorBlock binary parser ──────────────────────────────────────────────────
+# Extracts hash_evm_state_root, height, create_time, and tx_count directly from
+# raw MinorBlock bytes — no pyquarkchain import required.
+#
+# MinorBlockHeader field layout (pyquarkchain/quarkchain/core.py):
+#   version:uint32(4) branch:uint32(4) height:uint64(8)
+#   coinbase_address(24)  coinbase_amount_map:PrependedSizeMap(4,biguint,biguint)
+#   hash_prev_minor_block(32) hash_prev_root_block(32) evm_gas_limit:uint256(32)
+#   hash_meta(32) create_time:uint64(8) difficulty:biguint nonce:uint64(8)
+#   bloom:uint2048(256) extra_data:PrependedSizeBytes(2) mixhash(32)
+# MinorBlockMeta immediately follows (no length prefix):
+#   hash_merkle_root(32) hash_evm_state_root(32) ...
+def _parse_minor_block(raw: bytes) -> tuple:
+    """Return (state_root: bytes, height: int, create_time: int, tx_count: int)."""
+    pos = 0
+
+    def ru(n):
+        nonlocal pos
+        v = int.from_bytes(raw[pos:pos + n], "big")
+        pos += n
+        return v
+
+    def rb(n):
+        nonlocal pos
+        pos += n
+
+    def skip_biguint():       # BigUintSerializer: 1B length prefix + bytes
+        nonlocal pos
+        pos += 1 + raw[pos]
+
+    def skip_prepended(w):    # PrependedSizeBytesSerializer: w-byte length + bytes
+        nonlocal pos
+        pos += w + int.from_bytes(raw[pos:pos + w], "big")
+
+    # MinorBlockHeader
+    ru(4)               # version
+    ru(4)               # branch
+    height = ru(8)      # height
+    rb(24)              # coinbase_address (20B recipient + 4B full_shard_key)
+    for _ in range(ru(4)):   # coinbase_amount_map: 4B count, then biguint pairs
+        skip_biguint()
+        skip_biguint()
+    rb(32 + 32 + 32 + 32)   # hash_prev_minor_block, hash_prev_root_block, evm_gas_limit, hash_meta
+    create_time = ru(8) # create_time
+    skip_biguint()      # difficulty
+    ru(8)               # nonce
+    rb(256)             # bloom (uint2048)
+    skip_prepended(2)   # extra_data
+    rb(32)              # mixhash
+
+    # MinorBlockMeta
+    rb(32)              # hash_merkle_root
+    state_root = raw[pos:pos + 32]
+    pos += 32           # hash_evm_state_root ← what we need
+    rb(32 + 32 + 32)    # hash_evm_receipt_root, evm_gas_used, evm_cross_shard_receive_gas_used
+    rb(24)              # xshard_tx_cursor_info (3 × uint64)
+    rb(32)              # evm_xshard_gas_limit
+
+    tx_count = ru(4)    # tx_list: PrependedSizeListSerializer(4, ...)
+    return state_root, height, create_time, tx_count
 
 # ── RLP decoding (minimal, no rlp library required for simple cases) ──────────
 # We use the 'rlp' package for robustness.
@@ -267,24 +327,26 @@ def get_state_root_from_db(db: RawDb, height: int | None) -> tuple[bytes, dict]:
     Look up state root from a pyquarkchain shard RocksDB.
     Scans backwards from `height` (default: latest) to find the nearest
     height whose state trie is actually persisted in the DB (~every 128 blocks).
+    No pyquarkchain import needed — uses _parse_minor_block() directly.
     """
-    try:
-        from quarkchain.core import MinorBlock
-    except ImportError:
-        raise RuntimeError(
-            "pyquarkchain not found on PYTHONPATH. "
-            "Add pyquarkchain to PYTHONPATH or pass --state-root directly."
-        )
-
     # ── find starting hash ─────────────────────────────────────────────────────
     if height is None:
-        # Scan backwards from a high number to find the latest stored block.
         raw_hash = None
-        for h in range(10_000_000, -1, -1):
-            raw_hash = db.get(b"mi_%d" % h)
-            if raw_hash is not None:
-                height = h
-                break
+        # mi_N keys (b"mi_%d" % height) are the canonical chain index.
+        # Keys are stored as text so RocksDB sorts them lexicographically, not
+        # numerically — we can't just seek to the last mi_ key.
+        # Binary search finds the max height in O(log N) ≈ 29 DB lookups.
+        MAX_HEIGHT = 500_000_000
+        lo, hi = 0, MAX_HEIGHT
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if db.get(b"mi_%d" % mid) is not None:
+                lo = mid
+            else:
+                hi = mid - 1
+        raw_hash = db.get(b"mi_%d" % lo) if lo > 0 else None
+        if raw_hash is not None:
+            height = lo
         if raw_hash is None:
             print("DEBUG: no 'mi_N' key found. Scanning DB key prefixes...", file=sys.stderr)
             prefixes = db.scan_key_prefixes()
@@ -293,7 +355,7 @@ def get_state_root_from_db(db: RawDb, height: int | None) -> tuple[bytes, dict]:
                 print(f"  prefix={k_hex}  readable={readable!r}  count={cnt}", file=sys.stderr)
             raise RuntimeError(
                 "Could not find any minor block hash key ('mi_N') in DB.\n"
-                "Check --db-path and make sure pyquarkchain is on PYTHONPATH."
+                "Check --db-path."
             )
     else:
         raw_hash = db.get(b"mi_%d" % height)
@@ -302,13 +364,13 @@ def get_state_root_from_db(db: RawDb, height: int | None) -> tuple[bytes, dict]:
 
     # ── scan backwards to a height whose state trie is persisted ──────────────
     start_height = height
-    block = None
     state_root = None
+    create_time = 0
+    tx_count = 0
     while height >= 0:
         raw_block = db.get(b"mblock_" + raw_hash)
         if raw_block is not None:
-            block = MinorBlock.deserialize(raw_block)
-            state_root = block.meta.hash_evm_state_root
+            state_root, _h, create_time, tx_count = _parse_minor_block(raw_block)
             if state_root != BLANK_ROOT and db.get(state_root) is not None:
                 if height != start_height:
                     print(
@@ -326,14 +388,14 @@ def get_state_root_from_db(db: RawDb, height: int | None) -> tuple[bytes, dict]:
             )
         raw_hash = db.get(b"mi_%d" % height)
         if raw_hash is None:
-            continue  # no canonical hash at this height, keep stepping
+            continue
 
     meta = {
         "height":      height,
         "block_hash":  raw_hash.hex(),
         "state_root":  state_root.hex(),
-        "timestamp":   block.header.create_time,
-        "tx_count":    len(block.tx_list),
+        "timestamp":   create_time,
+        "tx_count":    tx_count,
     }
     return state_root, meta
 

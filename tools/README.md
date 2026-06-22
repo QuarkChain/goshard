@@ -17,20 +17,23 @@ go build ./...          # goshard must build cleanly
 
 ## Step 1 — dump state trie
 
+The script parses MinorBlock bytes directly — **no pyquarkchain install needed**.
+
 ```bash
 python tools/dump_state/dump_qkc_state_trie.py \
     --db-path  /path/to/pyquarkchain/data/shard-0 \
-    --height   10000000 \        # omit for latest
     --output   trie_dump.json
+# --height 10000000   # optional; omit to use the latest block
 ```
 
-If `--height` lookup is needed (minor block deserialization), add pyquarkchain to PYTHONPATH:
+If you already know the state root, pass it directly to skip the block lookup:
 
 ```bash
-PYTHONPATH=/path/to/pyquarkchain python tools/dump_state/dump_qkc_state_trie.py ...
+python tools/dump_state/dump_qkc_state_trie.py \
+    --db-path    /path/to/pyquarkchain/data/shard-0 \
+    --state-root d9ff31bb61e359cdba7e32134d5c4319a1ba332e0505398067a9534f395adf48 \
+    --output     trie_dump.json
 ```
-
-Alternatively, skip the block lookup by passing `--state-root <hex>` directly.
 
 Output `trie_dump.json` contains:
 - `block` — height, hash, state root, timestamp
