@@ -2096,20 +2096,20 @@ func TestGenGoldenRoots(t *testing.T) {
 |----------|------|-------------|-------|
 | **New** | `common/token_codec.go` | Port from goquarkchain | ~80 |
 | **New** | `core/types/uint32_rlp.go` | Port from goquarkchain | ~50 |
-| **New** | `core/types/token_balances.go` | Port from goquarkchain | ~200 |
-| **New** | `core/state/state_object_qkc.go` | MNT accessors (use `s.data.MntBalances`) | ~100 |
-| **New** | `core/state/statedb_qkc.go` | MNT methods + encoder | ~180 |
-| **New** | `core/vm/contracts_qkc.go` | 5 precompile contracts | ~400 |
-| **Modified** | `core/types/state_account.go` | Add `MntBalances` field; custom RLP encoder | ~25 |
-| **Modified** | `core/state/statedb.go` | MNT methods + modify updateStateObject | ~20 |
-| **Modified** | `core/state/reader.go` | Decode QuarkChain 6-element format → `MntBalances` | ~40 |
-| **Modified** | `core/state/journal.go` | MNT balance journal entries | ~30 |
-| **Modified** | `core/vm/contracts.go` | Merge PrecompiledContractsMNT | ~10 |
-| **Modified** | `core/types/transaction.go` | Add `GasTokenID`, `TransferTokenID` to transaction data and `Message` interface | ~30 |
-| **Modified** | `core/vm/contracts_qkc.go` | `transferMnt`: swap `evm.TransferTokenID` around inner call (like goquarkchain) | ~10 |
-| **Modified** | `core/vm/evm.go` | Add `GasTokenID`/`TransferTokenID` to `TxContext`; `Call()` passes tokenID to `CanTransfer`/`Transfer`; `checkTokenIDQueried` uses `!= 0 && != defaultTokenID` | ~20 |
-| **Modified** | `core/vm/contract.go` | Add `TokenIDQueried bool` to `Contract` struct | ~3 |
-| **Modified** | `core/state_transition.go` | QKC preCheck only | ~30 |
+| **New** | `core/types/token.go` | `TokenBalances`, `TokenBalancePair`, `DefaultTokenID` | ~200 |
+| **New** | `core/types/state_account_qkc.go` | `StateAccount.EncodeRLP`/`DecodeRLP` — QKC 6-element wire format | ~115 |
+| **New** | `core/state/state_object_qkc.go` | MNT accessors on `stateObject` | ~70 |
+| **New** | `core/state/statedb_qkc.go` | StateDB MNT methods | ~85 |
+| **New** | `core/vm/contracts_qkc.go` | 5 MNT precompile contracts | ~300 |
+| **Deleted** | `core/types/gen_account_rlp.go` | Removed — replaced by `StateAccount.EncodeRLP` in `state_account_qkc.go` | -21 |
+| **Modified** | `core/types/state_account.go` | Add `MntBalances *TokenBalances` field | ~15 |
+| **Modified** | `core/state/statedb.go` | Wire QKC CanTransfer/Transfer; compile fixes | ~85 |
+| **Modified** | `core/state/journal.go` | `mntBalanceChange` journal entry + revert | ~40 |
+| **Modified** | `core/vm/contracts.go` | Merge `PrecompiledContractsMNT` into active precompiles | ~10 |
+| **Modified** | `core/vm/evm.go` | Add `GasTokenID`/`TransferTokenID` to `TxContext`; wire `CanTransfer`/`Transfer`; `checkTokenIDQueried` | ~80 |
+| **Modified** | `core/vm/contract.go` | Add `TokenIDQueried bool` to `Contract` | ~5 |
+| **Modified** | `core/evm.go` | `CanTransfer`/`Transfer` with `tokenID` param; set token IDs in block context | ~30 |
+| **Modified** | `core/state_transition.go` | `buyGas`/`preCheck` use `GasTokenID`/`TransferTokenID` from message | ~55 |
 | ~~**Modified**~~ | ~~`params/config.go`~~ | ~~Genesis MNT alloc~~ | ~~out of scope~~ |
 
 **Total**: ~1200 lines of new/modified code
