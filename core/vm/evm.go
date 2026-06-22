@@ -31,8 +31,6 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// defaultMntTokenID is the token ID for QKC (= TokenIDEncode("QKC") = 35760).
-const defaultMntTokenID = uint64(35760)
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
@@ -322,7 +320,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			// QKC: if transferring a non-default MNT token, recipient must have acknowledged
 			// the token via currentMntID precompile, else revert (mirrors goquarkchain behavior).
 			if err == nil && len(contract.Code) != 0 && !contract.TokenIDQueried &&
-				evm.TxContext.TransferTokenID != 0 && evm.TxContext.TransferTokenID != defaultMntTokenID &&
+				evm.TxContext.TransferTokenID != 0 && evm.TxContext.TransferTokenID != types.DefaultTokenID &&
 				!value.IsZero() {
 				err = ErrExecutionReverted
 			}

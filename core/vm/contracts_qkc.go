@@ -22,6 +22,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -201,7 +202,7 @@ func (m *mintMNT) RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]byte
 	tokenID := tokenIDInt.Uint64()
 
 	// Reject minting the default QKC token.
-	if tokenID == defaultMntTokenID {
+	if tokenID == types.DefaultTokenID {
 		contract.Gas.Exhaust()
 		return nil, ErrInvalidSender
 	}
