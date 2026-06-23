@@ -20,7 +20,6 @@ import (
 	"io"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
@@ -39,7 +38,8 @@ type qkcAccountRLP struct {
 }
 
 // mergeQKCTokenBalances combines the QKC native balance (tokenID=35760) and MNT
-// balances into a single TokenBalances for wire encoding. Returns nil if both empty.
+// balances into a single TokenBalances for wire encoding. Returns nil if both empty,
+// which causes EncodeRLP to write 0x80 (RLP nil/empty) matching goquarkchain behavior.
 func mergeQKCTokenBalances(balance *uint256.Int, mnt *TokenBalances) *TokenBalances {
 	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.IsBlank()) {
 		return nil
@@ -60,7 +60,21 @@ func mergeQKCTokenBalances(balance *uint256.Int, mnt *TokenBalances) *TokenBalan
 // 6-element format. Root is always written as 32 bytes (no nil optimization).
 func (acct *StateAccount) EncodeRLP(w io.Writer) error {
 	var tokenBal []byte
-	if tb := mergeQKCTokenBalances(acct.Balance, acct.MntBalances); tb != nil {
+	switch {
+	case acct.MntBalances == nil && (acct.Balance == nil || acct.Balance.IsZero()):
+		// No QKC balance, no MNT tokens — encode TokenBal as nil → 0x80.
+		// Covers: new accounts and accounts that never entered the TokenBalances map.
+		tokenBal = nil
+
+	case acct.MntBalances != nil && acct.MntBalances.IsBlank() && acct.Balance != nil && acct.Balance.IsZero():
+		// QKC balance zero, MNT map explicitly empty → re-serialize as
+		// list-format with zero pairs → 0x8200c0. This preserves the
+		// "account touched TokenBalances map then emptied it" history.
+		tokenBal, _ = acct.MntBalances.SerializeToBytes()
+
+	default:
+		// Normal case: has QKC balance and/or non-empty MNT tokens.
+		tb := mergeQKCTokenBalances(acct.Balance, acct.MntBalances)
 		var err error
 		tokenBal, err = tb.SerializeToBytes()
 		if err != nil {
@@ -68,12 +82,11 @@ func (acct *StateAccount) EncodeRLP(w io.Writer) error {
 		}
 	}
 	qkc := &qkcAccountRLP{
-		Nonce:    acct.Nonce,
-		Root:     acct.Root,
-		CodeHash: acct.CodeHash,
-		TokenBal: tokenBal,
-		// TODO: replace params.GetFakeFullShardKey() with actual per-shard key
-		FullShardKey: Uint32(params.GetFakeFullShardKey()),
+		Nonce:        acct.Nonce,
+		Root:         acct.Root,
+		CodeHash:     acct.CodeHash,
+		TokenBal:     tokenBal,
+		FullShardKey: Uint32(acct.FullShardKey),
 		Optial:       nil,
 	}
 	return rlp.Encode(w, qkc)
@@ -93,22 +106,22 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 	acct.Nonce = qkc.Nonce
 	acct.CodeHash = qkc.CodeHash
 	acct.Root = qkc.Root
+	acct.FullShardKey = uint32(qkc.FullShardKey)
 	acct.Balance = new(uint256.Int)
 	if len(qkc.TokenBal) > 0 {
 		tb, err := NewTokenBalancesFromBytes(qkc.TokenBal)
 		if err != nil {
 			return err
 		}
-		if !tb.IsBlank() {
-			balMap := tb.GetBalanceMap()
-			if qkcBal, ok := balMap[DefaultTokenID]; ok {
-				acct.Balance.Set(qkcBal)
-				delete(balMap, DefaultTokenID)
-			}
-			if len(balMap) > 0 {
-				acct.MntBalances = &TokenBalances{balances: balMap}
-			}
+		balMap := tb.GetBalanceMap()
+		if qkcBal, ok := balMap[DefaultTokenID]; ok {
+			acct.Balance.Set(qkcBal)
+			delete(balMap, DefaultTokenID)
 		}
+		// Always set MntBalances when TokenBal has content — even if empty
+		// after stripping QKC, this lets EncodeRLP produce 0x8200c0 instead
+		// of 0x80, preserving byte-identical round-trip.
+		acct.MntBalances = &TokenBalances{balances: balMap}
 	}
 	return nil
 }

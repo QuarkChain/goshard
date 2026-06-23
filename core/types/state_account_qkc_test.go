@@ -57,7 +57,7 @@ func mustHex(s string) []byte {
 }
 
 // TestStateAccountEncodeDecodeRoundtrip verifies that EncodeRLP→DecodeRLP is
-// a lossless roundtrip for Nonce, Balance, Root, CodeHash, and MntBalances.
+// a lossless roundtrip for all fields including FullShardKey.
 func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 	cases := []struct {
 		name string
@@ -68,16 +68,17 @@ func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 			acct: *NewEmptyStateAccount(),
 		},
 		{
-			name: "nonce1 QKC=1000",
+			name: "nonce1 QKC=1000 shard=1",
 			acct: StateAccount{
-				Nonce:    1,
-				Balance:  uint256.NewInt(1000),
-				Root:     EmptyRootHash,
-				CodeHash: EmptyCodeHash[:],
+				Nonce:        1,
+				Balance:      uint256.NewInt(1000),
+				Root:         EmptyRootHash,
+				CodeHash:     EmptyCodeHash[:],
+				FullShardKey: 1,
 			},
 		},
 		{
-			name: "nonce5 QKC=2000 MNT[100]=500",
+			name: "nonce5 QKC=2000 MNT[100]=500 shard=0x2f3e",
 			acct: StateAccount{
 				Nonce:    5,
 				Balance:  uint256.NewInt(2000),
@@ -86,15 +87,17 @@ func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 				MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{
 					100: uint256.NewInt(500),
 				}),
+				FullShardKey: 0x2f3e,
 			},
 		},
 		{
-			name: "non-empty root and codehash",
+			name: "non-empty root and codehash shard=0x72ea",
 			acct: StateAccount{
-				Nonce:    3,
-				Balance:  uint256.NewInt(1e18),
-				Root:     common.HexToHash("0xdeadbeef"),
-				CodeHash: common.Hex2Bytes("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
+				Nonce:        3,
+				Balance:      uint256.NewInt(1e18),
+				Root:         common.HexToHash("0xdeadbeef"),
+				CodeHash:     common.Hex2Bytes("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"),
+				FullShardKey: 0x72ea,
 			},
 		},
 	}
@@ -110,6 +113,7 @@ func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 			assert.Equal(t, tc.acct.Nonce, decoded.Nonce)
 			assert.Equal(t, tc.acct.Root, decoded.Root)
 			assert.Equal(t, tc.acct.CodeHash, decoded.CodeHash)
+			assert.Equal(t, tc.acct.FullShardKey, decoded.FullShardKey)
 			require.NotNil(t, decoded.Balance)
 			assert.Equal(t, tc.acct.Balance, decoded.Balance)
 			if tc.acct.MntBalances == nil || tc.acct.MntBalances.IsBlank() {
@@ -124,33 +128,37 @@ func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 
 // TestStateAccountPyquarkchainDecodeCompatibility verifies that goshard can
 // decode blobs produced by pyquarkchain. These are the authoritative wire
-// vectors for the QKC 6-element RLP format.
+// vectors for the QKC 6-element RLP format. All vectors use full_shard_key=1.
 func TestStateAccountPyquarkchainDecodeCompatibility(t *testing.T) {
 	cases := []struct {
-		name        string
-		blob        []byte
-		wantNonce   uint64
-		wantQKC     *uint256.Int
-		wantMNT     map[uint64]*uint256.Int // nil = no MNT tokens expected
+		name             string
+		blob             []byte
+		wantNonce        uint64
+		wantQKC          *uint256.Int
+		wantMNT          map[uint64]*uint256.Int // nil = no MNT tokens expected
+		wantFullShardKey uint32
 	}{
 		{
-			name:      "nonce=1 QKC=1000",
-			blob:      pyqkcVecNonce1QKC1000,
-			wantNonce: 1,
-			wantQKC:   uint256.NewInt(1000),
+			name:             "nonce=1 QKC=1000",
+			blob:             pyqkcVecNonce1QKC1000,
+			wantNonce:        1,
+			wantQKC:          uint256.NewInt(1000),
+			wantFullShardKey: 1,
 		},
 		{
-			name:      "nonce=5 QKC=2000 MNT[100]=500",
-			blob:      pyqkcVecNonce5QKC2000MNT500,
-			wantNonce: 5,
-			wantQKC:   uint256.NewInt(2000),
-			wantMNT:   map[uint64]*uint256.Int{100: uint256.NewInt(500)},
+			name:             "nonce=5 QKC=2000 MNT[100]=500",
+			blob:             pyqkcVecNonce5QKC2000MNT500,
+			wantNonce:        5,
+			wantQKC:          uint256.NewInt(2000),
+			wantMNT:          map[uint64]*uint256.Int{100: uint256.NewInt(500)},
+			wantFullShardKey: 1,
 		},
 		{
-			name:      "zero account",
-			blob:      pyqkcVecZeroAccount,
-			wantNonce: 0,
-			wantQKC:   uint256.NewInt(0),
+			name:             "zero account",
+			blob:             pyqkcVecZeroAccount,
+			wantNonce:        0,
+			wantQKC:          uint256.NewInt(0),
+			wantFullShardKey: 1,
 		},
 	}
 
@@ -162,6 +170,7 @@ func TestStateAccountPyquarkchainDecodeCompatibility(t *testing.T) {
 			assert.Equal(t, tc.wantNonce, acct.Nonce)
 			assert.Equal(t, EmptyRootHash, acct.Root)
 			assert.Equal(t, EmptyCodeHash[:], acct.CodeHash)
+			assert.Equal(t, tc.wantFullShardKey, acct.FullShardKey)
 			require.NotNil(t, acct.Balance)
 			assert.Equal(t, tc.wantQKC, acct.Balance)
 
@@ -187,33 +196,36 @@ func TestStateAccountPyquarkchainEncodeCompatibility(t *testing.T) {
 		{
 			name: "nonce=1 QKC=1000",
 			acct: StateAccount{
-				Nonce:    1,
-				Balance:  uint256.NewInt(1000),
-				Root:     EmptyRootHash,
-				CodeHash: EmptyCodeHash[:],
+				Nonce:        1,
+				Balance:      uint256.NewInt(1000),
+				Root:         EmptyRootHash,
+				CodeHash:     EmptyCodeHash[:],
+				FullShardKey: 1,
 			},
 			want: pyqkcVecNonce1QKC1000,
 		},
 		{
 			name: "nonce=5 QKC=2000 MNT[100]=500",
 			acct: StateAccount{
-				Nonce:   5,
-				Balance: uint256.NewInt(2000),
-				Root:    EmptyRootHash,
+				Nonce:    5,
+				Balance:  uint256.NewInt(2000),
+				Root:     EmptyRootHash,
 				CodeHash: EmptyCodeHash[:],
 				MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{
 					100: uint256.NewInt(500),
 				}),
+				FullShardKey: 1,
 			},
 			want: pyqkcVecNonce5QKC2000MNT500,
 		},
 		{
 			name: "zero account",
 			acct: StateAccount{
-				Nonce:    0,
-				Balance:  uint256.NewInt(0),
-				Root:     EmptyRootHash,
-				CodeHash: EmptyCodeHash[:],
+				Nonce:        0,
+				Balance:      uint256.NewInt(0),
+				Root:         EmptyRootHash,
+				CodeHash:     EmptyCodeHash[:],
+				FullShardKey: 1,
 			},
 			want: pyqkcVecZeroAccount,
 		},
@@ -233,6 +245,11 @@ func TestStateAccountPyquarkchainEncodeCompatibility(t *testing.T) {
 // the round-trip slim-RLP → decode → QKC-encode produces the same bytes as direct
 // QKC-encode. This is the invariant that allows execute.go to use slim-RLP as the
 // accountOrigin format for history reversal without affecting trie root correctness.
+//
+// Note: SlimAccount does not carry FullShardKey. Both paths therefore encode with
+// FullShardKey=0, so the test holds — but the slim-RLP path should only be used
+// for accounts where FullShardKey is known to be zero (e.g. freshly created accounts
+// before any shard key is set).
 func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 	cases := []struct {
 		name string

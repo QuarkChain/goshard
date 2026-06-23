@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -127,8 +128,8 @@ func recomputeRoot(nodeStore map[string]string, stateRootHex string) (common.Has
 // ─── account cross-check ──────────────────────────────────────────────────────
 
 // verifyAccounts opens the trie and iterates all leaves, decoding each account
-// via StateAccount.DecodeRLP, and cross-checks against the dump.
-func verifyAccounts(nodeStore map[string]string, stateRootHex string, dumpAccounts []dumpAccount) error {
+// via StateAccount.DecodeRLP then re-encoding to verify byte-level round-trip.
+func verifyAccounts(nodeStore map[string]string, stateRootHex string) error {
 	mem := memorydb.New()
 	for hashHex, bytesHex := range nodeStore {
 		hashHex = strings.TrimPrefix(hashHex, "0x")
@@ -147,12 +148,6 @@ func verifyAccounts(nodeStore map[string]string, stateRootHex string, dumpAccoun
 	tr, err := trie.New(trie.TrieID(stateRoot), trieDB)
 	if err != nil {
 		return fmt.Errorf("trie.New: %w", err)
-	}
-
-	// Build a map for quick lookup of dump accounts by key_nibbles.
-	dumpByNibbles := make(map[string]dumpAccount, len(dumpAccounts))
-	for _, a := range dumpAccounts {
-		dumpByNibbles[a.KeyNibbles] = a
 	}
 
 	it, err := tr.NodeIterator(nil)
@@ -175,7 +170,17 @@ func verifyAccounts(nodeStore map[string]string, stateRootHex string, dumpAccoun
 			mismatch++
 			continue
 		}
-		_ = acc // decoded successfully; add deep checks here if needed
+		reenc, err := rlp.EncodeToBytes(&acc)
+		if err != nil {
+			fmt.Printf("  ENCODE ERR key=%x: %v\n", it.LeafKey(), err)
+			mismatch++
+			continue
+		}
+		if !bytes.Equal(reenc, leafVal) {
+			fmt.Printf("  ROUND-TRIP MISMATCH key=%x\n    orig: %x\n    reenc:%x\n",
+				it.LeafKey(), leafVal, reenc)
+			mismatch++
+		}
 	}
 	if err := it.Error(); err != nil {
 		return fmt.Errorf("iterator error: %w", err)
@@ -183,7 +188,7 @@ func verifyAccounts(nodeStore map[string]string, stateRootHex string, dumpAccoun
 
 	fmt.Printf("  Account leaves iterated: %d  mismatches: %d\n", leafCount, mismatch)
 	if mismatch > 0 {
-		return fmt.Errorf("%d accounts failed to decode via StateAccount.DecodeRLP", mismatch)
+		return fmt.Errorf("%d accounts failed round-trip encode via StateAccount", mismatch)
 	}
 	return nil
 }
@@ -191,8 +196,7 @@ func verifyAccounts(nodeStore map[string]string, stateRootHex string, dumpAccoun
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	inputFile  := flag.String("input",        "trie_dump.json", "JSON file from dump_qkc_state_trie.py")
-	checkAccts := flag.Bool("check-accounts", false,            "Also iterate leaves and decode accounts")
+	inputFile := flag.String("input", "trie_dump.json", "JSON file from dump_qkc_state_trie.py")
 	flag.Parse()
 
 	// ── load JSON ──────────────────────────────────────────────────────────
@@ -236,13 +240,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ── optional account decode check ──────────────────────────────────────
-	if *checkAccts && len(dump.Accounts) > 0 {
-		fmt.Println("\nVerifying account decode via StateAccount.DecodeRLP...")
-		if err := verifyAccounts(dump.NodeStore, stateRootStr, dump.Accounts); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("✓  All accounts decoded successfully")
+	// ── account decode/re-encode round-trip ───────────────────────────────
+	fmt.Println("\nVerifying account decode/re-encode round-trip via StateAccount...")
+	if err := verifyAccounts(dump.NodeStore, stateRootStr); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
 	}
+	fmt.Println("✓  All accounts decoded and re-encoded to identical bytes")
 }

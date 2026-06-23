@@ -1414,8 +1414,3 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 	}
 }
 
-// GetFakeFullShardKey returns a placeholder FullShardKey value matching pyquarkchain's default.
-// TODO: replace with actual per-shard key once the shard config location is decided.
-func GetFakeFullShardKey() uint32 {
-	return 1
-}
