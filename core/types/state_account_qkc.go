@@ -34,7 +34,7 @@ type qkcAccountRLP struct {
 	Root         common.Hash
 	CodeHash     []byte
 	FullShardKey Uint32
-	Optial       []byte
+	Optional       []byte
 }
 
 // mergeQKCTokenBalances combines the QKC native balance (tokenID=35760) and MNT
@@ -87,7 +87,7 @@ func (acct *StateAccount) EncodeRLP(w io.Writer) error {
 		CodeHash:     acct.CodeHash,
 		TokenBal:     tokenBal,
 		FullShardKey: Uint32(acct.FullShardKey),
-		Optial:       nil,
+		Optional:       nil,
 	}
 	return rlp.Encode(w, qkc)
 }
