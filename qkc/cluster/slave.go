@@ -127,6 +127,9 @@ func NewSlave(cfg *Config) (*Slave, error) {
 	// Wire dispatcher: every frame from master goes through the dispatcher
 	mc.OnFrame = s.dispatcher.Dispatch
 
+	// Start the master connection read loop (after OnFrame is configured)
+	mc.Start()
+
 	// 4. Initialize peer connection maps for each owned branch
 	for _, branch := range cfg.OwnBranches {
 		s.peerConns[branch] = make(map[uint64]*PeerConn)
@@ -261,7 +264,7 @@ func (s *Slave) HandleCreateClusterPeerConnection(frame *Frame) ([]byte, error) 
 	}
 
 	s.log.Info("created cluster peer connection", "cluster_peer_id", clusterPeerID)
-	return []byte("OK"), nil
+	return serialize.SerializeToBytes(&CreateClusterPeerConnectionResponse{ErrorCode: 0})
 }
 
 // HandleDestroyClusterPeerConnection removes PeerConns for all branches
@@ -283,7 +286,7 @@ func (s *Slave) HandleDestroyClusterPeerConnection(frame *Frame) ([]byte, error)
 	}
 
 	s.log.Info("destroyed cluster peer connection", "cluster_peer_id", clusterPeerID)
-	return []byte("OK"), nil
+	return nil, nil // NON-RPC, return value is ignored
 }
 
 // ClusterPeerIDs returns all registered cluster peer IDs.
@@ -309,7 +312,9 @@ func (s *Slave) ClusterPeerIDs() []uint64 {
 func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 	var req ConnectToSlavesRequest
 	if err := serialize.Deserialize(serialize.NewByteBuffer(payload), &req); err != nil {
-		return nil, fmt.Errorf("deserialize ConnectToSlavesRequest: %w", err)
+		s.log.Error("deserialize ConnectToSlavesRequest failed", "err", err)
+		resp := ConnectToSlavesResponse{ResultList: [][]byte{[]byte("deserialization error: " + err.Error())}}
+		return serialize.SerializeToBytes(&resp)
 	}
 
 	resultList := make([][]byte, len(req.SlaveInfoList))
@@ -335,12 +340,17 @@ func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 		// Register SLAVE_OP_RPC_MAP handlers (PING, ADD_XSHARD_TX_LIST, …)
 		s.applyXshardHandlers(conn)
 
+		// Start the read loop after handlers are registered
+		conn.Start()
+
 		// Index the connection by every fullShardID this slave covers
 		for _, fullShardID := range info.FullShardIDList {
 			target := FullShardID{
 				ChainID: fullShardID >> 16,
 				ShardID: fullShardID & 0xFFFF,
 			}
+			// RemoveTarget atomically closes old connections and cleans up the map
+			s.xshardPool.RemoveTarget(target)
 			s.xshardPool.Add(target, conn)
 		}
 
@@ -365,6 +375,8 @@ func (s *Slave) AddXshardConnection(target FullShardID, addr string) error {
 	if err != nil {
 		return err
 	}
+	s.applyXshardHandlers(conn)
+	conn.Start()
 	s.xshardPool.Add(target, conn)
 	return nil
 }
@@ -400,6 +412,12 @@ func (s *Slave) startXshardServer(listenAddr string) error {
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("xshard accept loop panic recovered", "panic", r)
+			}
+		}()
+
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -408,6 +426,7 @@ func (s *Slave) startXshardServer(listenAddr string) error {
 			}
 			xc := NewXshardConnFromConn(conn, s.log)
 			s.applyXshardHandlers(xc)
+			xc.Start()
 			s.log.Info("accepted xshard connection", "addr", conn.RemoteAddr())
 		}
 	}()

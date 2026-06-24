@@ -3,6 +3,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
@@ -31,13 +32,16 @@ type SlaveRPC struct {
 
 // NewSlaveRPC creates, connects, and initialises the underlying Slave.
 func NewSlaveRPC(cfg *Config) (*SlaveRPC, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config must not be nil")
+	}
 	slave, err := NewSlave(cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &SlaveRPC{
 		slave: slave,
-		log:   log.New("module", "slave-rpc"),
+		log:   slave.log.New("module", "slave-rpc"),
 	}, nil
 }
 

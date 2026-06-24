@@ -55,7 +55,10 @@ func (p *XshardPool) Remove(target FullShardID, conn *XshardConn) {
 	conns := p.conns[target]
 	for i, c := range conns {
 		if c == conn {
-			p.conns[target] = append(conns[:i], conns[i+1:]...)
+			// Avoid memory leak: nil out the pointer in the backing array.
+			copy(conns[i:], conns[i+1:])
+			conns[len(conns)-1] = nil
+			p.conns[target] = conns[:len(conns)-1]
 			p.log.Info("removed xshard connection", "target", target)
 			return
 		}
@@ -67,6 +70,9 @@ func (p *XshardPool) RemoveTarget(target FullShardID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	for _, conn := range p.conns[target] {
+		conn.Close()
+	}
 	delete(p.conns, target)
 	p.log.Info("removed all connections to target", "target", target)
 }

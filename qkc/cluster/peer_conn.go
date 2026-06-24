@@ -48,6 +48,14 @@ func (p *PeerConn) RegisterHandler(opcode byte, handler func(*Frame) ([]byte, er
 
 // HandleFrame processes an inbound frame from this peer.
 func (p *PeerConn) HandleFrame(frame *Frame) {
+	// Check if connection is closed
+	p.closeMu.Lock()
+	if p.closed {
+		p.closeMu.Unlock()
+		return
+	}
+	p.closeMu.Unlock()
+
 	if frame.Meta.ClusterPeerID != p.clusterPeerID {
 		p.log.Warn("frame cluster_peer_id mismatch",
 			"expected", p.clusterPeerID, "got", frame.Meta.ClusterPeerID)
@@ -60,28 +68,25 @@ func (p *PeerConn) HandleFrame(frame *Frame) {
 
 	if !ok {
 		p.log.Warn("no handler for peer opcode", "opcode", frame.Opcode)
+		p.sendEmptyResponse(frame, "no-handler")
 		return
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				p.log.Error("peer handler panic recovered", "opcode", frame.Opcode, "panic", r)
+				p.sendEmptyResponse(frame, "panic")
+			}
+		}()
+
 		respPayload, err := handler(frame)
 		if err != nil {
 			p.log.Error("peer handler failed", "opcode", frame.Opcode, "err", err)
-			// Send an empty response so the caller doesn't block waiting.
-			if frame.RPCID != 0 {
-				resp := &Frame{
-					Meta:    Metadata{Branch: p.branch, ClusterPeerID: p.clusterPeerID},
-					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
-					RPCID:   frame.RPCID,
-					Payload: nil,
-				}
-				if err := p.SendFrame(resp); err != nil {
-					p.log.Error("failed to send peer error response", "err", err)
-				}
-			}
+			p.sendEmptyResponse(frame, "error")
 			return
 		}
-		if frame.RPCID != 0 && respPayload != nil {
+		if frame.RPCID != 0 {
 			resp := &Frame{
 				Meta:    Metadata{Branch: p.branch, ClusterPeerID: p.clusterPeerID},
 				Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
@@ -93,6 +98,22 @@ func (p *PeerConn) HandleFrame(frame *Frame) {
 			}
 		}
 	}()
+}
+
+// sendEmptyResponse sends an empty (nil-payload) response for error/no-handler/panic cases.
+func (p *PeerConn) sendEmptyResponse(frame *Frame, reason string) {
+	if frame.RPCID == 0 {
+		return
+	}
+	resp := &Frame{
+		Meta:    Metadata{Branch: p.branch, ClusterPeerID: p.clusterPeerID},
+		Opcode:  frame.Opcode + 1,
+		RPCID:   frame.RPCID,
+		Payload: nil,
+	}
+	if err := p.SendFrame(resp); err != nil {
+		p.log.Error("failed to send response", "reason", reason, "err", err)
+	}
 }
 
 // SendFrame sends a frame to the peer via the master connection.

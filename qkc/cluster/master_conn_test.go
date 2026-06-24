@@ -58,6 +58,7 @@ func TestMasterConnBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer mc.Close()
+	mc.Start()
 
 	// Send PING via RPC
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -125,6 +126,8 @@ func TestMasterConnRegisterHandler(t *testing.T) {
 		}
 		return []byte("block received"), nil
 	})
+
+	mc.Start()
 
 	select {
 	case <-handlerCalled:
@@ -269,6 +272,8 @@ func TestDispatcherRouting(t *testing.T) {
 		}
 		return []byte("peer ack"), nil
 	})
+
+	mc.Start()
 
 	select {
 	case <-masterDone:

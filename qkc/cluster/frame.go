@@ -37,11 +37,12 @@ type Frame struct {
 }
 
 const (
-	metaSize      = 12 // branch(4) + cluster_peer_id(8)
-	opcodeSize    = 1
-	rpcIDSize     = 8
-	frameHeader   = 4                                               // payload_len prefix
-	totalOverhead = frameHeader + metaSize + opcodeSize + rpcIDSize // 4+12+1+8=25
+	metaSize       = 12 // branch(4) + cluster_peer_id(8)
+	opcodeSize     = 1
+	rpcIDSize      = 8
+	frameHeader    = 4                                               // payload_len prefix
+	totalOverhead  = frameHeader + metaSize + opcodeSize + rpcIDSize // 4+12+1+8=25
+	maxPayloadSize = 16 << 20                                        // 16 MiB - maximum allowed payload size
 )
 
 // ReadFrame reads a single complete frame from r.
@@ -51,6 +52,11 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 	var payloadLen uint32
 	if err := binary.Read(r, binary.BigEndian, &payloadLen); err != nil {
 		return nil, fmt.Errorf("reading frame length: %w", err)
+	}
+
+	// Validate payload size to prevent memory exhaustion
+	if payloadLen > maxPayloadSize {
+		return nil, fmt.Errorf("frame too large: %d bytes (max %d)", payloadLen, maxPayloadSize)
 	}
 
 	// 2. Read 12-byte Metadata

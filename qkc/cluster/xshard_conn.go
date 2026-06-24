@@ -28,11 +28,13 @@ type XshardConn struct {
 	handlersMu sync.RWMutex
 	handlers   map[byte]func(*Frame) ([]byte, error)
 
-	errChan chan error
-	log     log.Logger
+	errChan   chan error
+	startOnce sync.Once // ensures readLoop is started at most once
+	log       log.Logger
 }
 
 // NewXshardConn creates a new connection to another slave.
+// Call Start() after registering handlers to begin the read loop.
 func NewXshardConn(addr string, logger log.Logger) (*XshardConn, error) {
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
@@ -49,11 +51,11 @@ func NewXshardConn(addr string, logger log.Logger) (*XshardConn, error) {
 		log:        logger,
 	}
 
-	go s.readLoop()
 	return s, nil
 }
 
 // NewXshardConnFromConn creates an XshardConn from an existing connection (for accepting).
+// Call Start() after registering handlers to begin the read loop.
 func NewXshardConnFromConn(conn net.Conn, logger log.Logger) *XshardConn {
 	s := &XshardConn{
 		conn:       conn,
@@ -65,8 +67,13 @@ func NewXshardConnFromConn(conn net.Conn, logger log.Logger) *XshardConn {
 		log:        logger,
 	}
 
-	go s.readLoop()
 	return s
+}
+
+// Start begins the read loop. Call this after registering handlers.
+// Safe to call multiple times — only the first call launches readLoop.
+func (s *XshardConn) Start() {
+	s.startOnce.Do(func() { go s.readLoop() })
 }
 
 func (s *XshardConn) readLoop() {
@@ -88,28 +95,25 @@ func (s *XshardConn) readLoop() {
 
 		if !ok {
 			s.log.Warn("no handler for xshard opcode", "opcode", frame.Opcode)
+			s.sendEmptyResponse(frame, "no handler")
 			continue
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("xshard handler panic recovered", "opcode", frame.Opcode, "panic", r)
+					s.sendEmptyResponse(frame, "panic")
+				}
+			}()
+
 			respPayload, err := handler(frame)
 			if err != nil {
 				s.log.Error("xshard handler failed", "opcode", frame.Opcode, "err", err)
-				// Send an empty response so the caller doesn't block waiting.
-				if frame.RPCID != 0 {
-					resp := &Frame{
-						Meta:    frame.Meta,
-						Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
-						RPCID:   frame.RPCID,
-						Payload: nil,
-					}
-					if err := s.WriteFrame(resp); err != nil {
-						s.log.Error("failed to send xshard error response", "err", err)
-					}
-				}
+				s.sendEmptyResponse(frame, "error")
 				return
 			}
-			if frame.RPCID != 0 && respPayload != nil {
+			if frame.RPCID != 0 {
 				resp := &Frame{
 					Meta:    frame.Meta,
 					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
@@ -129,6 +133,22 @@ func (s *XshardConn) RegisterHandler(opcode byte, handler func(*Frame) ([]byte, 
 	s.handlersMu.Lock()
 	s.handlers[opcode] = handler
 	s.handlersMu.Unlock()
+}
+
+// sendEmptyResponse sends an empty (nil-payload) response for error/no-handler/panic cases.
+func (s *XshardConn) sendEmptyResponse(frame *Frame, reason string) {
+	if frame.RPCID == 0 {
+		return
+	}
+	resp := &Frame{
+		Meta:    frame.Meta,
+		Opcode:  frame.Opcode + 1,
+		RPCID:   frame.RPCID,
+		Payload: nil,
+	}
+	if err := s.WriteFrame(resp); err != nil {
+		s.log.Error("failed to send response", "reason", reason, "err", err)
+	}
 }
 
 // SendXshardTxList sends a list of xshard deposits to the target slave.

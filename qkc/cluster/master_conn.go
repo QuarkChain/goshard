@@ -43,10 +43,13 @@ type MasterConn struct {
 	//   cluster_peer_id != 0 → PeerConn
 	OnFrame func(*Frame)
 
+	startOnce sync.Once // ensures readLoop is started at most once
+
 	log log.Logger
 }
 
 // NewMasterConn creates a new connection to the master.
+// The connection is not started until Start() is called.
 func NewMasterConn(addr string, logger log.Logger) (*MasterConn, error) {
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
@@ -63,8 +66,13 @@ func NewMasterConn(addr string, logger log.Logger) (*MasterConn, error) {
 		log:      logger,
 	}
 
-	go m.readLoop()
 	return m, nil
+}
+
+// Start begins the read loop. Call this after setting OnFrame.
+// Safe to call multiple times — only the first call launches readLoop.
+func (m *MasterConn) Start() {
+	m.startOnce.Do(func() { go m.readLoop() })
 }
 
 // readLoop continuously reads frames from the master connection.
@@ -115,28 +123,25 @@ func (m *MasterConn) Handle(frame *Frame) {
 
 	if !ok {
 		m.log.Warn("no handler for opcode", "opcode", frame.Opcode)
+		m.sendEmptyResponse(frame, "no-handler")
 		return
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("handler panic recovered", "opcode", frame.Opcode, "panic", r)
+				m.sendEmptyResponse(frame, "panic")
+			}
+		}()
+
 		respPayload, err := handler(frame)
 		if err != nil {
 			m.log.Error("handler failed", "opcode", frame.Opcode, "err", err)
-			// Send an empty response so the caller doesn't block waiting.
-			if frame.RPCID != 0 {
-				resp := &Frame{
-					Meta:    frame.Meta,
-					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
-					RPCID:   frame.RPCID,
-					Payload: nil,
-				}
-				if err := m.WriteFrame(resp); err != nil {
-					m.log.Error("failed to send error response", "opcode", frame.Opcode, "err", err)
-				}
-			}
+			m.sendEmptyResponse(frame, "error")
 			return
 		}
-		if frame.RPCID != 0 && respPayload != nil {
+		if frame.RPCID != 0 {
 			resp := &Frame{
 				Meta:    frame.Meta,
 				Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
@@ -155,6 +160,22 @@ func (m *MasterConn) RegisterHandler(opcode byte, handler func(*Frame) ([]byte, 
 	m.handlersMu.Lock()
 	m.handlers[opcode] = handler
 	m.handlersMu.Unlock()
+}
+
+// sendEmptyResponse sends an empty (nil-payload) response for error/no-handler/panic cases.
+func (m *MasterConn) sendEmptyResponse(frame *Frame, reason string) {
+	if frame.RPCID == 0 {
+		return
+	}
+	resp := &Frame{
+		Meta:    frame.Meta,
+		Opcode:  frame.Opcode + 1,
+		RPCID:   frame.RPCID,
+		Payload: nil,
+	}
+	if err := m.WriteFrame(resp); err != nil {
+		m.log.Error("failed to send response", "reason", reason, "err", err)
+	}
 }
 
 // SendRPC sends an RPC request to the master and waits for a response.

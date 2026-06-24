@@ -17,7 +17,7 @@ import (
 type Dispatcher struct {
 	mu         sync.RWMutex
 	masterConn *MasterConn
-	peerConns  map[uint64]*PeerConn // cluster_peer_id → PeerConn
+	peerConns  map[uint64]map[uint32]*PeerConn // cluster_peer_id → branch → PeerConn
 	log        log.Logger
 }
 
@@ -25,29 +25,52 @@ type Dispatcher struct {
 func NewDispatcher(masterConn *MasterConn, logger log.Logger) *Dispatcher {
 	return &Dispatcher{
 		masterConn: masterConn,
-		peerConns:  make(map[uint64]*PeerConn),
+		peerConns:  make(map[uint64]map[uint32]*PeerConn),
 		log:        logger,
 	}
 }
 
-// AddPeerConn registers a PeerConn for a specific cluster_peer_id.
+// AddPeerConn registers a PeerConn for a specific cluster_peer_id and branch.
 func (d *Dispatcher) AddPeerConn(conn *PeerConn) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.peerConns[conn.ClusterPeerID()] = conn
+	clusterPeerID := conn.ClusterPeerID()
+	branch := conn.Branch()
+
+	// Initialize inner map if needed
+	if d.peerConns[clusterPeerID] == nil {
+		d.peerConns[clusterPeerID] = make(map[uint32]*PeerConn)
+	}
+
+	// Close old connection if replacing
+	if old, exists := d.peerConns[clusterPeerID][branch]; exists {
+		old.Close()
+		d.log.Warn("replacing existing peer connection",
+			"cluster_peer_id", clusterPeerID,
+			"branch", branch)
+	}
+
+	d.peerConns[clusterPeerID][branch] = conn
 	d.log.Info("added peer connection",
-		"cluster_peer_id", conn.ClusterPeerID(),
-		"branch", conn.Branch())
+		"cluster_peer_id", clusterPeerID,
+		"branch", branch)
 }
 
-// RemovePeerConn removes a PeerConn from the dispatcher.
+// RemovePeerConn removes all PeerConns for a specific cluster_peer_id.
 func (d *Dispatcher) RemovePeerConn(clusterPeerID uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	branches, ok := d.peerConns[clusterPeerID]
+	if !ok {
+		return
+	}
+
+	for branch := range branches {
+		d.log.Info("removed peer connection", "cluster_peer_id", clusterPeerID, "branch", branch)
+	}
 	delete(d.peerConns, clusterPeerID)
-	d.log.Info("removed peer connection", "cluster_peer_id", clusterPeerID)
 }
 
 // Dispatch routes an inbound frame to the appropriate handler.
@@ -61,21 +84,26 @@ func (d *Dispatcher) Dispatch(frame *Frame) {
 
 	// Peer-shard P2P → go to PeerConn
 	d.mu.RLock()
-	conn, ok := d.peerConns[frame.Meta.ClusterPeerID]
-	d.mu.RUnlock()
-
+	branches, ok := d.peerConns[frame.Meta.ClusterPeerID]
 	if !ok {
+		d.mu.RUnlock()
 		d.log.Warn("no peer connection for cluster_peer_id",
 			"cluster_peer_id", frame.Meta.ClusterPeerID)
 		return
 	}
 
-	if conn.Branch() != frame.Meta.Branch {
-		d.log.Warn("branch mismatch in peer frame",
-			"conn_branch", conn.Branch(), "frame_branch", frame.Meta.Branch)
+	conn, ok := branches[frame.Meta.Branch]
+	d.mu.RUnlock()
+
+	if !ok {
+		d.log.Warn("no peer connection for cluster_peer_id and branch",
+			"cluster_peer_id", frame.Meta.ClusterPeerID,
+			"branch", frame.Meta.Branch)
 		return
 	}
 
+	// HandleFrame's closeMu check provides safety; the PeerConn object
+	// remains valid (Go GC) even if the map entry is concurrently replaced.
 	conn.HandleFrame(frame)
 }
 
@@ -84,8 +112,11 @@ func (d *Dispatcher) Close() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for _, conn := range d.peerConns {
-		conn.Close()
+	for clusterPeerID, branches := range d.peerConns {
+		for branch, conn := range branches {
+			conn.Close()
+			d.log.Info("closed peer connection", "cluster_peer_id", clusterPeerID, "branch", branch)
+		}
 	}
 	d.peerConns = nil
 }
@@ -94,5 +125,9 @@ func (d *Dispatcher) Close() {
 func (d *Dispatcher) PeerConnCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return len(d.peerConns)
+	total := 0
+	for _, branches := range d.peerConns {
+		total += len(branches)
+	}
+	return total
 }

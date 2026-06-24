@@ -324,6 +324,7 @@ func TestSlaveXshardServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	conn.Start()
 
 	if err := conn.SendXshardTxList(1, []byte("xshard tx data")); err != nil {
 		t.Fatal("SendXshardTxList failed:", err)
@@ -379,6 +380,7 @@ func TestSlaveXshardPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conn.Start()
 	pool.Add(target, conn)
 
 	if pool.Size() != 1 {

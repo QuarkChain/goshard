@@ -221,6 +221,7 @@ func TestSlaveRPC_XshardPingHandshake(t *testing.T) {
 	}
 	defer xc.Close()
 	rpc.slave.applyXshardHandlers(xc)
+	xc.Start()
 
 	select {
 	case <-pingSent:
@@ -266,6 +267,7 @@ func TestSlaveRPC_XshardSendTxList(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer xc.Close()
+	xc.Start()
 
 	if err := xc.SendXshardTxList(2, []byte("cross-shard-tx-data")); err != nil {
 		t.Fatal(err)
