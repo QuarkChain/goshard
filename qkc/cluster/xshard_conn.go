@@ -95,6 +95,18 @@ func (s *XshardConn) readLoop() {
 			respPayload, err := handler(frame)
 			if err != nil {
 				s.log.Error("xshard handler failed", "opcode", frame.Opcode, "err", err)
+				// Send an empty response so the caller doesn't block waiting.
+				if frame.RPCID != 0 {
+					resp := &Frame{
+						Meta:    frame.Meta,
+						Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
+						RPCID:   frame.RPCID,
+						Payload: nil,
+					}
+					if err := s.WriteFrame(resp); err != nil {
+						s.log.Error("failed to send xshard error response", "err", err)
+					}
+				}
 				return
 			}
 			if frame.RPCID != 0 && respPayload != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -27,6 +28,7 @@ type MasterConn struct {
 	// RPC response matching
 	pendingMu sync.Mutex
 	pending   map[uint64]chan *Frame // rpcID -> response channel
+	nextRPCID uint64                 // atomic counter for RPC IDs
 
 	// Handlers for inbound cluster RPCs (cluster_peer_id == 0)
 	handlersMu sync.RWMutex
@@ -120,6 +122,18 @@ func (m *MasterConn) Handle(frame *Frame) {
 		respPayload, err := handler(frame)
 		if err != nil {
 			m.log.Error("handler failed", "opcode", frame.Opcode, "err", err)
+			// Send an empty response so the caller doesn't block waiting.
+			if frame.RPCID != 0 {
+				resp := &Frame{
+					Meta:    frame.Meta,
+					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
+					RPCID:   frame.RPCID,
+					Payload: nil,
+				}
+				if err := m.WriteFrame(resp); err != nil {
+					m.log.Error("failed to send error response", "opcode", frame.Opcode, "err", err)
+				}
+			}
 			return
 		}
 		if frame.RPCID != 0 && respPayload != nil {
@@ -151,7 +165,7 @@ func (m *MasterConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (
 		return nil, fmt.Errorf("connection closed")
 	}
 
-	rpcID := uint64(time.Now().UnixNano())
+	rpcID := atomic.AddUint64(&m.nextRPCID, 1)
 	respChan := make(chan *Frame, 1)
 	m.pendingMu.Lock()
 	m.pending[rpcID] = respChan
@@ -177,6 +191,11 @@ func (m *MasterConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (
 
 	select {
 	case resp := <-respChan:
+		// respChan is closed by Close() to unblock pending requests.
+		// A nil frame means the connection was closed, not a real response.
+		if resp == nil {
+			return nil, ErrConnectionClosed
+		}
 		return resp, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("rpc timeout: %w", ctx.Err())

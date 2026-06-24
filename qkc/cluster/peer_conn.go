@@ -67,6 +67,18 @@ func (p *PeerConn) HandleFrame(frame *Frame) {
 		respPayload, err := handler(frame)
 		if err != nil {
 			p.log.Error("peer handler failed", "opcode", frame.Opcode, "err", err)
+			// Send an empty response so the caller doesn't block waiting.
+			if frame.RPCID != 0 {
+				resp := &Frame{
+					Meta:    Metadata{Branch: p.branch, ClusterPeerID: p.clusterPeerID},
+					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
+					RPCID:   frame.RPCID,
+					Payload: nil,
+				}
+				if err := p.SendFrame(resp); err != nil {
+					p.log.Error("failed to send peer error response", "err", err)
+				}
+			}
 			return
 		}
 		if frame.RPCID != 0 && respPayload != nil {
