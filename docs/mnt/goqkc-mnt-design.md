@@ -19,7 +19,7 @@ type Account struct {
     Root          common.Hash
     CodeHash      []byte
     FullShardKey  *types.Uint32         // optional, fixed per address
-    Optial        []byte                // optional
+    Optional        []byte                // optional
 }
 ```
 
@@ -635,7 +635,7 @@ StateDB.Commit()
   │       Root:          storageRoot,
   │       CodeHash:      emptyCodeHash,
   │       FullShardKey:  0,
-  │       Optial:        nil,
+  │       Optional:        nil,
   │     })
   │   → trie.TryUpdate(keccak(0xA), encodedBytes)
   │
@@ -646,7 +646,7 @@ StateDB.Commit()
   │       Root:          emptyState,
   │       CodeHash:      emptyCodeHash,
   │       FullShardKey:  0,
-  │       Optial:        nil,
+  │       Optional:        nil,
   │     })
   │   → trie.TryUpdate(keccak(0xB), encodedBytes)
   │

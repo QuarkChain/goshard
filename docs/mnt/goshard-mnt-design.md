@@ -37,7 +37,7 @@ type Account struct {
     Root          common.Hash
     CodeHash      []byte
     FullShardKey  *types.Uint32         // optional, 5-byte custom RLP
-    Optial        []byte                // optional
+    Optional        []byte                // optional
 }
 ```
 
@@ -62,49 +62,22 @@ type Account struct {
 
 ### 2.1 StateAccount Struct
 
-goshard's `StateAccount` extends the original go-ethereum 4-field struct with a new `MntBalances` field:
+goshard's `StateAccount` extends the original go-ethereum 4-field struct with two new fields:
 
 **File**: `core/types/state_account.go`
 
 ```go
 type StateAccount struct {
-    Nonce    uint64
-    Balance  *uint256.Int             // 256-bit, QKC native token only
-    Root     common.Hash              // 32 bytes, storage trie root
-    CodeHash []byte                   // 32 bytes, emptyCodeHash if empty
-    MntBalances *types.TokenBalances  // non-QKC MNT balances; nil = no MNT tokens
+    Nonce        uint64
+    Balance      *uint256.Int
+    Root         common.Hash    // merkle root of the storage trie
+    CodeHash     []byte
+    MntBalances  *TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
+    FullShardKey uint32         // QuarkChain shard key; set on first tx, preserved thereafter
 }
 ```
 
-### 2.2 RLP Encoding (QuarkChain Compatible)
-
-goshard's `StateAccount` does **not** use go-ethereum's standard 4-element RLP (`gen_account_rlp.go`) for state trie storage. Instead, `updateStateObject` calls a custom encoder that produces a **6-element RLP** byte-for-byte identical to goquarkchain:
-
-```
-[Nonce, MntBalances_encoded, Root(32 bytes), CodeHash(32 bytes), FullShardKey(5 bytes), Optional]
-```
-
-Mapping to goquarkchain `Account` RLP:
-
-| Element | goshard source | goquarkchain source |
-|---------|---------------|---------------------|
-| Nonce | `StateAccount.Nonce` | `Account.Nonce` |
-| TokenBalances | `StateAccount.Balance` (QKC, tokenID=35760) + `StateAccount.MntBalances` (non-QKC), merged at encode time | `Account.TokenBalances` |
-| Root | `StateAccount.Root` | `Account.Root` |
-| CodeHash | `StateAccount.CodeHash` | `Account.CodeHash` |
-| FullShardKey | derived from Config at encode time (not stored in struct) | `Account.FullShardKey` |
-| Optional | `nil` | `Account.Optial` |
-
-At encode time, `EncodeAccountRLP` merges `Balance` (QKC, tokenID=35760) into `MntBalances` before serializing:
-
-```
-mergedTokenBalances = MntBalances ∪ {tokenID=35760: Balance}
-```
-
-Serialization format matches goquarkchain `TokenBalances` exactly:
-- empty (no tokens) → RLP empty string `0x80`
-- ≤ 16 non-zero balances → `0x00` prefix + RLP list of `TokenBalancePair` (sorted by TokenID ascending)
-- \> 16 non-zero balances → `0x01` prefix + 32-byte SecureTrie merkle root
+**Rationale for `FullShardKey` on StateAccount**: `FullShardKey` is determined solely by the transaction that created the account, so it is an indeterminate value that cannot be derived from Config at encode time. It can only be inherited from the existing account in the DB, or set by the creating transaction. It is therefore stored directly in `StateAccount` alongside `MntBalances`. This keeps all account data in one place and simplifies deepCopy/journal logic.
 
 ---
 
@@ -114,13 +87,14 @@ Serialization format matches goquarkchain `TokenBalances` exactly:
 ┌──────────────────────────────────────────────────────┐
 │  goshard (geth fork) with MNT                        │
 │                                                      │
-│  Internal:  StateAccount extended (5 fields)         │
+│  Internal:  StateAccount extended (6 fields)         │
 │            Balance = QKC token (*uint256.Int)        │
 │            MntBalances = MNT tokens (*TokenBalances) │
+│            FullShardKey = shard key (uint32)         │
 │            Stored in StateAccount directly           │
 │                                                      │
-│  Encoding boundary: updateStateObject → trie         │
-│    StateAccount (5 fields) →  QuarkChain (6 elem)    │
+│  Encoding boundary: StateAccount → rlp              │
+│    StateAccount (6 fields) →  QuarkChain (6 elem)    │
 │                                                      │
 │  P2P sync: with pyquarkchain/goquarkchain nodes      │
 │  Requirement: identical trie root hash               │
@@ -128,11 +102,12 @@ Serialization format matches goquarkchain `TokenBalances` exactly:
 ```
 
 **Core design principle**:
-- `StateAccount` struct adds `MntBalances *types.TokenBalances` as 5th field
+- `StateAccount` struct adds `MntBalances *TokenBalances` and `FullShardKey uint32` as 5th/6th fields
 - `*uint256.Int` balance type stays in the EVM and state machine for QKC
-- RLP encoding at trie update time produces QuarkChain 6-element format
-- All balance operations for non-QKC tokens go through new `MntBalances` system
+- `StateAccount` implements `EncodeRLP`/`DecodeRLP` directly (via `state_account_qkc.go`)
+- MNT balance operations for non-QKC tokens go through `stateObject_qkc.go` methods
 - MNT precompiles handle token transfers, minting, and balance queries
+- `MntBalances` nil vs. empty is used to represent different scenarios and produce the corresponding encode results
 
 ---
 
@@ -180,20 +155,18 @@ Two storage formats exist in goquarkchain based on number of non-zero token bala
 
 **goshard limitation**: The trie format (`0x01`) is **not implemented**. `SerializeToBytes` returns an error if more than 16 non-zero token balances are present. `NewTokenBalancesFromBytes` returns an error on `0x01`-prefixed input.
 
-**Reason**: Implementing the trie format requires a `SecureTrie` backed by a database. In `core/types`, importing the `trie` package creates a circular dependency (`core/types → trie → core/rawdb → consensus/misc/eip4844 → core/types`). A standalone MPT implementation exists in `core/types/mpt_hasher.go` for future use, but its output has not been verified byte-for-byte against goquarkchain's `SecureTrie`. No real mainnet accounts with > 16 MNT tokens have been observed.
-
 ---
 
 ## 5. Design Decisions
 
-### 5.1 No `fullShardKey` on stateObject; MntBalances on StateAccount
+### 5.1 FullShardKey stored per-account in StateAccount; propagated from StateDB per transaction
 
-**Rationale**: `FullShardKey` is per-shard, not per-account. Each shard uses a fixed shard key. The key can be derived from `Config` at encoding time based on the address's shard assignment.
+**Rationale**: Each account may have a different `FullShardKey` (e.g. re-created accounts must preserve their original shard key). Therefore `FullShardKey` is stored in `StateAccount` directly alongside `MntBalances`. This keeps all account data in one place and simplifies deepCopy/journal logic.
 
-`MntBalances` is now part of `StateAccount` (not a separate field on `stateObject`). This keeps all account data in one place and simplifies deepCopy/journal logic.
+`StateDB` holds the current transaction's destination shard key in `fullShardKey`, set once per transaction via `SetFullShardKey()`. Any newly created account (with no prior state) inherits this value. If the account previously existed, `createObject` preserves the original `FullShardKey` unchanged.
 
 ```go
-// stateObject: no MNT-specific field needed — MntBalances lives in stateObject.data
+// stateObject: no MNT-specific field needed — MntBalances and FullShardKey live in stateObject.data
 type stateObject struct {
     // ... existing fields unchanged ...
     data        types.StateAccount  // Account data with all mutations applied in the scope of block
@@ -621,9 +594,9 @@ func (s *stateObject) IsBlankMnt() bool {
 }
 ```
 
-### 7.5 `core/state/statedb_qkc.go` — MNT Balance Methods + QuarkChain Encoding
+### 7.5 `core/state/statedb_qkc.go` — MNT Balance Methods
 
-New file that adds MNT-specific StateDB methods and the QuarkChain account encoder.
+New file that adds MNT-specific StateDB methods.
 
 ```go
 package state
@@ -631,7 +604,6 @@ package state
 import (
     "github.com/ethereum/go-ethereum/common"
     "github.com/ethereum/go-ethereum/core/types"
-    "github.com/ethereum/go-ethereum/rlp"
     "github.com/holiman/uint256"
 )
 
@@ -669,88 +641,32 @@ func (s *StateDB) GetMntBalance(addr common.Address, tokenID uint64) *uint256.In
     }
     return obj.GetMntBalance(tokenID)
 }
-
-// ===== QuarkChain Account Encoder =====
-
-// EncodeAccountRLP encodes a StateAccount into QuarkChain's 6-element RLP format.
-//
-// QuarkChain Account RLP: [Nonce, TokenBalances, Root, CodeHash, FullShardKey, Optional]
-//
-// The second element (TokenBalances) merges:
-//   - acct.Balance (QKC native, tokenID=35760)
-//   - acct.MntBalances (non-QKC MNT tokens)
-//
-// Parameters:
-//   - acct: the goshard StateAccount
-//   - fullShardKey: shard key for the address (derived from config)
-//   - optional: additional bytes (typically nil)
-func EncodeAccountRLP(acct *types.StateAccount, fullShardKey uint32, optional []byte) []byte {
-    // Merge QKC balance (tokenID=35760) into a combined TokenBalances for RLP.
-    merged := mergeTokenBalances(acct.Balance, acct.MntBalances)
-
-    var items []interface{}
-    items = append(items, acct.Nonce)
-
-    if merged == nil || merged.IsBlank() {
-        items = append(items, []byte(nil))
-    } else {
-        items = append(items, merged)
-    }
-
-    items = append(items, acct.Root[:])
-    items = append(items, acct.CodeHash)
-
-    shardKey := types.Uint32(fullShardKey)
-    items = append(items, shardKey)
-    items = append(items, optional)
-
-    data, _ := rlp.EncodeToBytes(items)
-    return data
-}
-
-// mergeTokenBalances returns a TokenBalances containing both the QKC native balance
-// (as tokenID=defaultTokenID) and any existing MNT balances.
-// Returns nil if both are zero/empty.
-func mergeTokenBalances(qkcBalance *uint256.Int, mnt *types.TokenBalances) *types.TokenBalances {
-    if (qkcBalance == nil || qkcBalance.IsZero()) && (mnt == nil || mnt.IsBlank()) {
-        return nil
-    }
-    merged := types.NewEmptyTokenBalances()
-    if mnt != nil {
-        for id, bal := range mnt.GetBalanceMap() {
-            merged.SetValue(bal, id)
-        }
-    }
-    if qkcBalance != nil && !qkcBalance.IsZero() {
-        merged.SetValue(qkcBalance, defaultTokenID) // defaultTokenID = 35760
-    }
-    return merged
-}
 ```
 
-### 7.6 Modified `core/types/state_account.go` — Add MntBalances Field
+### 7.6 Modified `core/types/state_account.go` and `state_account_qkc.go`
 
-Add `MntBalances` as the 5th field. The standard `gen_account_rlp.go` is NOT used for trie storage — use `EncodeAccountRLP` instead. `deepCopy` in `stateObject` copies `data` (a `StateAccount` value), so `MntBalances` is automatically included.
+`state_account.go` adds `MntBalances` and `FullShardKey` as 5th/6th fields. The standard `gen_account_rlp.go` is NOT used — `StateAccount` implements custom `EncodeRLP`/`DecodeRLP` in `state_account_qkc.go`. `deepCopy` in `stateObject` copies `data` (a `StateAccount` value), so `FullShardKey` (value type) is automatically included.
 
 ```go
 // core/types/state_account.go
 type StateAccount struct {
-    Nonce    uint64
-    Balance  *uint256.Int             // 256-bit, QKC native token only
-    Root     common.Hash              // 32 bytes, storage trie root
-    CodeHash []byte                   // 32 bytes, emptyCodeHash if empty
-    MntBalances *types.TokenBalances  // non-QKC MNT balances; nil = no MNT tokens
+    Nonce        uint64
+    Balance      *uint256.Int
+    Root         common.Hash    // merkle root of the storage trie
+    CodeHash     []byte
+    MntBalances  *TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
+    FullShardKey uint32         // QuarkChain shard key; set on first tx, preserved thereafter
 }
 ```
 
-`deepCopy` in `stateObject` (around line 510) needs no change — it copies `s.data` by value and then does deep copies of pointer fields. Add `MntBalances` copy:
+`deepCopy` in `stateObject` needs to deep-copy `MntBalances` (pointer field); `FullShardKey` copies by value automatically:
 
 ```go
 func (s *stateObject) deepCopy(db *StateDB) *stateObject {
     obj := &stateObject{
         db:      db,
         address: s.address,
-        data:    s.data,   // copies all 5 StateAccount fields including MntBalances pointer
+        data:    s.data,   // copies all 6 StateAccount fields; FullShardKey copied by value
         // ... other fields ...
     }
     if s.data.MntBalances != nil {
@@ -761,25 +677,58 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 }
 ```
 
-### 7.7 Modified `core/state/statedb.go` — updateStateObject + MNT Methods
+**`state_account_qkc.go` — EncodeRLP three-way switch**
 
-The critical change: intercept RLP encoding to produce QuarkChain 6-element format.
+`StateAccount.EncodeRLP` distinguishes three cases to produce byte-identical round-trip encoding:
 
 ```go
-// Modified updateStateObject (around line 575):
+func (acct *StateAccount) EncodeRLP(w io.Writer) error {
+    var tokenBal []byte
+    switch {
+    case acct.MntBalances == nil && (acct.Balance == nil || acct.Balance.IsZero()):
+        // No QKC balance, no MNT tokens → TokenBal = nil → wire: 0x80
+        // Covers new accounts and accounts that never touched TokenBalances.
+        tokenBal = nil
+
+    case acct.MntBalances != nil && acct.MntBalances.IsBlank() && acct.Balance != nil && acct.Balance.IsZero():
+        // QKC balance zero, MNT map explicitly empty → serialize as empty list → wire: 0x8200c0
+        // Preserves "account touched TokenBalances map then emptied it" history
+        // (9194 such accounts observed on mainnet).
+        tokenBal, _ = acct.MntBalances.SerializeToBytes()
+
+    default:
+        // Normal: merge QKC balance (tokenID=35760) with MNT balances and serialize.
+        tb := mergeQKCTokenBalances(acct.Balance, acct.MntBalances)
+        tokenBal, _ = tb.SerializeToBytes()
+    }
+    qkc := &qkcAccountRLP{
+        Nonce:        acct.Nonce,
+        Root:         acct.Root,
+        CodeHash:     acct.CodeHash,
+        TokenBal:     tokenBal,
+        FullShardKey: Uint32(acct.FullShardKey), // stored per-account, not derived from Config
+        Optional:       nil,
+    }
+    return rlp.Encode(w, qkc)
+}
+```
+
+**`DecodeRLP`** sets `acct.FullShardKey = uint32(qkc.FullShardKey)` and always sets `MntBalances` when `TokenBal` has content (even if empty after stripping QKC), preserving the nil vs. empty-list distinction on round-trip.
+
+### 7.7 Modified `core/state/statedb.go` — updateStateObject + FullShardKey tracking
+
+**`updateStateObject`**: `obj.data.FullShardKey` is set on the account. `rlp.EncodeToBytes(&obj.data)` calls `StateAccount.EncodeRLP` in `state_account_qkc.go` which produces the QuarkChain 6-element wire format.
+
+```go
 func (s *StateDB) updateStateObject(obj *stateObject) {
-    // === MNT: Encode as QuarkChain 6-element format directly into trie ===
     hk := crypto.Keccak256(obj.Address().Bytes())
-
-    // FullShardKey is derived from config based on address, not stored per-object
-    shardKey := s.getShardKeyForAddress(obj.Address())
-
-    data := EncodeAccountRLP(
-        &obj.data,   // StateAccount (5 fields: Nonce, Balance, Root, CodeHash, MntBalances)
-        shardKey,    // FullShardKey from config
-        nil,         // Optional
-    )
-
+    // obj.data.FullShardKey already set — inherited from s.fullShardKey or preserved from prior state.
+    // StateAccount.EncodeRLP (state_account_qkc.go) produces the QuarkChain 6-element format.
+    data, err := rlp.EncodeToBytes(&obj.data)
+    if err != nil {
+        s.setError(fmt.Errorf("updateStateObject (%x) encode error: %v", obj.Address(), err))
+        return
+    }
     if err := s.trie.Update(hk, data); err != nil {
         s.setError(fmt.Errorf("updateStateObject (%x) error: %v", obj.Address(), err))
     }
@@ -787,8 +736,55 @@ func (s *StateDB) updateStateObject(obj *stateObject) {
         s.trie.UpdateContractCode(obj.Address(), common.BytesToHash(obj.CodeHash()), obj.code)
     }
 }
+```
 
-// MNT balance methods on StateDB are delegated to the stateObject methods (see statedb_qkc.go).
+**`fullShardKey` field and `SetFullShardKey()`**: `StateDB` holds the destination shard key for the current transaction, set once per transaction before account operations:
+
+```go
+type StateDB struct {
+    // ...
+    // fullShardKey is the QuarkChain shard key of the current transaction's destination.
+    // Set once per transaction via SetFullShardKey; newly created accounts inherit this value.
+    fullShardKey uint32
+    // ...
+}
+
+// SetFullShardKey sets the QuarkChain shard key for the current transaction context.
+func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
+    s.fullShardKey = fullShardKey
+}
+```
+
+**`createObject` FullShardKey logic**: new accounts inherit `s.fullShardKey`; if the account previously existed its original `FullShardKey` is preserved:
+
+```go
+func (s *StateDB) createObject(addr common.Address) *stateObject {
+    prev := s.getStateObject(addr)  // check for existing account
+    obj := newObject(s, addr, nil)
+    obj.data.FullShardKey = s.fullShardKey  // inherit transaction shard key
+    if prev != nil {
+        obj.data.FullShardKey = prev.data.FullShardKey  // preserve existing account's key
+    }
+    s.journal.createObject(addr)
+    s.setStateObject(obj)
+    return obj
+}
+```
+
+**`Copy()`** copies `fullShardKey` so snapshot copies remain consistent:
+
+```go
+func (s *StateDB) Copy() *StateDB {
+    // ...
+    return &StateDB{
+        // ...
+        fullShardKey: s.fullShardKey,
+        // ...
+    }
+}
+```
+
+MNT balance methods on StateDB are in `statedb_qkc.go` (see §7.5).
 
 ### 7.8 `core/vm/contracts_qkc.go` — MNT Precompiles
 
@@ -1274,7 +1270,7 @@ QKC balance → StateAccount.Balance (*uint256.Int)
                   AddBalance, SubBalance, GetBalance
               → transferMnt precompile does NOT handle QKC
               → At trie write time: merged into TokenBalances as tokenID=35760
-                  (via mergeTokenBalances in EncodeAccountRLP)
+                  (via mergeQKCTokenBalances in StateAccount.EncodeRLP)
 ```
 
 ### 9.2 MNT (Non-QKC Tokens)
@@ -1320,7 +1316,7 @@ transferMnt precompile:
 - Snapshot tree logic
 - Transaction signing/verification (new fields added but format is backward-compatible)
 - P2P protocol
-- State account decoding (stays 4-field format for internal use)
+- `StateAccount` struct fields (number of fields and types are the goshard-internal representation)
 - Trie node structure or hash algorithm (still keccak256(RLP))
 - `currentMntID` TokenIDQueried enforcement mechanism (identical to goquarkchain)
 
@@ -1337,7 +1333,7 @@ transferMnt precompile:
 ### Phase 2: State Extensions
 5. `core/types/state_account.go` — Add `MntBalances` field to StateAccount
 6. `core/state/state_object_qkc.go` — MNT accessor methods (use `s.data.MntBalances`)
-7. `core/state/statedb_qkc.go` — MNT balance methods + `EncodeAccountRLP`
+7. `core/state/statedb_qkc.go` — MNT balance methods
 8. `core/state/statedb.go` — Modify `updateStateObject`, add MNT methods
 9. `core/state/reader.go` — Decode QuarkChain 6-element format into `StateAccount.MntBalances`
 10. `core/state/journal.go` — MNT balance journal entries
@@ -1366,44 +1362,53 @@ Three progressive test layers: **unit tests** (encoding correctness) → **snaps
 
 #### 12.1.1 RLP Byte-for-Byte Comparison
 
-The most fundamental check: `EncodeAccountRLP` output for various account configurations must match golden bytes pre-generated by a goquarkchain Python script or Go test, byte-for-byte.
+The most fundamental check: `StateAccount.EncodeRLP` output for various account configurations must match golden bytes pre-generated by a goquarkchain Python script or Go test, byte-for-byte.
 
 **Test case matrix**:
 
-| Case | Balance(QKC) | MntBalances | FullShardKey | Notes |
-|------|-------------|-------------|--------------|-------|
-| 1 | 1000000 | nil | 0 | QKC-only account |
-| 2 | 0 | {QKCUP: 500000} | 0 | MNT-only account |
-| 3 | 1000000 | {QKCUP: 500000} | 0 | QKC + MNT |
-| 4 | 1000000 | nil | 0x10000 | non-zero FullShardKey |
-| 5 | 0 | 17 distinct tokens | 0 | exceeds threshold → trie format |
+| Case | Balance(QKC) | MntBalances | Notes |
+|------|-------------|-------------|-------|
+| 1 | 0/nil | nil | QKC=0 and nil MntBalances → 0x80 TokenBal |
+| 2 | 0 | {QKCUP: 500000} | MNT-only account |
+| 3 | 1000000 | {QKCUP: 500000} | QKC + MNT |
+| 4 | 1000000 | nil | QKC-only account |
+| 5 | 0 | 17 distinct tokens | exceeds threshold (>16) → encode error, not supported |
+| 6 | 0 | empty (non-nil) | "touched then emptied" → 0x8200c0 TokenBal |
 
 ```go
-func TestEncodeAccountRLP_MatchesGoQuarkchain(t *testing.T) {
+func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
     cases := []struct {
         name        string
         balance     *uint256.Int
-        mntBalances map[uint64]*uint256.Int
+        mntBalances *types.TokenBalances  // nil vs NewEmptyTokenBalances() matters!
         shardKey    uint32
         goldenHex   string // pre-generated from goquarkchain
     }{
-        {"qkc_only",        uint256.NewInt(1000000), nil,                          0,       "..."},
-        {"mnt_only",        uint256.NewInt(0),        map[uint64]*uint256.Int{TokenIDEncode("QKCUP"): uint256.NewInt(500000)}, 0, "..."},
-        {"qkc_and_mnt",     uint256.NewInt(1000000),  map[uint64]*uint256.Int{TokenIDEncode("QKCUP"): uint256.NewInt(500000)}, 0, "..."},
-        {"nonzero_shardkey",uint256.NewInt(1000000),  nil,                          0x10000, "..."},
-        {"trie_format",     uint256.NewInt(0),         make17Tokens(),               0,       "..."},
+        {"qkc_only",          uint256.NewInt(1000000), nil,                                                                     0,       "..."},
+        {"mnt_only",          uint256.NewInt(0),       types.NewTokenBalancesWithMap(map[uint64]*uint256.Int{TokenIDEncode("QKCUP"): uint256.NewInt(500000)}), 0, "..."},
+        {"qkc_and_mnt",       uint256.NewInt(1000000), types.NewTokenBalancesWithMap(map[uint64]*uint256.Int{TokenIDEncode("QKCUP"): uint256.NewInt(500000)}), 0, "..."},
+        {"nonzero_shardkey",  uint256.NewInt(1000000), nil,                                                                     0x10000, "..."},
+        {"trie_format",       uint256.NewInt(0),       make17Tokens(),                                                          0,       "..."},
+        {"touched_emptied",   uint256.NewInt(0),       types.NewEmptyTokenBalances(), /* non-nil, IsBlank=true */               0,       "..."}, // → 0x8200c0
     }
     for _, c := range cases {
         t.Run(c.name, func(t *testing.T) {
             acct := &types.StateAccount{
-                Nonce:       1,
-                Balance:     c.balance,
-                Root:        emptyRoot,
-                CodeHash:    emptyCodeHash,
-                MntBalances: types.NewTokenBalancesWithMap(c.mntBalances),
+                Nonce:        1,
+                Balance:      c.balance,
+                Root:         emptyRoot,
+                CodeHash:     emptyCodeHash,
+                MntBalances:  c.mntBalances,
+                FullShardKey: c.shardKey,
             }
-            got := EncodeAccountRLP(acct, c.shardKey, nil)
+            got, err := rlp.EncodeToBytes(acct)  // calls StateAccount.EncodeRLP
+            require.NoError(t, err)
             require.Equal(t, common.Hex2Bytes(c.goldenHex), got)
+            // round-trip: decode back and re-encode should produce identical bytes
+            var acct2 types.StateAccount
+            require.NoError(t, rlp.DecodeBytes(got, &acct2))
+            got2, _ := rlp.EncodeToBytes(&acct2)
+            require.Equal(t, got, got2, "round-trip must be byte-identical")
         })
     }
 }
@@ -2065,7 +2070,7 @@ func TestGenGoldenRoots(t *testing.T) {
 
 | Layer | Test | Pass criteria | Dependencies |
 |-------|------|---------------|-------------|
-| L1 Unit | `TestEncodeAccountRLP` | byte-for-byte match against golden hex | golden generated by `TestGenGoldenRLP` in goquarkchain |
+| L1 Unit | `TestStateAccountEncodeDecodeRoundtrip` | byte-for-byte match against golden hex; round-trip identical bytes | golden generated by `TestGenGoldenRLP` in goquarkchain |
 | L1 Unit | `TestMergeTokenBalances` | QKC and MNT fields merged correctly | none |
 | L1 Unit | `TestMntBalanceRejectsQKC` | QKC balance unaffected | none |
 | L1 Unit | `TestPrecompile_MintMNT_Direct` | caller/gas/error codes correct; **no snapshot needed** | none |
@@ -2097,13 +2102,13 @@ func TestGenGoldenRoots(t *testing.T) {
 | **New** | `common/token_codec.go` | Port from goquarkchain | ~80 |
 | **New** | `core/types/uint32_rlp.go` | Port from goquarkchain | ~50 |
 | **New** | `core/types/token.go` | `TokenBalances`, `TokenBalancePair`, `DefaultTokenID` | ~200 |
-| **New** | `core/types/state_account_qkc.go` | `StateAccount.EncodeRLP`/`DecodeRLP` — QKC 6-element wire format | ~115 |
+| **New** | `core/types/state_account_qkc.go` | `StateAccount.EncodeRLP`/`DecodeRLP` — QKC 6-element wire format; three-way TokenBal switch (nil/empty/normal); uses `acct.FullShardKey` | ~115 |
 | **New** | `core/state/state_object_qkc.go` | MNT accessors on `stateObject` | ~70 |
-| **New** | `core/state/statedb_qkc.go` | StateDB MNT methods | ~85 |
+| **New** | `core/state/statedb_qkc.go` | StateDB MNT methods (SetMntBalance / AddMntBalance / SubMntBalance / GetMntBalance) | ~85 |
 | **New** | `core/vm/contracts_qkc.go` | 5 MNT precompile contracts | ~300 |
 | **Deleted** | `core/types/gen_account_rlp.go` | Removed — replaced by `StateAccount.EncodeRLP` in `state_account_qkc.go` | -21 |
-| **Modified** | `core/types/state_account.go` | Add `MntBalances *TokenBalances` field | ~15 |
-| **Modified** | `core/state/statedb.go` | Wire QKC CanTransfer/Transfer; compile fixes | ~85 |
+| **Modified** | `core/types/state_account.go` | Add `MntBalances *TokenBalances` and `FullShardKey uint32` fields; `Copy()` updated | ~20 |
+| **Modified** | `core/state/statedb.go` | Add `fullShardKey uint32` field + `SetFullShardKey()`; `createObject` inherits/preserves `FullShardKey`; `Copy()` propagates `fullShardKey`; `updateStateObject` uses `rlp.EncodeToBytes(&obj.data)` directly | ~100 |
 | **Modified** | `core/state/journal.go` | `mntBalanceChange` journal entry + revert | ~40 |
 | **Modified** | `core/vm/contracts.go` | Merge `PrecompiledContractsMNT` into active precompiles | ~10 |
 | **Modified** | `core/vm/evm.go` | Add `GasTokenID`/`TransferTokenID` to `TxContext`; wire `CanTransfer`/`Transfer`; `checkTokenIDQueried` | ~80 |
@@ -2186,13 +2191,13 @@ transferMnt.precompile.Run(input)
 StateDB.Commit()
   │
   ├─ updateStateObject(stateObject(0xA))
-  │   → EncodeAccountRLP(&obj.data, shardKey, nil)
-  │     (obj.data.MntBalances = {5: oldBalance-100})
+  │   → rlp.EncodeToBytes(&obj.data)  → StateAccount.EncodeRLP (state_account_qkc.go)
+  │     (obj.data.MntBalances = {5: oldBalance-100}, obj.data.FullShardKey = preserved)
   │   → trie.Update(keccak(0xA), encodedBytes)
   │
   ├─ updateStateObject(stateObject(0xB))
-  │   → EncodeAccountRLP(&obj.data, shardKey, nil)
-  │     (obj.data.MntBalances = {5: 100})
+  │   → rlp.EncodeToBytes(&obj.data)  → StateAccount.EncodeRLP
+  │     (obj.data.MntBalances = {5: 100}, obj.data.FullShardKey = inherited from StateDB.fullShardKey)
   │   → trie.Update(keccak(0xB), encodedBytes)
   │
   └─ trie.Commit() → new state root hash
@@ -2220,7 +2225,7 @@ evm.Call(sender, to(), data, gas, value=1 ether)
 StateDB.Commit()
   │
   ├─ updateStateObject(stateObject(0xA))
-  │   → EncodeAccountRLP(&obj.data, shardKey, nil)  // obj.data.MntBalances = nil
+  │   → rlp.EncodeToBytes(&obj.data)  → StateAccount.EncodeRLP  // MntBalances=nil → 0x80 TokenBal
   │   → trie.Update(keccak(0xA), encodedBytes)
   │
   └─ trie.Commit() → new state root hash
