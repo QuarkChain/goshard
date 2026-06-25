@@ -534,3 +534,312 @@ func TestSlaveRPC_FullIntegration(t *testing.T) {
 	t.Log("step 4: slave → master send OK")
 	t.Log("full integration PASSED")
 }
+
+// =============================================================================
+// Real e2e: two real Go Slaves talking to each other over TCP.
+//
+// This test replaces the previous "mock slave B = bare net.Listener" approach
+// which could not exercise recordPing / WaitUntilPingReceived / xshardPool
+// indexing on the inbound side.  Here both peers are real Slave instances, so
+// every code path on both sides is actually executed.
+// =============================================================================
+
+// TestE2E_TwoSlavesHandshake verifies the full Slave ↔ Slave connection
+// lifecycle: master triggers ConnectToSlaves on slaveA, which dials slaveB's
+// listening port.  Both sides must:
+//   - complete the PING/PONG handshake
+//   - record each other's id and full_shard_id_list (recordPing)
+//   - index the conn by peer shards in their own xshardPool
+//   - register the peer id in connectedSlaveIDs
+//
+// After the handshake we send an ADD_XSHARD_TX_LIST from A to B and verify
+// B's xshard handler is invoked — i.e. the conn is actually usable.
+func TestE2E_TwoSlavesHandshake(t *testing.T) {
+	// --- Two real slaves, each with its own listen port ---
+	rpcA, err := NewSlaveRPC(&Config{
+		ID:          "slave-A",
+		ListenAddr:  "127.0.0.1:0",
+		OwnBranches: []uint32{0x00030000, 0x00030001}, // chain 3, shards 0 and 1
+	})
+	if err != nil {
+		t.Fatal("NewSlaveRPC A:", err)
+	}
+	defer rpcA.Close()
+	rpcB, err := NewSlaveRPC(&Config{
+		ID:          "slave-B",
+		ListenAddr:  "127.0.0.1:0",
+		OwnBranches: []uint32{0x00030002, 0x00030003}, // chain 3, shards 2 and 3
+	})
+	if err != nil {
+		t.Fatal("NewSlaveRPC B:", err)
+	}
+	defer rpcB.Close()
+
+	// Register handlers on both.  We replace the default OP_ADD_XSHARD_TX_LIST
+	// stub on B with a real handler so we can observe inbound xshard traffic.
+	rpcA.RegisterHandlers()
+	rpcB.RegisterHandlers()
+
+	xshardReceivedB := make(chan []byte, 1)
+	rpcB.slave.SetXshardHandlers(map[byte]MasterHandler{
+		OP_PING: rpcB.handleXshardPing,
+		OP_ADD_XSHARD_TX_LIST_REQUEST: func(frame *Frame) ([]byte, error) {
+			xshardReceivedB <- frame.Payload
+			return serialize.SerializeToBytes(&AddXshardTxListResponse{ErrorCode: 0})
+		},
+		OP_BATCH_ADD_XSHARD_TX_LIST_REQUEST: rpcB.stub(),
+	})
+
+	rpcA.Start()
+	rpcB.Start()
+
+	// --- Mock master connects to both A and B and sends PING ---
+	masterA := newFramedServer(t, rpcA.slave.listener.Addr().String())
+	defer masterA.close()
+	masterB := newFramedServer(t, rpcB.slave.listener.Addr().String())
+	defer masterB.close()
+	waitForMasterConn(t, rpcA.slave)
+	waitForMasterConn(t, rpcB.slave)
+
+	// PING/PONG with A
+	pingA, _ := serialize.SerializeToBytes(&PingRequest{ID: []byte("slave-A"), FullShardIDList: rpcA.slave.FullShardIDList()})
+	masterA.sendFrame(t, &Frame{Opcode: OP_PING, RPCID: 1, Payload: pingA})
+	if r := masterA.readFrame(t); r.Opcode != OP_PONG {
+		t.Fatal("A PONG missing")
+	}
+	// PING/PONG with B
+	pingB, _ := serialize.SerializeToBytes(&PingRequest{ID: []byte("slave-B"), FullShardIDList: rpcB.slave.FullShardIDList()})
+	masterB.sendFrame(t, &Frame{Opcode: OP_PING, RPCID: 1, Payload: pingB})
+	if r := masterB.readFrame(t); r.Opcode != OP_PONG {
+		t.Fatal("B PONG missing")
+	}
+
+	// --- Master tells A to connect to B (ConnectToSlaves) ---
+	host, port := "127.0.0.1", rpcB.slave.listener.Addr().(*net.TCPAddr).Port
+	req := ConnectToSlavesRequest{
+		SlaveInfoList: []SlaveInfo{
+			{
+				ID:              []byte("slave-B"),
+				Host:            []byte(host),
+				Port:            uint16(port),
+				FullShardIDList: rpcB.slave.FullShardIDList(),
+			},
+		},
+	}
+	reqPayload, _ := serialize.SerializeToBytes(&req)
+	masterA.sendFrame(t, &Frame{
+		Opcode:  OP_CONNECT_TO_SLAVES_REQUEST,
+		RPCID:   2,
+		Payload: reqPayload,
+	})
+	resp := masterA.readFrame(t)
+	var cResp ConnectToSlavesResponse
+	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &cResp); err != nil {
+		t.Fatal("deserialize connect resp:", err)
+	}
+	if len(cResp.ResultList) != 1 || len(cResp.ResultList[0]) != 0 {
+		t.Fatalf("ConnectToSlaves failed: %v", cResp.ResultList)
+	}
+
+	// --- Wait for B's inbound handshake goroutine to finish indexing ---
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rpcB.slave.mu.RLock()
+		_, ok := rpcB.slave.connectedSlaveIDs["slave-A"]
+		rpcB.slave.mu.RUnlock()
+		if ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rpcB.slave.mu.RLock()
+	_, bHasA := rpcB.slave.connectedSlaveIDs["slave-A"]
+	rpcB.slave.mu.RUnlock()
+	if !bHasA {
+		t.Fatal("B never indexed inbound conn from A (recordPing / xshardPool.Add not reached)")
+	}
+
+	// --- Verify A also recorded B ---
+	rpcA.slave.mu.RLock()
+	_, aHasB := rpcA.slave.connectedSlaveIDs["slave-B"]
+	rpcA.slave.mu.RUnlock()
+	if !aHasB {
+		t.Fatal("A never recorded B's id (recordPing in ConnectToSlaves not reached)")
+	}
+
+	// --- Verify xshardPool indexing on both sides ---
+	// A's pool must have entries for B's shards.
+	aTargets := rpcA.slave.xshardPool.Targets()
+	if len(aTargets) == 0 {
+		t.Fatal("A.xshardPool has no targets — outbound conn not indexed")
+	}
+	// B's pool must have entries for A's shards (added by the inbound goroutine
+	// in handleConn after WaitUntilPingReceived).
+	bTargets := rpcB.slave.xshardPool.Targets()
+	if len(bTargets) == 0 {
+		t.Fatal("B.xshardPool has no targets — inbound conn not indexed")
+	}
+
+	// --- Send a real xshard tx list from A to B ---
+	// A's pool indexed B by B's full_shard_id_list; pick one of B's shards
+	// as the routing target and call SendXshardTx.
+	target := FullShardID{
+		ChainID: 0x0003,
+		ShardID: 0x0002,
+	}
+	if err := rpcA.slave.xshardPool.SendXshardTx(target, 0x00030002, []byte("tx-list-from-A")); err != nil {
+		t.Fatal("SendXshardTx A→B:", err)
+	}
+	select {
+	case payload := <-xshardReceivedB:
+		if string(payload) != "tx-list-from-A" {
+			t.Errorf("B received wrong payload: %s", payload)
+		}
+		t.Log("A→B xshard tx delivered OK")
+	case <-time.After(3 * time.Second):
+		t.Fatal("B did not receive ADD_XSHARD_TX_LIST from A")
+	}
+}
+
+// waitForMasterConn blocks until the slave's masterConn is set or times out.
+func waitForMasterConn(t *testing.T, s *Slave) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.RLock()
+		mc := s.masterConn
+		s.mu.RUnlock()
+		if mc != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("slave did not accept master connection in time")
+}
+
+// TestE2E_PythonMasterPeerRouting simulates the exact wire behavior of the
+// Python master for Mode 3 (peer → master → slave) over a real TCP socket.
+//
+// Python master's broadcast_rpc sends CreateClusterPeerConnectionRequest with
+// metadata ClusterMetadata(ROOT_BRANCH=0, cluster_peer_id=0); the real
+// cluster_peer_id lives in the PAYLOAD.  Subsequent peer-shard P2P frames
+// (e.g. OP_NEW_TRANSACTION_LIST) carry metadata with the real cluster_peer_id
+// in the frame header and the branch in the same 12-byte header.
+//
+// This test verifies the slave correctly:
+//  1. reads cluster_peer_id from the payload (not from metadata) on create
+//  2. creates a PeerConn for that cluster_peer_id on every owned branch
+//  3. routes subsequent peer frames through the Dispatcher to the PeerConn
+//  4. invokes the registered per-branch peer handler
+//
+// If any of the wire-format assumptions drift from the Python master, this
+// test fails — which the previous tests using masterConn.Handle(frame)
+// directly could not catch.
+func TestE2E_PythonMasterPeerRouting(t *testing.T) {
+	rpc, err := NewSlaveRPC(&Config{
+		ID:          "slave-X",
+		ListenAddr:  "127.0.0.1:0",
+		OwnBranches: []uint32{0x00030000, 0x00030001}, // chain 3, shard 0 and 1
+	})
+	if err != nil {
+		t.Fatal("NewSlaveRPC:", err)
+	}
+	defer rpc.Close()
+	rpc.RegisterHandlers()
+
+	// Register a real peer handler on shard 0x00030000 BEFORE the master
+	// sends CreateClusterPeerConnection — applyPeerHandlers copies from
+	// s.peerHandlers when the PeerConn is created.
+	peerTxReceived := make(chan []byte, 1)
+	if err := rpc.RegisterPeerHandler(0x00030000, OP_NEW_TRANSACTION_LIST, func(frame *Frame) ([]byte, error) {
+		peerTxReceived <- frame.Payload
+		return nil, nil
+	}); err != nil {
+		t.Fatal("RegisterPeerHandler:", err)
+	}
+
+	rpc.Start()
+	master := newFramedServer(t, rpc.slave.listener.Addr().String())
+	defer master.close()
+	waitForMasterConn(t, rpc.slave)
+
+	// --- 1. Master PING/PONG to bring the slave online ---
+	pingPayload, _ := serialize.SerializeToBytes(&PingRequest{
+		ID:              []byte("slave-X"),
+		FullShardIDList: rpc.slave.FullShardIDList(),
+	})
+	master.sendFrame(t, &Frame{Opcode: OP_PING, RPCID: 1, Payload: pingPayload})
+	if r := master.readFrame(t); r.Opcode != OP_PONG {
+		t.Fatal("PONG missing")
+	}
+
+	// --- 2. Master broadcasts CreateClusterPeerConnection ---
+	// Wire: metadata = (Branch=0, ClusterPeerID=0), payload carries real id.
+	createReq := &CreateClusterPeerConnectionRequest{ClusterPeerID: 12345}
+	createPayload, _ := serialize.SerializeToBytes(createReq)
+	master.sendFrame(t, &Frame{
+		Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
+		Opcode:  OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST,
+		RPCID:   2,
+		Payload: createPayload,
+	})
+	createResp := master.readFrame(t)
+	if createResp.Opcode != OP_CREATE_CLUSTER_PEER_CONNECTION_RESPONSE {
+		t.Fatalf("expected CREATE_CLUSTER_PEER_CONNECTION_RESPONSE, got 0x%x", createResp.Opcode)
+	}
+	var cResp CreateClusterPeerConnectionResponse
+	if err := serialize.Deserialize(serialize.NewByteBuffer(createResp.Payload), &cResp); err != nil {
+		t.Fatal("deserialize create resp:", err)
+	}
+	if cResp.ErrorCode != 0 {
+		t.Fatalf("create failed, error_code=%d", cResp.ErrorCode)
+	}
+
+	// Verify the PeerConn was actually created and indexed in the dispatcher.
+	if rpc.slave.dispatcher.PeerConnCount() == 0 {
+		t.Fatal("no PeerConn registered in dispatcher after create")
+	}
+
+	// --- 3. Master forwards a peer P2P command (OP_NEW_TRANSACTION_LIST) ---
+	// Wire: metadata = (Branch=0x00030000, ClusterPeerID=12345).
+	// The slave's readLoop → Dispatcher.Dispatch → cluster_peer_id != 0 →
+	// peerConns[12345][0x00030000] → PeerConn.HandleFrame → handler.
+	master.sendFrame(t, &Frame{
+		Meta:    Metadata{Branch: 0x00030000, ClusterPeerID: 12345},
+		Opcode:  OP_NEW_TRANSACTION_LIST,
+		RPCID:   0, // NON-RPC, no response expected
+		Payload: []byte("peer-tx-list"),
+	})
+
+	select {
+	case payload := <-peerTxReceived:
+		if string(payload) != "peer-tx-list" {
+			t.Errorf("peer handler got wrong payload: %s", payload)
+		}
+		t.Log("Mode 3 peer routing OK — handler invoked via real TCP")
+	case <-time.After(3 * time.Second):
+		t.Fatal("peer handler not invoked — Dispatcher routing broken over TCP")
+	}
+
+	// --- 4. Master sends DestroyClusterPeerConnection ---
+	destroyReq := &DestroyClusterPeerConnectionCommand{ClusterPeerID: 12345}
+	destroyPayload, _ := serialize.SerializeToBytes(destroyReq)
+	master.sendFrame(t, &Frame{
+		Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
+		Opcode:  OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND,
+		RPCID:   0, // NON-RPC
+		Payload: destroyPayload,
+	})
+	// Give the slave a moment to process the destroy command.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rpc.slave.dispatcher.PeerConnCount() == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rpc.slave.dispatcher.PeerConnCount() != 0 {
+		t.Fatalf("PeerConn not removed after destroy, count=%d", rpc.slave.dispatcher.PeerConnCount())
+	}
+	t.Log("Mode 3 destroy OK — PeerConn removed")
+}
