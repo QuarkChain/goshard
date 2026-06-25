@@ -154,8 +154,8 @@ func (s *SlaveRPC) RegisterHandlers() {
 //
 // Shard layer calls this once per branch at initialisation time to replace
 // the stub handlers with real implementations.
-func (s *SlaveRPC) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHandler) {
-	s.slave.RegisterPeerHandler(branch, opcode, handler)
+func (s *SlaveRPC) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHandler) error {
+	return s.slave.RegisterPeerHandler(branch, opcode, handler)
 }
 
 // stub returns a handler that logs "not implemented" and returns ErrNotImplemented.

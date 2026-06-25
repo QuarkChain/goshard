@@ -41,6 +41,8 @@
 //	                                 + 3 GET_MINOR_BLOCK_* RPC requests
 package cluster
 
+import "errors"
+
 // =============================================================================
 // ClusterOp codes (master-slave communication, cluster_peer_id == 0)
 // Wire values: 0x81 - 0xC4 (128 + 1 .. 128 + 68)
@@ -186,8 +188,8 @@ const (
 
 // Errors
 var (
-	ErrConnectionClosed = &ClusterError{"connection closed"}
-	ErrNotImplemented   = &ClusterError{"not implemented"}
+	ErrConnectionClosed = errors.New("connection closed")
+	ErrNotImplemented   = errors.New("not implemented")
 )
 
 // ClusterError is a cluster protocol error.

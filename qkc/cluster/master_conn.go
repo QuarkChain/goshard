@@ -85,6 +85,7 @@ func (m *MasterConn) readLoop() {
 			select {
 			case m.errChan <- err:
 			default:
+				m.log.Debug("additional error dropped (channel full)", "err", err)
 			}
 			return
 		}
@@ -144,7 +145,7 @@ func (m *MasterConn) Handle(frame *Frame) {
 		if frame.RPCID != 0 {
 			resp := &Frame{
 				Meta:    frame.Meta,
-				Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
+				Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1 (safe: request opcodes ≤ 0xC3)
 				RPCID:   frame.RPCID,
 				Payload: respPayload,
 			}
@@ -169,7 +170,7 @@ func (m *MasterConn) sendEmptyResponse(frame *Frame, reason string) {
 	}
 	resp := &Frame{
 		Meta:    frame.Meta,
-		Opcode:  frame.Opcode + 1,
+		Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1 (safe: opcodes ≤ 0xC3)
 		RPCID:   frame.RPCID,
 		Payload: nil,
 	}

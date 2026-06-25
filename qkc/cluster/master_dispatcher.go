@@ -58,6 +58,8 @@ func (d *Dispatcher) AddPeerConn(conn *PeerConn) {
 }
 
 // RemovePeerConn removes all PeerConns for a specific cluster_peer_id.
+// Callers are responsible for closing PeerConns before removal.
+// (HandleDestroyClusterPeerConnection closes them before calling this.)
 func (d *Dispatcher) RemovePeerConn(clusterPeerID uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

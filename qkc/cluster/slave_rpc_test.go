@@ -372,10 +372,12 @@ func TestSlaveRPC_PeerCommandRouting(t *testing.T) {
 
 	// Register handler and dispatch peer frame via Dispatcher
 	peerBlockReceived := make(chan []byte, 1)
-	rpc.RegisterPeerHandler(1, OP_NEW_MINOR_BLOCK_HEADER_LIST, func(frame *Frame) ([]byte, error) {
+	if err := rpc.RegisterPeerHandler(1, OP_NEW_MINOR_BLOCK_HEADER_LIST, func(frame *Frame) ([]byte, error) {
 		peerBlockReceived <- frame.Payload
 		return nil, nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	rpc.slave.masterConn.OnFrame(&Frame{
 		Meta:    Metadata{Branch: 1, ClusterPeerID: 42},
 		Opcode:  OP_NEW_MINOR_BLOCK_HEADER_LIST,
@@ -464,10 +466,12 @@ func TestSlaveRPC_FullIntegration(t *testing.T) {
 	}
 
 	peerDone := make(chan []byte, 1)
-	rpc.RegisterPeerHandler(0, OP_NEW_TRANSACTION_LIST, func(frame *Frame) ([]byte, error) {
+	if err := rpc.RegisterPeerHandler(0, OP_NEW_TRANSACTION_LIST, func(frame *Frame) ([]byte, error) {
 		peerDone <- frame.Payload
 		return nil, nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	rpc.slave.masterConn.OnFrame(&Frame{
 		Meta:    Metadata{Branch: 0, ClusterPeerID: 99},
 		Opcode:  OP_NEW_TRANSACTION_LIST,

@@ -40,11 +40,14 @@ func (p *XshardPool) Add(target FullShardID, conn *XshardConn) {
 	p.log.Info("added xshard connection", "target", target, "remote_addr", conn.RemoteAddr())
 }
 
-// Get returns all connections to a specific target shard.
+// Get returns a copy of all connections to a specific target shard.
 func (p *XshardPool) Get(target FullShardID) []*XshardConn {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.conns[target]
+	conns := p.conns[target]
+	result := make([]*XshardConn, len(conns))
+	copy(result, conns)
+	p.mu.RUnlock()
+	return result
 }
 
 // Remove removes a specific connection from the pool.
@@ -68,12 +71,13 @@ func (p *XshardPool) Remove(target FullShardID, conn *XshardConn) {
 // RemoveTarget removes all connections to a specific target shard.
 func (p *XshardPool) RemoveTarget(target FullShardID) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	conns := p.conns[target]
+	delete(p.conns, target)
+	p.mu.Unlock()
 
-	for _, conn := range p.conns[target] {
+	for _, conn := range conns {
 		conn.Close()
 	}
-	delete(p.conns, target)
 	p.log.Info("removed all connections to target", "target", target)
 }
 

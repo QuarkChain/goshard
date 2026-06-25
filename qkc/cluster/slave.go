@@ -219,7 +219,7 @@ func (s *Slave) applyPeerHandlers(conn *PeerConn) {
 // on a specific branch.  It applies to all existing PeerConns on that branch,
 // AND persists the handler so future PeerConns created by
 // HandleCreateClusterPeerConnection also get it.
-func (s *Slave) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHandler) {
+func (s *Slave) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHandler) error {
 	// Persist for future PeerConns
 	s.peerHandlersMu.Lock()
 	if s.peerHandlers == nil {
@@ -234,13 +234,13 @@ func (s *Slave) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHa
 	s.mu.RUnlock()
 
 	if !ok {
-		s.log.Warn("branch not owned by this slave", "branch", branch)
-		return
+		return fmt.Errorf("branch %d not owned by this slave", branch)
 	}
 
 	for _, conn := range conns {
 		conn.RegisterHandler(opcode, handler)
 	}
+	return nil
 }
 
 // ── Cluster peer connection management ──────────────────────────────────
@@ -388,6 +388,7 @@ func (s *Slave) AddXshardConnection(target FullShardID, addr string) error {
 func (s *Slave) Serve() error {
 	if s.cfg.ListenAddr != "" {
 		if err := s.startXshardServer(s.cfg.ListenAddr); err != nil {
+			s.masterConn.Close()
 			return err
 		}
 	}
@@ -412,6 +413,7 @@ func (s *Slave) startXshardServer(listenAddr string) error {
 	}
 
 	go func() {
+		defer listener.Close()
 		defer func() {
 			if r := recover(); r != nil {
 				s.log.Error("xshard accept loop panic recovered", "panic", r)
@@ -421,6 +423,10 @@ func (s *Slave) startXshardServer(listenAddr string) error {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Temporary() {
+					s.log.Warn("temporary accept error, retrying", "err", err)
+					continue
+				}
 				s.log.Error("failed to accept xshard connection", "err", err)
 				return
 			}

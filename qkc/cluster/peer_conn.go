@@ -89,7 +89,7 @@ func (p *PeerConn) HandleFrame(frame *Frame) {
 		if frame.RPCID != 0 {
 			resp := &Frame{
 				Meta:    Metadata{Branch: p.branch, ClusterPeerID: p.clusterPeerID},
-				Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
+				Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1 (safe: opcodes ≤ 0xC3)
 				RPCID:   frame.RPCID,
 				Payload: respPayload,
 			}

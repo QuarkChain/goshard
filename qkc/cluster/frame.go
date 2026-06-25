@@ -37,12 +37,11 @@ type Frame struct {
 }
 
 const (
-	metaSize       = 12 // branch(4) + cluster_peer_id(8)
-	opcodeSize     = 1
-	rpcIDSize      = 8
-	frameHeader    = 4                                               // payload_len prefix
-	totalOverhead  = frameHeader + metaSize + opcodeSize + rpcIDSize // 4+12+1+8=25
-	maxPayloadSize = 16 << 20                                        // 16 MiB - maximum allowed payload size
+	metaSize      = 12 // branch(4) + cluster_peer_id(8)
+	opcodeSize    = 1
+	rpcIDSize     = 8
+	frameHeader   = 4                                               // payload_len prefix
+	totalOverhead = frameHeader + metaSize + opcodeSize + rpcIDSize // 4+12+1+8=25
 )
 
 // ReadFrame reads a single complete frame from r.
@@ -52,11 +51,6 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 	var payloadLen uint32
 	if err := binary.Read(r, binary.BigEndian, &payloadLen); err != nil {
 		return nil, fmt.Errorf("reading frame length: %w", err)
-	}
-
-	// Validate payload size to prevent memory exhaustion
-	if payloadLen > maxPayloadSize {
-		return nil, fmt.Errorf("frame too large: %d bytes (max %d)", payloadLen, maxPayloadSize)
 	}
 
 	// 2. Read 12-byte Metadata
@@ -97,20 +91,20 @@ func WriteFrame(w io.Writer, f *Frame) error {
 	buf := make([]byte, total)
 
 	// Frame length (payload only, matches Python: len(raw_data) - 8 - 1)
-	binary.BigEndian.PutUint32(buf[0:4], payloadLen)
+	binary.BigEndian.PutUint32(buf[0:frameHeader], payloadLen)
 
 	// Metadata
-	binary.BigEndian.PutUint32(buf[4:8], f.Meta.Branch)
-	binary.BigEndian.PutUint64(buf[8:16], f.Meta.ClusterPeerID)
+	binary.BigEndian.PutUint32(buf[frameHeader:frameHeader+4], f.Meta.Branch)
+	binary.BigEndian.PutUint64(buf[frameHeader+4:frameHeader+metaSize], f.Meta.ClusterPeerID)
 
 	// Opcode
-	buf[16] = f.Opcode
+	buf[frameHeader+metaSize] = f.Opcode
 
 	// RPC ID
-	binary.BigEndian.PutUint64(buf[17:25], f.RPCID)
+	binary.BigEndian.PutUint64(buf[frameHeader+metaSize+opcodeSize:frameHeader+metaSize+opcodeSize+rpcIDSize], f.RPCID)
 
 	// Payload
-	copy(buf[25:], f.Payload)
+	copy(buf[frameHeader+metaSize+opcodeSize+rpcIDSize:], f.Payload)
 
 	_, err := w.Write(buf)
 	return err

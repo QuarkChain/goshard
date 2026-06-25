@@ -242,10 +242,12 @@ func TestSlaveDispatcherRoutingEndToEnd(t *testing.T) {
 		return nil, nil
 	})
 
-	slave.RegisterPeerHandler(0, OP_NEW_MINOR_BLOCK_HEADER_LIST, func(frame *Frame) ([]byte, error) {
+	if err := slave.RegisterPeerHandler(0, OP_NEW_MINOR_BLOCK_HEADER_LIST, func(frame *Frame) ([]byte, error) {
 		close(peerDone)
 		return nil, nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Send master command (cluster_peer_id=0) — must go through OnFrame to be dispatched
 	masterFrame := &Frame{
