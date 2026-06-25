@@ -382,14 +382,23 @@ func TestSlaveRPC_PeerCommandRouting(t *testing.T) {
 	defer master.close()
 	defer rpc.Close()
 
-	// Create peer connection
+	// Create peer connection. Wire: cluster_peer_id is in the PAYLOAD.
+	createPayload, err := serialize.SerializeToBytes(&CreateClusterPeerConnectionRequest{ClusterPeerID: 42})
+	if err != nil {
+		t.Fatal("serialize create request:", err)
+	}
 	createDone := make(chan struct{})
 	rpc.slave.RegisterMasterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, func(frame *Frame) ([]byte, error) {
 		rpc.slave.HandleCreateClusterPeerConnection(frame)
 		close(createDone)
 		return nil, nil
 	})
-	rpc.slave.masterConn.Handle(&Frame{Meta: Metadata{ClusterPeerID: 42}, Opcode: OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, RPCID: 1})
+	rpc.slave.masterConn.Handle(&Frame{
+		Meta:    Metadata{ClusterPeerID: 0},
+		Opcode:  OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST,
+		RPCID:   1,
+		Payload: createPayload,
+	})
 
 	select {
 	case <-createDone:
@@ -471,14 +480,23 @@ func TestSlaveRPC_FullIntegration(t *testing.T) {
 		t.Fatal("step 2: timeout")
 	}
 
-	// 3. Peer command routing
+	// 3. Peer command routing. Wire: cluster_peer_id is in the PAYLOAD.
+	createPeerPayload, err := serialize.SerializeToBytes(&CreateClusterPeerConnectionRequest{ClusterPeerID: 99})
+	if err != nil {
+		t.Fatal("serialize create request:", err)
+	}
 	peerCreated := make(chan struct{})
 	rpc.slave.RegisterMasterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, func(frame *Frame) ([]byte, error) {
 		rpc.slave.HandleCreateClusterPeerConnection(frame)
 		close(peerCreated)
 		return nil, nil
 	})
-	rpc.slave.masterConn.Handle(&Frame{Meta: Metadata{ClusterPeerID: 99}, Opcode: OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, RPCID: 3})
+	rpc.slave.masterConn.Handle(&Frame{
+		Meta:    Metadata{ClusterPeerID: 0},
+		Opcode:  OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST,
+		RPCID:   3,
+		Payload: createPeerPayload,
+	})
 
 	select {
 	case <-peerCreated:

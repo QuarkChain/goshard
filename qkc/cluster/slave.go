@@ -82,6 +82,11 @@ type Slave struct {
 	clusterPeerIDs map[uint64]struct{}             // Registered cluster peer IDs
 	peerConns      map[uint32]map[uint64]*PeerConn // branch → cluster_peer_id → conn
 
+	// connectedSlaveIDs tracks slave IDs already connected via ConnectToSlaves
+	// or via inbound xshard PING, matching Python SlaveConnectionManager.slave_ids.
+	// Used to skip duplicate connect_to_slave calls and dedupe inbound conns.
+	connectedSlaveIDs map[string]struct{}
+
 	// SLAVE_OP_RPC_MAP — applied to every XshardConn (outbound or inbound).
 	// Set via SetXshardHandlers (called from SlaveRPC.RegisterHandlers).
 	xshardHandlers   map[byte]MasterHandler
@@ -122,14 +127,18 @@ func NewSlave(cfg *Config) (*Slave, error) {
 	}
 
 	s := &Slave{
-		cfg:             cfg,
-		id:              []byte(cfg.ID),
-		fullShardIDList: cfg.OwnBranches,
-		clusterPeerIDs:  make(map[uint64]struct{}),
-		peerConns:       make(map[uint32]map[uint64]*PeerConn),
-		masterHandlers:  make(map[byte]MasterHandler),
-		log:             cfg.Logger,
+		cfg:               cfg,
+		id:                []byte(cfg.ID),
+		fullShardIDList:   cfg.OwnBranches,
+		clusterPeerIDs:    make(map[uint64]struct{}),
+		peerConns:         make(map[uint32]map[uint64]*PeerConn),
+		connectedSlaveIDs: make(map[string]struct{}),
+		masterHandlers:    make(map[byte]MasterHandler),
+		log:               cfg.Logger,
 	}
+	// Record self in connectedSlaveIDs so ConnectToSlaves skips self even when
+	// the slave_info list accidentally includes us (matches Python slave_ids init).
+	s.connectedSlaveIDs[cfg.ID] = struct{}{}
 
 	// 1. Listen for incoming connections (master + other slaves).
 	//    Matches Python SlaveServer.__start_server which binds 0.0.0.0:PORT
@@ -249,8 +258,39 @@ func (s *Slave) handleConn(conn net.Conn) {
 		// SLAVE_OP_RPC_MAP for both directions.)
 		xc := NewXshardConnFromConn(conn, s.log)
 		s.applyXshardHandlers(xc)
-		xc.Start()
 		s.xshardPool.TrackInbound(xc)
+		xc.Start()
+
+		// Match Python SlaveConnectionManager.handle_new_connection which
+		// awaits wait_until_ping_received() before indexing the conn by shard.
+		// We do this in a goroutine so acceptLoop is not blocked; if the peer
+		// never sends PING, the conn is closed by the timeout/peer disconnect
+		// and will be cleaned up by TrackInbound's lifecycle.
+		go func(xc *XshardConn) {
+			if !xc.WaitUntilPingReceived() {
+				s.log.Warn("inbound xshard conn closed before PING", "remote", xc.RemoteAddr())
+				xc.Close()
+				return
+			}
+			// Index by every shard the peer owns (matches Python
+			// _add_slave_connection: full_shard_id_to_slaves[fid].append(slave)).
+			for _, fullShardID := range xc.RemoteFullShardIDList() {
+				target := FullShardID{
+					ChainID: fullShardID >> 16,
+					ShardID: fullShardID & 0xFFFF,
+				}
+				s.xshardPool.Add(target, xc)
+			}
+			// Register the peer id so ConnectToSlaves will skip it (matches
+			// Python SlaveConnectionManager._add_slave_connection: slave_ids.add).
+			remoteID := string(xc.RemoteID())
+			s.mu.Lock()
+			s.connectedSlaveIDs[remoteID] = struct{}{}
+			s.mu.Unlock()
+			s.log.Info("inbound xshard conn indexed",
+				"remote", xc.RemoteAddr(), "remote_id", remoteID,
+				"shards", xc.RemoteFullShardIDList())
+		}(xc)
 	}
 }
 
@@ -333,11 +373,32 @@ func (s *Slave) SetXshardHandlers(handlers map[byte]MasterHandler) {
 }
 
 // applyXshardHandlers registers s.xshardHandlers on an XshardConn.
+//
+// For the PING opcode (OP_PING) the registered handler is wrapped so that
+// XshardConn.recordPing is invoked with the peer's id and full_shard_id_list
+// BEFORE the user handler runs.  This matches Python's SlaveConnection.handle_ping
+// which sets self.id / self.full_shard_id_list on the first PING.  The wrapper
+// also signals pingReceived so that handleConn's WaitUntilPingReceived returns
+// (matching Python SlaveConnectionManager.handle_new_connection which awaits
+// wait_until_ping_received before indexing the conn into the pool).
 func (s *Slave) applyXshardHandlers(conn *XshardConn) {
 	s.xshardHandlersMu.RLock()
 	defer s.xshardHandlersMu.RUnlock()
 	for opcode, handler := range s.xshardHandlers {
-		conn.RegisterHandler(opcode, handler)
+		if opcode == OP_PING {
+			h := handler // capture
+			conn.RegisterHandler(opcode, func(frame *Frame) ([]byte, error) {
+				// Best-effort recording: parse PingRequest to extract peer identity.
+				// Match Python: do NOT record on empty shard list (close_with_error).
+				var req PingRequest
+				if err := serialize.Deserialize(serialize.NewByteBuffer(frame.Payload), &req); err == nil && len(req.FullShardIDList) > 0 {
+					conn.recordPing(req.ID, req.FullShardIDList)
+				}
+				return h(frame)
+			})
+		} else {
+			conn.RegisterHandler(opcode, handler)
+		}
 	}
 }
 
@@ -424,8 +485,20 @@ func (s *Slave) RegisterPeerHandler(branch uint32, opcode byte, handler MasterHa
 // HandleCreateClusterPeerConnection creates PeerConns for all owned branches
 // when Master notifies that a new external peer has connected (mode 3).
 // It is exported so SlaveRPC can delegate to it.
+//
+// Wire compatibility: Python master's broadcast_rpc sends this request with
+// metadata ClusterMetadata(ROOT_BRANCH, 0) — i.e. cluster_peer_id==0 in the
+// frame header.  The actual cluster_peer_id is carried in the PAYLOAD as
+// CreateClusterPeerConnectionRequest.cluster_peer_id (uint64).  Reading from
+// frame.Meta.ClusterPeerID here would always yield 0 and break all PeerConn
+// routing.  (Matches Python slave.py:329-330.)
 func (s *Slave) HandleCreateClusterPeerConnection(frame *Frame) ([]byte, error) {
-	clusterPeerID := frame.Meta.ClusterPeerID
+	var req CreateClusterPeerConnectionRequest
+	if err := serialize.Deserialize(serialize.NewByteBuffer(frame.Payload), &req); err != nil {
+		s.log.Error("failed to deserialize CreateClusterPeerConnectionRequest", "err", err)
+		return nil, err
+	}
+	clusterPeerID := req.ClusterPeerID
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -445,8 +518,18 @@ func (s *Slave) HandleCreateClusterPeerConnection(frame *Frame) ([]byte, error) 
 
 // HandleDestroyClusterPeerConnection removes PeerConns for all branches
 // when Master notifies that a peer has disconnected (mode 3).
+//
+// Wire compatibility: Python master's broadcast_command sends this with
+// metadata ClusterMetadata(ROOT_BRANCH, 0); the cluster_peer_id is in the
+// PAYLOAD (DestroyClusterPeerConnectionCommand.cluster_peer_id, uint64).
+// (Matches Python slave.py:321-327.)
 func (s *Slave) HandleDestroyClusterPeerConnection(frame *Frame) ([]byte, error) {
-	clusterPeerID := frame.Meta.ClusterPeerID
+	var cmd DestroyClusterPeerConnectionCommand
+	if err := serialize.Deserialize(serialize.NewByteBuffer(frame.Payload), &cmd); err != nil {
+		s.log.Error("failed to deserialize DestroyClusterPeerConnectionCommand", "err", err)
+		return nil, err
+	}
+	clusterPeerID := cmd.ClusterPeerID
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -505,6 +588,16 @@ func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 		// Skip self (matches Python: if slave_info.id == self.slave_server.id)
 		if string(info.ID) == string(s.id) {
 			resultList[i] = nil // success, self
+			continue
+		}
+
+		// Skip already-connected slaves (matches Python:
+		//   if slave_info.id in self.slave_ids: return "")
+		s.mu.RLock()
+		_, dup := s.connectedSlaveIDs[string(info.ID)]
+		s.mu.RUnlock()
+		if dup {
+			resultList[i] = nil // success, already connected
 			continue
 		}
 
@@ -590,6 +683,14 @@ func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 		}
 
 		s.log.Info("connected to slave", "addr", addr, "id", string(info.ID), "shards", len(info.FullShardIDList))
+
+		// Record this slave as connected (matches Python _add_slave_connection:
+		// self.slave_ids.add(slave.id)).  Also record peer identity on the conn
+		// so inbound peers can identify us via RemoteID()/RemoteFullShardIDList().
+		conn.recordPing(info.ID, info.FullShardIDList)
+		s.mu.Lock()
+		s.connectedSlaveIDs[string(info.ID)] = struct{}{}
+		s.mu.Unlock()
 		// resultList[i] stays nil → success (matches Python: empty str)
 	}
 

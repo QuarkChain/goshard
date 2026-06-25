@@ -38,6 +38,62 @@ type XshardConn struct {
 	errChan   chan error
 	startOnce sync.Once // ensures readLoop is started at most once
 	log       log.Logger
+
+	// remoteID / remoteFullShardIDList are populated when the first PING is
+	// received from the peer (matches Python SlaveConnection.handle_ping which
+	// records self.id / self.full_shard_id_list on first PING).
+	remoteID              []byte
+	remoteFullShardIDList []uint32
+	pingReceived          chan struct{} // closed once the first PING arrives
+	pingOnce              sync.Once
+}
+
+// RemoteID returns the peer's slave ID, populated after the first PING.
+func (s *XshardConn) RemoteID() []byte {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	return s.remoteID
+}
+
+// RemoteFullShardIDList returns the peer's full shard ID list, populated after
+// the first PING. Matches Python SlaveConnection.full_shard_id_list which is
+// set in handle_ping.
+func (s *XshardConn) RemoteFullShardIDList() []uint32 {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	return s.remoteFullShardIDList
+}
+
+// WaitUntilPingReceived blocks until the first PING is received from the peer
+// or the connection is closed.  Matches Python SlaveConnection.wait_until_ping_received.
+func (s *XshardConn) WaitUntilPingReceived() bool {
+	ch := s.pingReceived
+	select {
+	case <-ch:
+		s.closeMu.Lock()
+		ok := !s.closed
+		s.closeMu.Unlock()
+		return ok
+	case <-s.errChan:
+		return false
+	}
+}
+
+// recordPing records the peer's id and shard list on the first PING and marks
+// the pingReceived channel.  Subsequent PINGs only refresh the shard list
+// (matches Python: the first PING sets self.id; we keep it simple here).
+func (s *XshardConn) recordPing(id []byte, fullShardIDList []uint32) {
+	s.closeMu.Lock()
+	if len(s.remoteID) == 0 {
+		s.remoteID = append([]byte(nil), id...)
+	}
+	s.remoteFullShardIDList = append([]uint32(nil), fullShardIDList...)
+	closed := s.closed
+	s.closeMu.Unlock()
+
+	if !closed {
+		s.pingOnce.Do(func() { close(s.pingReceived) })
+	}
 }
 
 // NewXshardConn creates a new connection to another slave.
@@ -49,14 +105,15 @@ func NewXshardConn(addr string, logger log.Logger) (*XshardConn, error) {
 	}
 
 	s := &XshardConn{
-		conn:       conn,
-		reader:     bufio.NewReader(conn),
-		writer:     bufio.NewWriter(conn),
-		remoteAddr: addr,
-		handlers:   make(map[byte]func(*Frame) ([]byte, error)),
-		pending:    make(map[uint64]chan *Frame),
-		errChan:    make(chan error, 1),
-		log:        logger,
+		conn:         conn,
+		reader:       bufio.NewReader(conn),
+		writer:       bufio.NewWriter(conn),
+		remoteAddr:   addr,
+		handlers:     make(map[byte]func(*Frame) ([]byte, error)),
+		pending:      make(map[uint64]chan *Frame),
+		errChan:      make(chan error, 1),
+		pingReceived: make(chan struct{}),
+		log:          logger,
 	}
 
 	return s, nil
@@ -66,14 +123,15 @@ func NewXshardConn(addr string, logger log.Logger) (*XshardConn, error) {
 // Call Start() after registering handlers to begin the read loop.
 func NewXshardConnFromConn(conn net.Conn, logger log.Logger) *XshardConn {
 	s := &XshardConn{
-		conn:       conn,
-		reader:     bufio.NewReader(conn),
-		writer:     bufio.NewWriter(conn),
-		remoteAddr: conn.RemoteAddr().String(),
-		handlers:   make(map[byte]func(*Frame) ([]byte, error)),
-		pending:    make(map[uint64]chan *Frame),
-		errChan:    make(chan error, 1),
-		log:        logger,
+		conn:         conn,
+		reader:       bufio.NewReader(conn),
+		writer:       bufio.NewWriter(conn),
+		remoteAddr:   conn.RemoteAddr().String(),
+		handlers:     make(map[byte]func(*Frame) ([]byte, error)),
+		pending:      make(map[uint64]chan *Frame),
+		errChan:      make(chan error, 1),
+		pingReceived: make(chan struct{}),
+		log:          logger,
 	}
 
 	return s
@@ -284,6 +342,9 @@ func (s *XshardConn) Close() error {
 		delete(s.pending, rpcID)
 	}
 	s.pendingMu.Unlock()
+
+	// Mark ping as received so WaitUntilPingReceived unblocks.
+	s.pingOnce.Do(func() { close(s.pingReceived) })
 
 	return s.conn.Close()
 }

@@ -253,6 +253,11 @@ func (s *SlaveRPC) handleXshardPing(frame *Frame) ([]byte, error) {
 		return nil, fmt.Errorf("empty full_shard_id_list from slave %s", string(req.ID))
 	}
 
+	// Peer identity (req.ID / req.FullShardIDList) is recorded on the
+	// XshardConn by Slave.applyXshardHandlers, which wraps this handler with
+	// a per-conn closure that calls XshardConn.recordPing first.  This keeps
+	// the SlaveRPC layer agnostic of which physical conn the frame arrived on.
+
 	// Match Python: return Pong(slave_server.id, slave_server.full_shard_id_list)
 	return serialize.SerializeToBytes(&PongResponse{
 		ID:              s.slave.ID(),

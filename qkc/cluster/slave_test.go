@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
 // TestSlaveFullLifecycle tests the complete Slave lifecycle:
@@ -98,6 +99,14 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 	defer slave.Close()
 
 	// Simulate master sending CREATE_CLUSTER_PEER_CONNECTION_REQUEST.
+	// Wire compatibility: cluster_peer_id is in the PAYLOAD (matches Python
+	// master which broadcasts with metadata ClusterMetadata(ROOT_BRANCH, 0)),
+	// not in the frame Metadata.
+	createPayload, err := serialize.SerializeToBytes(&CreateClusterPeerConnectionRequest{ClusterPeerID: 12345})
+	if err != nil {
+		t.Fatal("serialize create request:", err)
+	}
+
 	// Handle() runs the handler in a goroutine, so we use a channel to synchronize.
 	createDone := make(chan struct{})
 	slave.RegisterMasterHandler(OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST, func(frame *Frame) ([]byte, error) {
@@ -107,10 +116,10 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 	})
 
 	createFrame := &Frame{
-		Meta:    Metadata{Branch: 0, ClusterPeerID: 12345},
+		Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
 		Opcode:  OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST,
 		RPCID:   1,
-		Payload: nil,
+		Payload: createPayload,
 	}
 	slave.masterConn.Handle(createFrame)
 
@@ -127,6 +136,11 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 	}
 
 	// Destroy peer connection
+	destroyPayload, err := serialize.SerializeToBytes(&DestroyClusterPeerConnectionCommand{ClusterPeerID: 12345})
+	if err != nil {
+		t.Fatal("serialize destroy command:", err)
+	}
+
 	destroyDone := make(chan struct{})
 	slave.RegisterMasterHandler(OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND, func(frame *Frame) ([]byte, error) {
 		slave.HandleDestroyClusterPeerConnection(frame)
@@ -135,10 +149,10 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 	})
 
 	destroyFrame := &Frame{
-		Meta:    Metadata{Branch: 0, ClusterPeerID: 12345},
+		Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
 		Opcode:  OP_DESTROY_CLUSTER_PEER_CONNECTION_COMMAND,
 		RPCID:   0,
-		Payload: nil,
+		Payload: destroyPayload,
 	}
 	slave.masterConn.Handle(destroyFrame)
 
@@ -169,11 +183,15 @@ func TestSlaveDispatcherRoutingEndToEnd(t *testing.T) {
 		return nil, nil
 	})
 
+	createPayload, err := serialize.SerializeToBytes(&CreateClusterPeerConnectionRequest{ClusterPeerID: 9999})
+	if err != nil {
+		t.Fatal("serialize create request:", err)
+	}
 	createFrame := &Frame{
-		Meta:    Metadata{Branch: 0, ClusterPeerID: 9999},
+		Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
 		Opcode:  OP_CREATE_CLUSTER_PEER_CONNECTION_REQUEST,
 		RPCID:   1,
-		Payload: nil,
+		Payload: createPayload,
 	}
 	slave.masterConn.Handle(createFrame)
 
