@@ -2,9 +2,11 @@ package cluster
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -28,6 +30,11 @@ type XshardConn struct {
 	handlersMu sync.RWMutex
 	handlers   map[byte]func(*Frame) ([]byte, error)
 
+	// RPC response matching (matches Python Connection.rpc_future_map)
+	pendingMu sync.Mutex
+	pending   map[uint64]chan *Frame // rpcID -> response channel
+	nextRPCID uint64                 // atomic counter for RPC IDs
+
 	errChan   chan error
 	startOnce sync.Once // ensures readLoop is started at most once
 	log       log.Logger
@@ -47,6 +54,7 @@ func NewXshardConn(addr string, logger log.Logger) (*XshardConn, error) {
 		writer:     bufio.NewWriter(conn),
 		remoteAddr: addr,
 		handlers:   make(map[byte]func(*Frame) ([]byte, error)),
+		pending:    make(map[uint64]chan *Frame),
 		errChan:    make(chan error, 1),
 		log:        logger,
 	}
@@ -63,6 +71,7 @@ func NewXshardConnFromConn(conn net.Conn, logger log.Logger) *XshardConn {
 		writer:     bufio.NewWriter(conn),
 		remoteAddr: conn.RemoteAddr().String(),
 		handlers:   make(map[byte]func(*Frame) ([]byte, error)),
+		pending:    make(map[uint64]chan *Frame),
 		errChan:    make(chan error, 1),
 		log:        logger,
 	}
@@ -80,7 +89,10 @@ func (s *XshardConn) readLoop() {
 	defer s.Close()
 
 	for {
-		frame, err := ReadFrame(s.reader)
+		// SlaveConnection uses 0-byte Metadata (not ClusterMetadata).
+		// Matches Python's SlaveConnection which inherits Connection with
+		// metadata_class=Metadata (get_byte_size() == 0).
+		frame, err := ReadFrameNoMeta(s.reader)
 		if err != nil {
 			select {
 			case s.errChan <- err:
@@ -89,6 +101,24 @@ func (s *XshardConn) readLoop() {
 			return
 		}
 
+		// Match Python handle_metadata_and_raw_data:
+		// If RPCID != 0, check if it's a response to a pending RPC first.
+		if frame.RPCID != 0 {
+			s.pendingMu.Lock()
+			if ch, ok := s.pending[frame.RPCID]; ok {
+				delete(s.pending, frame.RPCID)
+				s.pendingMu.Unlock()
+				select {
+				case ch <- frame:
+				default:
+					s.log.Warn("xshard response channel full, dropping frame", "rpcid", frame.RPCID)
+				}
+				continue
+			}
+			s.pendingMu.Unlock()
+		}
+
+		// Not a response — dispatch as request
 		s.handlersMu.RLock()
 		handler, ok := s.handlers[frame.Opcode]
 		s.handlersMu.RUnlock()
@@ -116,7 +146,7 @@ func (s *XshardConn) readLoop() {
 			if frame.RPCID != 0 {
 				resp := &Frame{
 					Meta:    frame.Meta,
-					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1 (safe: opcodes ≤ 0xC3)
+					Opcode:  frame.Opcode + 1, // response opcode = request opcode + 1
 					RPCID:   frame.RPCID,
 					Payload: respPayload,
 				}
@@ -171,7 +201,52 @@ func (s *XshardConn) SendBatchXshardTxList(payload []byte) error {
 	})
 }
 
-// WriteFrame writes a frame to the connection.
+// SendRPC sends an RPC request and waits for the response.
+// Matches Python's write_rpc_request.
+func (s *XshardConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*Frame, error) {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return nil, ErrConnectionClosed
+	}
+
+	rpcID := atomic.AddUint64(&s.nextRPCID, 1)
+	respChan := make(chan *Frame, 1)
+	s.pendingMu.Lock()
+	s.pending[rpcID] = respChan
+	s.pendingMu.Unlock()
+	s.closeMu.Unlock()
+
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pending, rpcID)
+		s.pendingMu.Unlock()
+	}()
+
+	frame := &Frame{
+		Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
+		Opcode:  opcode,
+		RPCID:   rpcID,
+		Payload: payload,
+	}
+
+	if err := s.WriteFrame(frame); err != nil {
+		return nil, fmt.Errorf("write frame: %w", err)
+	}
+
+	select {
+	case resp := <-respChan:
+		if resp == nil {
+			return nil, ErrConnectionClosed
+		}
+		return resp, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("rpc timeout: %w", ctx.Err())
+	}
+}
+
+// WriteFrame writes a frame to the connection using 0-byte Metadata
+// (matches Python SlaveConnection which uses Metadata with get_byte_size()==0).
 func (s *XshardConn) WriteFrame(frame *Frame) error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
@@ -180,7 +255,7 @@ func (s *XshardConn) WriteFrame(frame *Frame) error {
 		return ErrConnectionClosed
 	}
 
-	if err := WriteFrame(s.writer, frame); err != nil {
+	if err := WriteFrameNoMeta(s.writer, frame); err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}
 	if err := s.writer.Flush(); err != nil {
@@ -198,6 +273,18 @@ func (s *XshardConn) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	// Wake up any pending RPC callers
+	s.pendingMu.Lock()
+	for rpcID, ch := range s.pending {
+		select {
+		case ch <- nil:
+		default:
+		}
+		delete(s.pending, rpcID)
+	}
+	s.pendingMu.Unlock()
+
 	return s.conn.Close()
 }
 

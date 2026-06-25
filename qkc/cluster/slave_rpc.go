@@ -24,10 +24,18 @@ import (
 //	defer rpc.Close()
 //
 //	rpc.RegisterHandlers() // inbound handlers (all modes)
-//	rpc.Serve()            // blocks until fatal error
+//	rpc.Start()            // begin accepting connections (non-blocking)
+//	rpc.Serve()            // blocks until fatal error (calls Start internally)
 type SlaveRPC struct {
 	slave *Slave
 	log   log.Logger
+
+	// OnRootTip is called when a PING from master carries a non-nil root_tip.
+	// Matches Python's MasterConnection.handle_ping which calls
+	// slave_server.create_shards(ping.root_tip).  The hook receives the raw
+	// serialized RootBlock bytes (opaque to the cluster package).
+	// If nil, root_tip is logged and ignored.
+	OnRootTip func(rootTipBytes []byte) error
 }
 
 // NewSlaveRPC creates, connects, and initialises the underlying Slave.
@@ -178,9 +186,27 @@ func (s *SlaveRPC) handlePing(frame *Frame) ([]byte, error) {
 		return nil, err
 	}
 	s.log.Debug("received PING from master", "id", string(req.ID), "shards", len(req.FullShardIDList))
+
+	// Match Python MasterConnection.handle_ping:
+	//   if ping.root_tip:
+	//       await self.slave_server.create_shards(ping.root_tip)
+	if req.RootTip != nil && !req.RootTip.IsNil() {
+		s.log.Info("PING carries root_tip, invoking hook", "root_tip_bytes", len(req.RootTip.raw))
+		if s.OnRootTip != nil {
+			if err := s.OnRootTip(req.RootTip.raw); err != nil {
+				s.log.Error("OnRootTip hook failed", "err", err)
+				// Match Python: error propagates back to master as RPC failure
+				return nil, err
+			}
+		} else {
+			s.log.Warn("PING root_tip present but no OnRootTip hook registered")
+		}
+	}
+
+	// Match Python: return Pong(slave_server.id, slave_server.full_shard_id_list)
 	return serialize.SerializeToBytes(&PongResponse{
-		ID:              req.ID,
-		FullShardIDList: req.FullShardIDList,
+		ID:              s.slave.ID(),
+		FullShardIDList: s.slave.FullShardIDList(),
 	})
 }
 
@@ -216,9 +242,21 @@ func (s *SlaveRPC) handleXshardPing(frame *Frame) ([]byte, error) {
 		return nil, err
 	}
 	s.log.Debug("received xshard PING", "remote_id", string(req.ID), "remote_shards", req.FullShardIDList)
+
+	// Match Python SlaveConnection.handle_ping:
+	//   if len(self.full_shard_id_list) == 0:
+	//       return self.close_with_error(
+	//           "Empty shard mask list from slave {}".format(self.id))
+	// Python records the remote id/shards on first PING, then rejects empty lists.
+	if len(req.FullShardIDList) == 0 {
+		s.log.Error("empty full_shard_id_list from slave", "id", string(req.ID))
+		return nil, fmt.Errorf("empty full_shard_id_list from slave %s", string(req.ID))
+	}
+
+	// Match Python: return Pong(slave_server.id, slave_server.full_shard_id_list)
 	return serialize.SerializeToBytes(&PongResponse{
-		ID:              req.ID,
-		FullShardIDList: req.FullShardIDList,
+		ID:              s.slave.ID(),
+		FullShardIDList: s.slave.FullShardIDList(),
 	})
 }
 
@@ -264,6 +302,14 @@ func (s *SlaveRPC) BatchBroadcastXshardTxList(ctx context.Context) error {
 // =========================================================================
 // Lifecycle
 // =========================================================================
+
+// Start begins accepting incoming connections (master + other slaves).
+// Must be called after RegisterHandlers() so handlers are in place before
+// any connection arrives.  Serve() calls Start() internally, so callers
+// using Serve() do not need to call Start() explicitly.
+//
+// Safe to call multiple times.
+func (s *SlaveRPC) Start() { s.slave.Start() }
 
 func (s *SlaveRPC) Serve() error { return s.slave.Serve() }
 func (s *SlaveRPC) Close()       { s.slave.Close() }

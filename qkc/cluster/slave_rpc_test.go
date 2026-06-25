@@ -22,50 +22,37 @@ import (
 //	Mode 2: Slave ↔ Slave   (direct xshard TCP)
 //	Mode 3: Peer → Master → Slave  (cluster_peer_id != 0, virtual P2P)
 
-// framedServer is a single-connection TCP server that speaks the cluster
-// frame protocol.
+// framedServer is a mock TCP client that dials a Go slave and speaks the
+// cluster frame protocol.  It simulates a Python Master for integration testing.
 type framedServer struct {
-	listener net.Listener
-	conn     net.Conn
-	wg       sync.WaitGroup
-	mu       sync.Mutex
+	conn net.Conn
+	mu   sync.Mutex
 }
 
-func newFramedServer(t *testing.T) *framedServer {
+// newFramedServer dials the slave at slaveAddr and returns a connected mock master.
+func newFramedServer(t *testing.T, slaveAddr string) *framedServer {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	conn, err := net.DialTimeout("tcp", slaveAddr, 5*time.Second)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("dial slave:", err)
 	}
-	s := &framedServer{listener: l}
-	s.wg.Add(1)
-	go s.accept(t)
-	return s
+	return &framedServer{conn: conn}
 }
 
-func (s *framedServer) accept(t *testing.T) {
-	defer s.wg.Done()
-	conn, err := s.listener.Accept()
-	if err != nil {
-		return
+func (s *framedServer) close() {
+	if s.conn != nil {
+		s.conn.Close()
 	}
-	s.mu.Lock()
-	s.conn = conn
-	s.mu.Unlock()
 }
-
-func (s *framedServer) addr() string { return s.listener.Addr().String() }
-func (s *framedServer) close()       { s.listener.Close(); s.wg.Wait() }
 
 func (s *framedServer) sendFrame(t *testing.T, f *Frame) {
 	t.Helper()
 	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-	if conn == nil {
+	defer s.mu.Unlock()
+	if s.conn == nil {
 		t.Fatal("no connection")
 	}
-	if err := WriteFrameToWriter(conn, f); err != nil {
+	if err := WriteFrameToWriter(s.conn, f); err != nil {
 		t.Fatalf("sendFrame: %v", err)
 	}
 }
@@ -73,16 +60,48 @@ func (s *framedServer) sendFrame(t *testing.T, f *Frame) {
 func (s *framedServer) readFrame(t *testing.T) *Frame {
 	t.Helper()
 	s.mu.Lock()
-	conn := s.conn
-	s.mu.Unlock()
-	if conn == nil {
+	defer s.mu.Unlock()
+	if s.conn == nil {
 		t.Fatal("no connection")
 	}
-	f, err := ReadFrameFromReader(conn)
+	f, err := ReadFrameFromReader(s.conn)
 	if err != nil {
 		t.Fatalf("readFrame: %v", err)
 	}
 	return f
+}
+
+// newSlaveWithFramedServer creates a Slave listening on an ephemeral port and
+// a framedServer (mock master) that dials it.  Waits for master connection.
+func newSlaveWithFramedServer(t *testing.T, cfg *Config) (*SlaveRPC, *framedServer) {
+	t.Helper()
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:0"
+	}
+	rpc, err := NewSlaveRPC(cfg)
+	if err != nil {
+		t.Fatal("NewSlaveRPC:", err)
+	}
+	// RegisterHandlers must be called BEFORE Start so handlers are in place
+	// before the master connects.  Callers using this helper register after
+	// it returns — so we Start() here only after the caller registers.
+	// To preserve the existing test pattern (register after this helper
+	// returns), we Start() here and rely on RegisterMasterHandlers applying
+	// to the already-connected masterConn (it checks masterConn != nil).
+	rpc.Start()
+	master := newFramedServer(t, rpc.slave.listener.Addr().String())
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rpc.slave.mu.RLock()
+		mc := rpc.slave.masterConn
+		rpc.slave.mu.RUnlock()
+		if mc != nil {
+			return rpc, master
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("slave did not accept master connection in time")
+	return nil, nil
 }
 
 // =============================================================================
@@ -90,16 +109,10 @@ func (s *framedServer) readFrame(t *testing.T) *Frame {
 // =============================================================================
 
 func TestSlaveRPC_PingPong(t *testing.T) {
-	master := newFramedServer(t)
+	rpc, master := newSlaveWithFramedServer(t, &Config{ID: "slave-1"})
 	defer master.close()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: master.addr(), ListenAddr: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer rpc.Close()
 	rpc.RegisterHandlers()
-	time.Sleep(100 * time.Millisecond)
 
 	pingReq := &PingRequest{ID: []byte("slave-1"), FullShardIDList: []uint32{4, 5, 6}}
 	pingPayload, _ := serialize.SerializeToBytes(pingReq)
@@ -121,16 +134,10 @@ func TestSlaveRPC_PingPong(t *testing.T) {
 }
 
 func TestSlaveRPC_StubHandler(t *testing.T) {
-	master := newFramedServer(t)
+	rpc, master := newSlaveWithFramedServer(t, &Config{})
 	defer master.close()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: master.addr(), ListenAddr: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer rpc.Close()
 	rpc.RegisterHandlers()
-	time.Sleep(100 * time.Millisecond)
 
 	master.sendFrame(t, &Frame{Opcode: OP_ADD_ROOT_BLOCK_REQUEST, RPCID: 1, Payload: []byte("dummy")})
 	time.Sleep(200 * time.Millisecond) // stub returns ErrNotImplemented → no response
@@ -138,31 +145,48 @@ func TestSlaveRPC_StubHandler(t *testing.T) {
 }
 
 func TestSlaveRPC_SendRPCToMaster(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Create slave listening on ephemeral port
+	rpc, err := NewSlaveRPC(&Config{ID: "slave-1", ListenAddr: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer rpc.Close()
+	rpc.Start() // begin accepting connections before master dials in
 
+	// Mock master dials in and responds to the RPC
+	conn, err := net.DialTimeout("tcp", rpc.slave.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal("dial slave:", err)
+	}
+	defer conn.Close()
+
+	// Wait for slave to accept the connection
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rpc.slave.mu.RLock()
+		mc := rpc.slave.masterConn
+		rpc.slave.mu.RUnlock()
+		if mc != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rpc.slave.masterConn == nil {
+		t.Fatal("slave did not accept master connection in time")
+	}
+
+	// Mock master reads the incoming RPC request and sends response
 	go func() {
-		conn, _ := listener.Accept()
-		if conn == nil {
+		frame, err := ReadFrameFromReader(conn)
+		if err != nil {
 			return
 		}
-		defer conn.Close()
-		frame, _ := ReadFrameFromReader(conn)
 		WriteFrameToWriter(conn, &Frame{
 			Opcode:  frame.Opcode + 1,
 			RPCID:   frame.RPCID,
 			Payload: []byte("master-ack"),
 		})
 	}()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: listener.Addr().String(), ListenAddr: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rpc.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -196,19 +220,17 @@ func TestSlaveRPC_XshardPingHandshake(t *testing.T) {
 		defer conn.Close()
 		pingReq := &PingRequest{ID: []byte("slave-B"), FullShardIDList: []uint32{0, 1}}
 		payload, _ := serialize.SerializeToBytes(pingReq)
-		WriteFrameToWriter(conn, &Frame{Opcode: OP_PING, RPCID: 7, Payload: payload})
+		// SlaveConnection uses 0-byte Metadata (not ClusterMetadata).
+		WriteFrameNoMetaToWriter(conn, &Frame{Opcode: OP_PING, RPCID: 7, Payload: payload})
 		close(pingSent)
-		resp, _ := ReadFrameFromReader(conn)
+		resp, _ := ReadFrameNoMetaFromReader(conn)
 		if resp != nil {
 			pongReceived <- resp.Payload
 		}
 	}()
 
-	// Use a real Slave + SlaveRPC to hold the xshard handler map
-	master := newFramedServer(t)
-	defer master.close()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: master.addr(), ListenAddr: ""})
+	// Create slave (listen-only, no master needed for xshard test)
+	rpc, err := NewSlaveRPC(&Config{ID: "slave-A", ListenAddr: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,8 +257,8 @@ func TestSlaveRPC_XshardPingHandshake(t *testing.T) {
 		if err := serialize.Deserialize(serialize.NewByteBuffer(payload), &pong); err != nil {
 			t.Fatal(err)
 		}
-		if string(pong.ID) != "slave-B" {
-			t.Errorf("expected slave-B, got %s", pong.ID)
+		if string(pong.ID) != "slave-A" {
+			t.Errorf("expected slave-A, got %s", pong.ID)
 		}
 		t.Log("OK")
 	case <-time.After(5 * time.Second):
@@ -258,7 +280,8 @@ func TestSlaveRPC_XshardSendTxList(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		frame, _ := ReadFrameFromReader(conn)
+		// SlaveConnection uses 0-byte Metadata (not ClusterMetadata).
+		frame, _ := ReadFrameNoMetaFromReader(conn)
 		received <- frame
 	}()
 
@@ -297,16 +320,25 @@ func TestSlaveRPC_ConnectToSlaves(t *testing.T) {
 	connected := make(chan struct{})
 	go func() {
 		conn, _ := remoteListener.Accept()
-		if conn != nil {
-			conn.Close()
+		if conn == nil {
+			return
 		}
+		defer conn.Close()
+		// Read PING frame, reply with PONG matching remote's advertised info.
+		// SlaveConnection uses 0-byte Metadata (not ClusterMetadata).
+		frame, _ := ReadFrameNoMetaFromReader(conn)
+		pong := &PongResponse{ID: []byte("remote"), FullShardIDList: []uint32{2, 3}}
+		pongPayload, _ := serialize.SerializeToBytes(pong)
+		WriteFrameNoMetaToWriter(conn, &Frame{
+			Opcode:  frame.Opcode + 1,
+			RPCID:   frame.RPCID,
+			Payload: pongPayload,
+		})
 		close(connected)
 	}()
 
-	master := newMockMaster(t)
-	defer master.close()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: master.addr(), ListenAddr: ""})
+	// Create slave (listen-only, no master needed for connect-to-slaves test)
+	rpc, err := NewSlaveRPC(&Config{ID: "slave-A", ListenAddr: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,13 +378,8 @@ func TestSlaveRPC_ConnectToSlaves(t *testing.T) {
 // =============================================================================
 
 func TestSlaveRPC_PeerCommandRouting(t *testing.T) {
-	master := newMockMaster(t)
+	rpc, master := newSlaveWithFramedServer(t, &Config{OwnBranches: []uint32{1}})
 	defer master.close()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: master.addr(), OwnBranches: []uint32{1}, ListenAddr: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer rpc.Close()
 
 	// Create peer connection
@@ -415,16 +442,10 @@ func TestSlaveRPC_FullIntegration(t *testing.T) {
 		close(remoteConnected)
 	}()
 
-	master := newFramedServer(t)
+	rpc, master := newSlaveWithFramedServer(t, &Config{ID: "test-slave", OwnBranches: []uint32{0}})
 	defer master.close()
-
-	rpc, err := NewSlaveRPC(&Config{MasterAddr: master.addr(), OwnBranches: []uint32{0}, ListenAddr: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer rpc.Close()
 	rpc.RegisterHandlers()
-	time.Sleep(100 * time.Millisecond)
 
 	// 1. PING/PONG
 	pingPayload, _ := serialize.SerializeToBytes(&PingRequest{ID: []byte("test-slave"), FullShardIDList: []uint32{0}})

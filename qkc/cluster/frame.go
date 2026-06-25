@@ -44,23 +44,46 @@ const (
 	totalOverhead = frameHeader + metaSize + opcodeSize + rpcIDSize // 4+12+1+8=25
 )
 
-// ReadFrame reads a single complete frame from r.
+// ReadFrame reads a single complete frame with 12-byte ClusterMetadata from r.
 // It returns the frame or an error if the stream is malformed.
+//
+// Used for master ↔ slave traffic (ClusterMetadata: branch + cluster_peer_id).
+// For slave ↔ slave traffic that uses 0-byte Metadata, use ReadFrameNoMeta.
 func ReadFrame(r io.Reader) (*Frame, error) {
+	return ReadFrameWithMetaSize(r, metaSize)
+}
+
+// ReadFrameNoMeta reads a frame with 0-byte Metadata (slave ↔ slave traffic).
+// Matches Python's SlaveConnection which uses Metadata (get_byte_size() == 0).
+func ReadFrameNoMeta(r io.Reader) (*Frame, error) {
+	return ReadFrameWithMetaSize(r, 0)
+}
+
+// ReadFrameWithMetaSize reads a frame with the given metadata size in bytes.
+// The wire layout is:
+//
+//	[4B payload_len] [metaSize B metadata] [1B opcode] [8B rpc_id] [payload]
+func ReadFrameWithMetaSize(r io.Reader, metaSize int) (*Frame, error) {
 	// 1. Read 4-byte big-endian payload length
 	var payloadLen uint32
 	if err := binary.Read(r, binary.BigEndian, &payloadLen); err != nil {
 		return nil, fmt.Errorf("reading frame length: %w", err)
 	}
 
-	// 2. Read 12-byte Metadata
-	var metaBuf [metaSize]byte
-	if _, err := io.ReadFull(r, metaBuf[:]); err != nil {
-		return nil, fmt.Errorf("reading metadata: %w", err)
-	}
-	meta := Metadata{
-		Branch:        binary.BigEndian.Uint32(metaBuf[0:4]),
-		ClusterPeerID: binary.BigEndian.Uint64(metaBuf[4:12]),
+	// 2. Read metadata (may be 0 bytes for slave-to-slave connections)
+	var meta Metadata
+	if metaSize > 0 {
+		if metaSize != 12 {
+			return nil, fmt.Errorf("unsupported metaSize %d (only 0 or 12 supported)", metaSize)
+		}
+		metaBuf := make([]byte, metaSize)
+		if _, err := io.ReadFull(r, metaBuf); err != nil {
+			return nil, fmt.Errorf("reading metadata: %w", err)
+		}
+		meta = Metadata{
+			Branch:        binary.BigEndian.Uint32(metaBuf[0:4]),
+			ClusterPeerID: binary.BigEndian.Uint64(metaBuf[4:12]),
+		}
 	}
 
 	// 3. Read opcode + rpc_id + payload
@@ -78,24 +101,42 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 	}, nil
 }
 
-// WriteFrame serializes f and writes it to w.
+// WriteFrame serializes f with 12-byte ClusterMetadata and writes it to w.
+//
+// Used for master ↔ slave traffic.  For slave ↔ slave traffic that uses
+// 0-byte Metadata, use WriteFrameNoMeta.
 func WriteFrame(w io.Writer, f *Frame) error {
+	return WriteFrameWithMetaSize(w, f, metaSize)
+}
+
+// WriteFrameNoMeta writes a frame with 0-byte Metadata (slave ↔ slave traffic).
+// Matches Python's SlaveConnection which uses Metadata (get_byte_size() == 0).
+func WriteFrameNoMeta(w io.Writer, f *Frame) error {
+	return WriteFrameWithMetaSize(w, f, 0)
+}
+
+// WriteFrameWithMetaSize serializes f with the given metadata size and writes
+// it to w.  metaSize must match what the peer expects (12 for cluster RPC, 0
+// for direct slave-to-slave).
+func WriteFrameWithMetaSize(w io.Writer, f *Frame, metaSize int) error {
 	payloadLen := uint32(len(f.Payload))
 	if int(payloadLen) != len(f.Payload) {
 		return errors.New("payload too large")
 	}
 
 	// Build the buffer to write in one shot.
-	// Layout: [4B payloadLen] [12B Metadata] [1B opcode] [8B rpcID] [payload]
+	// Layout: [4B payloadLen] [metaSize B Metadata] [1B opcode] [8B rpcID] [payload]
 	total := frameHeader + metaSize + opcodeSize + rpcIDSize + int(payloadLen)
 	buf := make([]byte, total)
 
 	// Frame length (payload only, matches Python: len(raw_data) - 8 - 1)
 	binary.BigEndian.PutUint32(buf[0:frameHeader], payloadLen)
 
-	// Metadata
-	binary.BigEndian.PutUint32(buf[frameHeader:frameHeader+4], f.Meta.Branch)
-	binary.BigEndian.PutUint64(buf[frameHeader+4:frameHeader+metaSize], f.Meta.ClusterPeerID)
+	// Metadata (only if metaSize > 0)
+	if metaSize > 0 {
+		binary.BigEndian.PutUint32(buf[frameHeader:frameHeader+4], f.Meta.Branch)
+		binary.BigEndian.PutUint64(buf[frameHeader+4:frameHeader+metaSize], f.Meta.ClusterPeerID)
+	}
 
 	// Opcode
 	buf[frameHeader+metaSize] = f.Opcode
@@ -138,6 +179,22 @@ func ReadFrameFromReader(r io.Reader) (*Frame, error) {
 func WriteFrameToWriter(w io.Writer, frame *Frame) error {
 	bw := bufio.NewWriter(w)
 	if err := WriteFrame(bw, frame); err != nil {
+		return err
+	}
+	return bw.Flush()
+}
+
+// ReadFrameNoMetaFromReader is a convenience wrapper for ReadFrameNoMeta.
+// Used in tests that simulate a Python SlaveConnection peer.
+func ReadFrameNoMetaFromReader(r io.Reader) (*Frame, error) {
+	return ReadFrameNoMeta(bufio.NewReader(r))
+}
+
+// WriteFrameNoMetaToWriter is a convenience wrapper for WriteFrameNoMeta.
+// Used in tests that simulate a Python SlaveConnection peer.
+func WriteFrameNoMetaToWriter(w io.Writer, frame *Frame) error {
+	bw := bufio.NewWriter(w)
+	if err := WriteFrameNoMeta(bw, frame); err != nil {
 		return err
 	}
 	return bw.Flush()

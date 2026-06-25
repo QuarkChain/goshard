@@ -22,12 +22,22 @@ type Dispatcher struct {
 }
 
 // NewDispatcher creates a new dispatcher for the given master connection.
+// masterConn may be nil if it will be set later via SetMasterConn (e.g. when
+// the slave is listening and the master has not yet connected).
 func NewDispatcher(masterConn *MasterConn, logger log.Logger) *Dispatcher {
 	return &Dispatcher{
 		masterConn: masterConn,
 		peerConns:  make(map[uint64]map[uint32]*PeerConn),
 		log:        logger,
 	}
+}
+
+// SetMasterConn sets the master connection.  Used when the slave is listening
+// and the master connects in after NewDispatcher was called with nil.
+func (d *Dispatcher) SetMasterConn(mc *MasterConn) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.masterConn = mc
 }
 
 // AddPeerConn registers a PeerConn for a specific cluster_peer_id and branch.
@@ -78,9 +88,16 @@ func (d *Dispatcher) RemovePeerConn(clusterPeerID uint64) {
 // Dispatch routes an inbound frame to the appropriate handler.
 // This is set as the MasterConn.OnFrame callback.
 func (d *Dispatcher) Dispatch(frame *Frame) {
+	d.mu.RLock()
+	mc := d.masterConn
+	d.mu.RUnlock()
+	if mc == nil {
+		d.log.Error("dispatcher invoked before master conn set", "opcode", frame.Opcode)
+		return
+	}
 	if frame.Meta.ClusterPeerID == 0 {
 		// Master command → go to MasterConn handlers
-		d.masterConn.Handle(frame)
+		mc.Handle(frame)
 		return
 	}
 

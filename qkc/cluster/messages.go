@@ -33,18 +33,57 @@
 // ---------------------------------------------------------------------------
 package cluster
 
-import "math/big"
+import (
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/qkc/serialize"
+)
 
 // =============================================================================
 // §1  Cluster initialisation
 // =============================================================================
 
+// RootBlock is an opaque placeholder for Python's RootBlock.
+//
+// The full RootBlock structure (RootBlockHeader + minor_block_header_list +
+// tracking_data) is not yet defined in Go.  This placeholder stores the raw
+// serialized bytes so that PingRequest can be deserialized without parsing
+// the RootBlock contents, and re-serialized byte-identically.
+//
+// When shard-state initialization is implemented, this type will be replaced
+// with a full struct definition.
+type RootBlock struct {
+	raw []byte
+}
+
+// Serialize implements serialize.Serializable.
+func (rb *RootBlock) Serialize(w *[]byte) error {
+	*w = append(*w, rb.raw...)
+	return nil
+}
+
+// Deserialize implements serialize.Serializable.
+// Reads all remaining bytes from the buffer.
+func (rb *RootBlock) Deserialize(bb *serialize.ByteBuffer) error {
+	remaining, err := bb.ReadRemaining()
+	if err != nil {
+		return err
+	}
+	rb.raw = remaining
+	return nil
+}
+
+// IsNil returns true if the RootBlock contains no data.
+func (rb *RootBlock) IsNil() bool {
+	return len(rb.raw) == 0
+}
+
 // PingRequest is sent by Master to initialise slave shard state.
 // Wire: [4B id] [4B full_shard_id_list] [nil? root_tip as RootBlock]
 type PingRequest struct {
-	ID              []byte   `bytesizeofslicelen:"4"`
-	FullShardIDList []uint32 `bytesizeofslicelen:"4"`
-	// TODO: RootTip *RootBlock `ser:"nil"`
+	ID              []byte     `bytesizeofslicelen:"4"`
+	FullShardIDList []uint32   `bytesizeofslicelen:"4"`
+	RootTip         *RootBlock `ser:"nil"`
 }
 
 // PongResponse is the slave's reply to PING.

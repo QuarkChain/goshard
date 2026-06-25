@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
@@ -50,7 +51,8 @@ import (
 // Config holds the configuration for a Slave node.
 type Config struct {
 	MasterAddr  string     // Python master address (host:port)
-	OwnBranches []uint32   // Shard branches owned by this slave
+	ID          string     // Slave ID (matches Python slave_config.ID, ASCII bytes on wire)
+	OwnBranches []uint32   // Full shard IDs owned by this slave (matches Python FULL_SHARD_ID_LIST)
 	ListenAddr  string     // Address to accept incoming xshard connections from other slaves
 	Logger      log.Logger // Logger instance (defaults to log.New())
 }
@@ -72,6 +74,10 @@ type Slave struct {
 	masterConn *MasterConn
 	xshardPool *XshardPool
 	dispatcher *Dispatcher
+	listener   net.Listener
+
+	id              []byte   // Slave ID (ASCII bytes, matches Python slave_config.ID)
+	fullShardIDList []uint32 // Full shard IDs owned by this slave
 
 	clusterPeerIDs map[uint64]struct{}             // Registered cluster peer IDs
 	peerConns      map[uint32]map[uint64]*PeerConn // branch → cluster_peer_id → conn
@@ -88,13 +94,25 @@ type Slave struct {
 	peerHandlers   map[byte]MasterHandler
 	peerHandlersMu sync.RWMutex
 
+	// masterHandlers are cached until the master connects (masterConn is set
+	// asynchronously by acceptLoop).  When handleConn creates the MasterConn,
+	// it applies these handlers before calling Start().
+	masterHandlers map[byte]MasterHandler
+
 	mu     sync.RWMutex
 	log    log.Logger
 	closed bool
+
+	startOnce sync.Once // ensures acceptLoop is started at most once
 }
 
-// NewSlave creates a new Slave, connects to the master, and initializes all
-// communication channels.  Returns an error if the master connection fails.
+// NewSlave creates a new Slave, starts listening for the master to connect
+// (matching Python's SlaveServer which runs asyncio.start_server), and
+// initializes all communication channels.
+//
+// The slave listens on ListenAddr for:
+//   - the Python master (cluster_peer_id == 0 frames)
+//   - other slave nodes (xshard traffic, cluster_peer_id != 0)
 //
 // No handlers are registered by default.  The caller must register handlers
 // (typically via SlaveRPC.RegisterHandlers()) before messages arrive.
@@ -104,40 +122,161 @@ func NewSlave(cfg *Config) (*Slave, error) {
 	}
 
 	s := &Slave{
-		cfg:            cfg,
-		clusterPeerIDs: make(map[uint64]struct{}),
-		peerConns:      make(map[uint32]map[uint64]*PeerConn),
-		log:            cfg.Logger,
+		cfg:             cfg,
+		id:              []byte(cfg.ID),
+		fullShardIDList: cfg.OwnBranches,
+		clusterPeerIDs:  make(map[uint64]struct{}),
+		peerConns:       make(map[uint32]map[uint64]*PeerConn),
+		masterHandlers:  make(map[byte]MasterHandler),
+		log:             cfg.Logger,
 	}
 
-	// 1. Connect to master (physical TCP, multiplexed)
-	s.log.Info("connecting to master", "addr", cfg.MasterAddr)
-	mc, err := NewMasterConn(cfg.MasterAddr, cfg.Logger)
+	// 1. Listen for incoming connections (master + other slaves).
+	//    Matches Python SlaveServer.__start_server which binds 0.0.0.0:PORT
+	//    and accepts both master and slave connections.
+	s.log.Info("listening for master and slave connections", "addr", cfg.ListenAddr)
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
 	}
-	s.masterConn = mc
+	s.listener = ln
 
 	// 2. Create xshard connection pool (separate physical TCP)
 	s.xshardPool = NewXshardPool(cfg.Logger)
 
-	// 3. Create dispatcher that routes frames by cluster_peer_id
-	s.dispatcher = NewDispatcher(mc, cfg.Logger)
-
-	// Wire dispatcher: every frame from master goes through the dispatcher
-	mc.OnFrame = s.dispatcher.Dispatch
-
-	// Start the master connection read loop (after OnFrame is configured)
-	mc.Start()
+	// 3. Create dispatcher (masterConn will be set when master connects)
+	s.dispatcher = NewDispatcher(nil, cfg.Logger)
 
 	// 4. Initialize peer connection maps for each owned branch
 	for _, branch := range cfg.OwnBranches {
 		s.peerConns[branch] = make(map[uint64]*PeerConn)
 	}
 
-	s.log.Info("slave initialized", "branches", cfg.OwnBranches)
+	// NOTE: acceptLoop is NOT started here.  Callers must register handlers
+	// via SlaveRPC.RegisterHandlers() first, then call Start() (or Serve(),
+	// which calls Start() internally).  This avoids a race where the master
+	// connects before handlers are registered.
+
+	s.log.Info("slave initialized", "id", cfg.ID, "branches", cfg.OwnBranches, "listen", cfg.ListenAddr)
 	return s, nil
 }
+
+// Start begins accepting incoming connections (master + other slaves).
+// Must be called after RegisterHandlers() (typically via SlaveRPC.RegisterHandlers)
+// so handlers are in place before any connection arrives.
+//
+// Safe to call multiple times — only the first call launches acceptLoop.
+// Serve() calls Start() internally, so callers using Serve() do not need to
+// call Start() explicitly.
+func (s *Slave) Start() {
+	s.startOnce.Do(func() { go s.acceptLoop() })
+}
+
+// acceptLoop accepts incoming connections from the listener.
+// The first connection is assumed to be from the master (matching Python's
+// SlaveServer which creates a MasterConnection for the master and a
+// SlaveConnection for other slaves).
+func (s *Slave) acceptLoop() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				return
+			}
+			s.log.Error("accept error", "err", err)
+			return
+		}
+		go s.handleConn(conn)
+	}
+}
+
+// handleConn processes a new incoming connection.
+// If no master connection is set yet, this is treated as the master connection
+// (matching Python's behavior where the master connects first).
+// Otherwise it is treated as a slave-to-slave xshard connection.
+func (s *Slave) handleConn(conn net.Conn) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		conn.Close()
+		return
+	}
+	masterSet := s.masterConn != nil
+	s.mu.Unlock()
+
+	if !masterSet {
+		// First connection: master.
+		// Re-check under the lock to avoid a race where two concurrent
+		// handleConn goroutines both see masterSet=false and both create
+		// a MasterConn (the second would overwrite and leak the first).
+		mc := NewMasterConnFromConn(conn, s.log)
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			mc.Close()
+			return
+		}
+		if s.masterConn != nil {
+			// Another goroutine won the race; close this duplicate.
+			s.mu.Unlock()
+			mc.Close()
+			return
+		}
+		s.masterConn = mc
+		// Apply any handlers registered before master connected
+		for opcode, handler := range s.masterHandlers {
+			mc.RegisterHandler(opcode, handler)
+		}
+		// Wire dispatcher before Start so readLoop never sees a nil OnFrame.
+		mc.OnFrame = s.dispatcher.Dispatch
+		s.dispatcher.SetMasterConn(mc)
+		s.mu.Unlock()
+
+		s.log.Info("master connected", "remote", conn.RemoteAddr())
+		// Start the read loop last, after all wiring is complete.
+		mc.Start()
+	} else {
+		// Subsequent connections: slave-to-slave xshard
+		s.log.Info("slave connected", "remote", conn.RemoteAddr())
+		// Wrap and apply the SLAVE_OP_RPC_MAP handlers directly from Slave.
+		// (Previously this went through XshardPool.inboundHandlers, which was
+		// never wired up — see BUG note.  Slave.xshardHandlers is the single
+		// source of truth for both outbound and inbound xshard handlers,
+		// matching Python's SlaveConnection which uses the same
+		// SLAVE_OP_RPC_MAP for both directions.)
+		xc := NewXshardConnFromConn(conn, s.log)
+		s.applyXshardHandlers(xc)
+		xc.Start()
+		s.xshardPool.TrackInbound(xc)
+	}
+}
+
+// waitForMaster blocks until the master has connected or ctx is done.
+// Used by SlaveRPC.Serve() to wait for the master before serving.
+func (s *Slave) waitForMaster(ctx context.Context) error {
+	for {
+		s.mu.RLock()
+		mc := s.masterConn
+		s.mu.RUnlock()
+		if mc != nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// ID returns the slave's ID (ASCII bytes).
+func (s *Slave) ID() []byte { return s.id }
+
+// FullShardIDList returns the full shard IDs owned by this slave.
+func (s *Slave) FullShardIDList() []uint32 { return s.fullShardIDList }
 
 // ── Handler registration (inbound: Master → Slave) ─────────────────────
 
@@ -148,15 +287,36 @@ type MasterHandler = func(*Frame) ([]byte, error)
 
 // RegisterMasterHandler registers a handler for a specific master cluster RPC
 // opcode.  Panics if handler is nil.
+//
+// If the master has not yet connected (masterConn is nil), the handler is
+// cached in masterHandlers and applied when the master connects in handleConn.
 func (s *Slave) RegisterMasterHandler(opcode byte, handler MasterHandler) {
-	s.masterConn.RegisterHandler(opcode, handler)
+	if handler == nil {
+		panic("handler must not be nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.masterHandlers[opcode] = handler
+	if s.masterConn != nil {
+		s.masterConn.RegisterHandler(opcode, handler)
+	}
 }
 
 // RegisterMasterHandlers is a convenience method to register multiple handlers
 // at once from a map.
 func (s *Slave) RegisterMasterHandlers(handlers map[byte]MasterHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for opcode, handler := range handlers {
-		s.masterConn.RegisterHandler(opcode, handler)
+		if handler == nil {
+			panic("handler must not be nil")
+		}
+		s.masterHandlers[opcode] = handler
+	}
+	if s.masterConn != nil {
+		for opcode, handler := range handlers {
+			s.masterConn.RegisterHandler(opcode, handler)
+		}
 	}
 }
 
@@ -185,12 +345,28 @@ func (s *Slave) applyXshardHandlers(conn *XshardConn) {
 
 // SendToMaster sends a fire-and-forget command to the master (RPCID=0).
 func (s *Slave) SendToMaster(opcode byte, payload []byte) error {
-	return s.masterConn.SendCommand(opcode, payload)
+	s.mu.RLock()
+	mc := s.masterConn
+	s.mu.RUnlock()
+	if mc == nil {
+		return fmt.Errorf("master not connected")
+	}
+	return mc.SendCommand(opcode, payload)
 }
 
 // SendRPCToMaster sends an RPC request to the master and waits for the response.
+//
+// Returns an error if the master has not connected yet.  Callers that need to
+// wait for the master should use WaitForMaster() first (matching Python's
+// wait_until_active() pattern).
 func (s *Slave) SendRPCToMaster(ctx context.Context, opcode byte, payload []byte) (*Frame, error) {
-	return s.masterConn.SendRPC(ctx, opcode, payload)
+	s.mu.RLock()
+	mc := s.masterConn
+	s.mu.RUnlock()
+	if mc == nil {
+		return nil, fmt.Errorf("master not connected")
+	}
+	return mc.SendRPC(ctx, opcode, payload)
 }
 
 // ── Peer communication (cluster_peer_id != 0, virtual) ─────────────────
@@ -309,6 +485,9 @@ func (s *Slave) ClusterPeerIDs() []uint64 {
 //
 // One result per SlaveInfo entry: empty (nil) = success, non-empty = error message.
 // Each new XshardConn gets the registered xshard handlers (Python SLAVE_OP_RPC_MAP).
+//
+// After connecting, sends a PING RPC and verifies the remote slave's id and
+// full_shard_id_list match what the master advertised (matches Python behavior).
 func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 	var req ConnectToSlavesRequest
 	if err := serialize.Deserialize(serialize.NewByteBuffer(payload), &req); err != nil {
@@ -323,8 +502,12 @@ func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 		host := string(info.Host)
 		addr := fmt.Sprintf("%s:%d", host, info.Port)
 
-		// One connection per remote slave (not per shard — the connection
-		// is indexed by all fullShardIDs that slave covers, like Python).
+		// Skip self (matches Python: if slave_info.id == self.slave_server.id)
+		if string(info.ID) == string(s.id) {
+			resultList[i] = nil // success, self
+			continue
+		}
+
 		if info.Port == 0 {
 			resultList[i] = []byte("slave info has port 0")
 			continue
@@ -343,6 +526,58 @@ func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 		// Start the read loop after handlers are registered
 		conn.Start()
 
+		// Send PING and verify the remote slave's id and shard list
+		// (matches Python: id, full_shard_id_list = await slave.send_ping())
+		//
+		// Python's SlaveConnection.send_ping sends RootBlock(RootBlockHeader())
+		// as root_tip.  We send nil (None) instead because:
+		//   1. The slave-to-slave handle_ping does NOT process root_tip
+		//      (only checks id and full_shard_id_list).
+		//   2. Python's Optional(RootBlock) field accepts None on the wire.
+		//   3. Python's send_ping itself has a TODO: "Send real root tip".
+		// When full RootBlock support lands, this can send a real empty header.
+		pingPayload, err := serialize.SerializeToBytes(&PingRequest{
+			ID:              s.id,
+			FullShardIDList: s.fullShardIDList,
+			RootTip:         nil, // None — see comment above
+		})
+		if err != nil {
+			resultList[i] = []byte("serialize ping: " + err.Error())
+			conn.Close()
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		resp, err := conn.SendRPC(ctx, OP_PING, pingPayload)
+		cancel()
+		if err != nil {
+			resultList[i] = []byte("ping rpc: " + err.Error())
+			conn.Close()
+			continue
+		}
+
+		var pong PongResponse
+		if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &pong); err != nil {
+			resultList[i] = []byte("deserialize pong: " + err.Error())
+			conn.Close()
+			continue
+		}
+
+		// Verify remote slave's id matches what master advertised
+		if string(pong.ID) != string(info.ID) {
+			errMsg := fmt.Sprintf("id does not match. expect %s got %s", string(info.ID), string(pong.ID))
+			resultList[i] = []byte(errMsg)
+			conn.Close()
+			continue
+		}
+		// Verify remote slave's shard list matches what master advertised
+		if !shardListsEqual(pong.FullShardIDList, info.FullShardIDList) {
+			errMsg := fmt.Sprintf("shard list does not match. expect %v got %v", info.FullShardIDList, pong.FullShardIDList)
+			resultList[i] = []byte(errMsg)
+			conn.Close()
+			continue
+		}
+
 		// Index the connection by every fullShardID this slave covers
 		for _, fullShardID := range info.FullShardIDList {
 			target := FullShardID{
@@ -354,12 +589,30 @@ func (s *Slave) ConnectToSlaves(payload []byte) ([]byte, error) {
 			s.xshardPool.Add(target, conn)
 		}
 
-		s.log.Info("connected to slave", "addr", addr, "shards", len(info.FullShardIDList))
+		s.log.Info("connected to slave", "addr", addr, "id", string(info.ID), "shards", len(info.FullShardIDList))
 		// resultList[i] stays nil → success (matches Python: empty str)
 	}
 
 	resp := ConnectToSlavesResponse{ResultList: resultList}
 	return serialize.SerializeToBytes(&resp)
+}
+
+// shardListsEqual returns true if two full-shard-id lists contain the same elements.
+func shardListsEqual(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[uint32]int, len(a))
+	for _, v := range a {
+		seen[v]++
+	}
+	for _, v := range b {
+		seen[v]--
+		if seen[v] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ── Xshard communication (separate physical TCP) ────────────────────────
@@ -383,62 +636,55 @@ func (s *Slave) AddXshardConnection(target FullShardID, addr string) error {
 
 // ── Lifecycle ───────────────────────────────────────────────────────────
 
-// Serve blocks until the master connection encounters a fatal error.
-// If ListenAddr is configured, it also accepts incoming xshard connections.
-func (s *Slave) Serve() error {
-	if s.cfg.ListenAddr != "" {
-		if err := s.startXshardServer(s.cfg.ListenAddr); err != nil {
-			s.masterConn.Close()
-			return err
-		}
-	}
-
-	for err := range s.masterConn.Error() {
-		s.log.Error("master connection error", "err", err)
-		return err
-	}
-	return nil
-}
-
-// startXshardServer starts a TCP server to accept incoming xshard connections.
-// Each accepted connection gets the registered xshard handlers (Python SLAVE_OP_RPC_MAP).
+// Serve blocks until the master connection encounters a fatal error or the
+// listener is closed.
 //
-// TODO: perform PING/PONG handshake to learn the remote slave's ID and
-// fullShardIDList, then index the connection in xshardPool accordingly
-// (Python: SlaveConnectionManager.handle_new_connection).
-func (s *Slave) startXshardServer(listenAddr string) error {
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return err
-	}
+// The slave is already listening (NewSlave started acceptLoop), so Serve
+// simply waits for a fatal error from the master connection (once it
+// connects) or for the listener to close.
+func (s *Slave) Serve() error {
+	// Start accepting connections (idempotent — safe if Start() already called)
+	s.Start()
+
+	// Wait for the master to connect (Python master dials in after the slave
+	// is listening).  Block until then or until Close().
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	go func() {
-		defer listener.Close()
-		defer func() {
-			if r := recover(); r != nil {
-				s.log.Error("xshard accept loop panic recovered", "panic", r)
-			}
-		}()
-
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Temporary() {
-					s.log.Warn("temporary accept error, retrying", "err", err)
-					continue
-				}
-				s.log.Error("failed to accept xshard connection", "err", err)
-				return
-			}
-			xc := NewXshardConnFromConn(conn, s.log)
-			s.applyXshardHandlers(xc)
-			xc.Start()
-			s.log.Info("accepted xshard connection", "addr", conn.RemoteAddr())
+		if err := s.waitForMaster(ctx); err != nil {
+			s.log.Debug("waitForMaster cancelled", "err", err)
 		}
 	}()
 
-	s.log.Info("xshard server started", "addr", listenAddr)
-	return nil
+	// Poll for master connection errors once masterConn is set.
+	for {
+		s.mu.RLock()
+		mc := s.masterConn
+		closed := s.closed
+		s.mu.RUnlock()
+
+		if closed {
+			return nil
+		}
+
+		if mc != nil {
+			// Master connected — wait for its fatal error
+			err := <-mc.Error()
+			if err != nil {
+				s.log.Error("master connection error", "err", err)
+				return err
+			}
+			return nil
+		}
+
+		// Master not yet connected — wait and retry
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // Close shuts down the slave and all its connections.
@@ -452,8 +698,16 @@ func (s *Slave) Close() {
 	s.mu.Unlock()
 
 	s.log.Info("shutting down slave")
+	if s.listener != nil {
+		s.listener.Close()
+	}
 	s.dispatcher.Close()
 	s.xshardPool.Close()
-	s.masterConn.Close()
+	s.mu.RLock()
+	mc := s.masterConn
+	s.mu.RUnlock()
+	if mc != nil {
+		mc.Close()
+	}
 	s.log.Info("slave shutdown complete")
 }

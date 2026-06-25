@@ -16,11 +16,18 @@ type FullShardID struct {
 // XshardPool manages a pool of connections to other slave nodes.
 // It is indexed by FullShardID to route xshard traffic to the correct target.
 //
-// When the master sends CONNECT_TO_SLAVES_REQUEST, the slave populates this pool.
+// When the master sends CONNECT_TO_SLAVES_REQUEST, the slave populates this pool
+// with outbound connections.  Inbound connections from other slaves are also
+// tracked here (via TrackInbound) for lifecycle management, but their handlers
+// are applied by Slave.handleConn directly from Slave.xshardHandlers.
 type XshardPool struct {
 	mu    sync.RWMutex
 	conns map[FullShardID][]*XshardConn
 	log   log.Logger
+
+	// inboundConns holds all accepted inbound connections for lifecycle management.
+	inboundConns []*XshardConn
+	closed       bool
 }
 
 // NewXshardPool creates a new connection pool.
@@ -32,10 +39,15 @@ func NewXshardPool(logger log.Logger) *XshardPool {
 }
 
 // Add adds a connection to the pool, indexed by the target shard.
+// If the pool is closed, the connection is closed immediately and not tracked.
 func (p *XshardPool) Add(target FullShardID, conn *XshardConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
+	if p.closed {
+		conn.Close()
+		p.log.Warn("pool closed, closing outbound conn immediately", "remote", conn.RemoteAddr())
+		return
+	}
 	p.conns[target] = append(p.conns[target], conn)
 	p.log.Info("added xshard connection", "target", target, "remote_addr", conn.RemoteAddr())
 }
@@ -95,6 +107,8 @@ func (p *XshardPool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.closed = true
+
 	for target, conns := range p.conns {
 		for _, conn := range conns {
 			conn.Close()
@@ -102,6 +116,11 @@ func (p *XshardPool) Close() {
 		p.log.Info("closed connections to target", "target", target)
 	}
 	p.conns = nil
+
+	for _, conn := range p.inboundConns {
+		conn.Close()
+	}
+	p.inboundConns = nil
 }
 
 // Size returns the number of connections in the pool.
@@ -126,4 +145,27 @@ func (p *XshardPool) Targets() []FullShardID {
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+// TrackInbound registers an inbound XshardConn (already configured with handlers
+// and started by Slave.handleConn) for lifecycle management.  The pool will close
+// it when Close() is called.
+//
+// If the pool is already closed, the connection is closed immediately and not
+// tracked (prevents leak when Slave.Close() races with an in-flight handleConn).
+//
+// Handlers are NOT applied here — Slave.handleConn applies them directly from
+// Slave.xshardHandlers, which is the single source of truth for both outbound
+// and inbound xshard handlers (matching Python's SLAVE_OP_RPC_MAP usage).
+func (p *XshardPool) TrackInbound(conn *XshardConn) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		conn.Close()
+		p.log.Warn("pool closed, closing inbound conn immediately", "remote", conn.RemoteAddr())
+		return
+	}
+	p.inboundConns = append(p.inboundConns, conn)
+	p.mu.Unlock()
+	p.log.Info("tracked inbound xshard connection", "remote", conn.RemoteAddr())
 }

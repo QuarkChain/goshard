@@ -21,34 +21,43 @@ import (
 // TestIntegrationPingPong verifies the full PING/PONG handshake between
 // a mock master (speaking the cluster protocol) and a Go Slave.
 func TestIntegrationPingPong(t *testing.T) {
-	// Step 1: Start mock master
-	master := newProtocolMaster(t)
-	defer master.close()
-
-	// Step 2: Create slave and connect to mock master
+	// Step 1: Create slave listening on an ephemeral port
 	slave, err := NewSlave(&Config{
-		MasterAddr: master.addr(),
-		ListenAddr: "",
+		ID:          "test-slave-1",
+		ListenAddr:  "127.0.0.1:0",
+		OwnBranches: []uint32{0, 1, 2},
 	})
 	if err != nil {
 		t.Fatal("NewSlave:", err)
 	}
 	defer slave.Close()
+	// Start accepting connections.  For this test we start before registering
+	// the PING handler (step 4) — RegisterMasterHandler applies to the
+	// already-connected masterConn, and the mock master only sends PING after
+	// the handler is registered (step 5).
+	slave.Start()
 
-	// Step 3: Wait for slave to connect to master
-	time.Sleep(100 * time.Millisecond)
+	// Step 2: Mock master dials the slave
+	master := newProtocolMaster(t, slave.listener.Addr().String())
+	defer master.close()
 
-	// Step 4: Mock master sends a PING with serialized PingRequest
-	pingReq := &PingRequest{
-		ID:              []byte("test-slave-1"),
-		FullShardIDList: []uint32{0, 1, 2},
+	// Step 3: Wait for slave to accept the master connection
+	// (acceptLoop runs in background; masterConn is set asynchronously)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		slave.mu.RLock()
+		mc := slave.masterConn
+		slave.mu.RUnlock()
+		if mc != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	pingPayload, err := serialize.SerializeToBytes(pingReq)
-	if err != nil {
-		t.Fatal("serialize PingRequest:", err)
+	if slave.masterConn == nil {
+		t.Fatal("slave did not accept master connection in time")
 	}
 
-	// Step 5: Register a PING handler on the slave that returns a proper PongResponse
+	// Step 4: Register a PING handler on the slave that returns a proper PongResponse
 	pongReceived := make(chan struct{})
 	slave.RegisterMasterHandler(OP_PING, func(frame *Frame) ([]byte, error) {
 		// Deserialize the incoming PingRequest
@@ -80,6 +89,16 @@ func TestIntegrationPingPong(t *testing.T) {
 		close(pongReceived)
 		return pongPayload, nil
 	})
+
+	// Step 5: Mock master sends a PING with serialized PingRequest
+	pingReq := &PingRequest{
+		ID:              []byte("test-slave-1"),
+		FullShardIDList: []uint32{0, 1, 2},
+	}
+	pingPayload, err := serialize.SerializeToBytes(pingReq)
+	if err != nil {
+		t.Fatal("serialize PingRequest:", err)
+	}
 
 	// Step 6: Send PING frame to slave
 	master.sendFrame(t, &Frame{
@@ -218,89 +237,57 @@ func TestSlaveInfoSerializationRoundTrip(t *testing.T) {
 }
 
 // =============================================================================
-// protocolMaster: mock TCP server that speaks the cluster protocol
+// protocolMaster: mock TCP client that speaks the cluster protocol
 // =============================================================================
 
-// protocolMaster is a mock TCP server that sends and receives cluster protocol frames.
-// It simulates a Python Master for integration testing.
+// protocolMaster is a mock TCP client that dials a Go slave and sends/receives
+// cluster protocol frames.  It simulates a Python Master for integration testing.
 type protocolMaster struct {
-	listener net.Listener
-	addrStr  string
-	conn     net.Conn
-	wg       sync.WaitGroup
-	mu       sync.Mutex
+	conn    net.Conn
+	addrStr string
+	mu      sync.Mutex
 }
 
-func newProtocolMaster(t *testing.T) *protocolMaster {
+// newProtocolMaster dials the slave at slaveAddr and returns a connected mock master.
+func newProtocolMaster(t *testing.T, slaveAddr string) *protocolMaster {
 	t.Helper()
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	conn, err := net.DialTimeout("tcp", slaveAddr, 5*time.Second)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("dial slave:", err)
 	}
-
-	m := &protocolMaster{
-		listener: listener,
-		addrStr:  listener.Addr().String(),
-	}
-
-	m.wg.Add(1)
-	go m.accept(t)
-
-	return m
-}
-
-func (m *protocolMaster) accept(t *testing.T) {
-	defer m.wg.Done()
-
-	conn, err := m.listener.Accept()
-	if err != nil {
-		return
-	}
-
-	m.mu.Lock()
-	m.conn = conn
-	m.mu.Unlock()
+	return &protocolMaster{conn: conn, addrStr: slaveAddr}
 }
 
 func (m *protocolMaster) addr() string { return m.addrStr }
 
 func (m *protocolMaster) sendFrame(t *testing.T, frame *Frame) {
 	t.Helper()
-
 	m.mu.Lock()
-	conn := m.conn
-	m.mu.Unlock()
-
-	if conn == nil {
-		t.Fatal("no connection yet")
+	defer m.mu.Unlock()
+	if m.conn == nil {
+		t.Fatal("no connection")
 	}
-
-	if err := WriteFrameToWriter(conn, frame); err != nil {
+	if err := WriteFrameToWriter(m.conn, frame); err != nil {
 		t.Fatal("WriteFrameToWriter:", err)
 	}
 }
 
 func (m *protocolMaster) readFrame(t *testing.T) *Frame {
 	t.Helper()
-
 	m.mu.Lock()
-	conn := m.conn
-	m.mu.Unlock()
-
-	if conn == nil {
-		t.Fatal("no connection yet")
+	defer m.mu.Unlock()
+	if m.conn == nil {
+		t.Fatal("no connection")
 	}
-
-	frame, err := ReadFrameFromReader(conn)
+	frame, err := ReadFrameFromReader(m.conn)
 	if err != nil {
 		t.Fatal("ReadFrameFromReader:", err)
 	}
-
 	return frame
 }
 
 func (m *protocolMaster) close() {
-	m.listener.Close()
-	m.wg.Wait()
+	if m.conn != nil {
+		m.conn.Close()
+	}
 }

@@ -56,7 +56,15 @@ func NewMasterConn(addr string, logger log.Logger) (*MasterConn, error) {
 		return nil, fmt.Errorf("dial master: %w", err)
 	}
 
-	m := &MasterConn{
+	return NewMasterConnFromConn(conn, logger), nil
+}
+
+// NewMasterConnFromConn wraps an existing connection (e.g. from net.Listener.Accept)
+// into a MasterConn.  This is the primary constructor for a Go slave, which
+// listens for the master to connect in (matching Python's SlaveServer which
+// runs asyncio.start_server and creates a MasterConnection on accept).
+func NewMasterConnFromConn(conn net.Conn, logger log.Logger) *MasterConn {
+	return &MasterConn{
 		conn:     conn,
 		reader:   bufio.NewReader(conn),
 		writer:   bufio.NewWriter(conn),
@@ -65,8 +73,6 @@ func NewMasterConn(addr string, logger log.Logger) (*MasterConn, error) {
 		errChan:  make(chan error, 1),
 		log:      logger,
 	}
-
-	return m, nil
 }
 
 // Start begins the read loop. Call this after setting OnFrame.
@@ -264,6 +270,16 @@ func (m *MasterConn) Close() error {
 	m.closed = true
 
 	err := m.conn.Close()
+
+	// Wake up any Serve() blocked on <-m.Error().  This matters when Close
+	// is called before Start() (readLoop not yet running): without this,
+	// Serve would block forever.  If readLoop is running, it will also report
+	// the connection error; the non-blocking send here is a no-op in that case
+	// (errChan has capacity 1, readLoop fills it first).
+	select {
+	case m.errChan <- nil:
+	default:
+	}
 
 	m.pendingMu.Lock()
 	for _, ch := range m.pending {

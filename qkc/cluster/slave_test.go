@@ -13,16 +13,8 @@ import (
 // TestSlaveFullLifecycle tests the complete Slave lifecycle:
 // create → connect to mock master → verify state → close.
 func TestSlaveFullLifecycle(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr: master.addr(),
-		ListenAddr: "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer slave.Close()
 
 	// Verify initial state
@@ -33,16 +25,8 @@ func TestSlaveFullLifecycle(t *testing.T) {
 
 // TestSlavePingPong tests the PING/PONG handshake with a mock master.
 func TestSlavePingPong(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr: master.addr(),
-		ListenAddr: "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer slave.Close()
 
 	// Send PING via RPC, mock master responds with PONG
@@ -65,16 +49,8 @@ func TestSlavePingPong(t *testing.T) {
 // RegisterMasterHandler is correctly invoked when a frame with that opcode
 // arrives on the master connection (cluster_peer_id=0).
 func TestSlaveMasterHandler(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr: master.addr(),
-		ListenAddr: "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer slave.Close()
 
 	handlerCalled := make(chan struct{})
@@ -103,20 +79,12 @@ func TestSlaveMasterHandler(t *testing.T) {
 
 // TestSlaveSendToMaster tests the fire-and-forget SendToMaster method.
 func TestSlaveSendToMaster(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr: master.addr(),
-		ListenAddr: "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer slave.Close()
 
 	// Send a fire-and-forget command (no response expected)
-	err = slave.SendToMaster(OP_ADD_MINOR_BLOCK_HEADER_REQUEST, []byte("header"))
+	err := slave.SendToMaster(OP_ADD_MINOR_BLOCK_HEADER_REQUEST, []byte("header"))
 	if err != nil {
 		t.Fatal("SendToMaster failed:", err)
 	}
@@ -125,17 +93,8 @@ func TestSlaveSendToMaster(t *testing.T) {
 // TestSlaveCreateDestroyPeerConnection tests the CREATE/DESTROY_CLUSTER_PEER_CONNECTION
 // flow via the Slave's default handlers.
 func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{OwnBranches: []uint32{0, 1}})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr:  master.addr(),
-		OwnBranches: []uint32{0, 1},
-		ListenAddr:  "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer slave.Close()
 
 	// Simulate master sending CREATE_CLUSTER_PEER_CONNECTION_REQUEST.
@@ -198,17 +157,8 @@ func TestSlaveCreateDestroyPeerConnection(t *testing.T) {
 // TestSlaveDispatcherRoutingEndToEnd tests the full dispatcher routing:
 // master command (cluster_peer_id=0) vs peer command (cluster_peer_id!=0).
 func TestSlaveDispatcherRoutingEndToEnd(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{OwnBranches: []uint32{0}})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr:  master.addr(),
-		OwnBranches: []uint32{0},
-		ListenAddr:  "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer slave.Close()
 
 	// Create a peer connection first (synchronous, via callback)
@@ -282,16 +232,8 @@ func TestSlaveDispatcherRoutingEndToEnd(t *testing.T) {
 
 // TestSlaveCloseIdempotent tests that Close() can be called multiple times safely.
 func TestSlaveCloseIdempotent(t *testing.T) {
-	master := newMockMaster(t)
+	slave, master := newSlaveWithMockMaster(t, &Config{})
 	defer master.close()
-
-	slave, err := NewSlave(&Config{
-		MasterAddr: master.addr(),
-		ListenAddr: "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	slave.Close()
 	slave.Close() // second close should be safe
@@ -313,7 +255,8 @@ func TestSlaveXshardServer(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		frame, err := ReadFrameFromReader(conn)
+		// SlaveConnection uses 0-byte Metadata (not ClusterMetadata).
+		frame, err := ReadFrameNoMetaFromReader(conn)
 		if err != nil {
 			received <- nil
 			return
@@ -402,47 +345,34 @@ func TestSlaveXshardPool(t *testing.T) {
 
 // ── mockMaster ────────────────────────────────────────────────────────────
 
-// mockMaster is a minimal TCP server that acts like a Python master for testing.
+// mockMaster is a minimal TCP client that dials a Go slave and acts like a
+// Python master for testing.  It reads frames from the slave and responds
+// based on the opcode.
 type mockMaster struct {
-	listener net.Listener
-	addrStr  string
-	wg       sync.WaitGroup
+	conn net.Conn
+	wg   sync.WaitGroup
 }
 
-func newMockMaster(t *testing.T) *mockMaster {
+// newMockMaster dials the slave at slaveAddr and starts the response loop.
+func newMockMaster(t *testing.T, slaveAddr string) *mockMaster {
 	t.Helper()
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	conn, err := net.DialTimeout("tcp", slaveAddr, 5*time.Second)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("dial slave:", err)
 	}
-
-	m := &mockMaster{
-		listener: listener,
-		addrStr:  listener.Addr().String(),
-	}
-
+	m := &mockMaster{conn: conn}
 	m.wg.Add(1)
-	go m.serve(t)
-
+	go m.serve()
 	return m
 }
 
-func (m *mockMaster) serve(t *testing.T) {
+func (m *mockMaster) serve() {
 	defer m.wg.Done()
-
-	conn, err := m.listener.Accept()
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
 	for {
-		frame, err := ReadFrameFromReader(conn)
+		frame, err := ReadFrameFromReader(m.conn)
 		if err != nil {
 			return
 		}
-
 		switch frame.Opcode {
 		case OP_PING:
 			resp := &Frame{
@@ -451,8 +381,7 @@ func (m *mockMaster) serve(t *testing.T) {
 				RPCID:   frame.RPCID,
 				Payload: []byte("PONG"),
 			}
-			WriteFrameToWriter(conn, resp)
-
+			WriteFrameToWriter(m.conn, resp)
 		case OP_ADD_ROOT_BLOCK_REQUEST:
 			resp := &Frame{
 				Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
@@ -460,27 +389,56 @@ func (m *mockMaster) serve(t *testing.T) {
 				RPCID:   frame.RPCID,
 				Payload: []byte("block received"),
 			}
-			WriteFrameToWriter(conn, resp)
-
+			WriteFrameToWriter(m.conn, resp)
 		case OP_ADD_MINOR_BLOCK_HEADER_REQUEST:
 			// Fire-and-forget, no response needed
-
 		default:
-			// Echo back for unknown opcodes
 			resp := &Frame{
 				Meta:    Metadata{Branch: 0, ClusterPeerID: 0},
 				Opcode:  frame.Opcode,
 				RPCID:   frame.RPCID,
 				Payload: []byte("OK"),
 			}
-			WriteFrameToWriter(conn, resp)
+			WriteFrameToWriter(m.conn, resp)
 		}
 	}
 }
 
-func (m *mockMaster) addr() string { return m.addrStr }
-
 func (m *mockMaster) close() {
-	m.listener.Close()
+	if m.conn != nil {
+		m.conn.Close()
+	}
 	m.wg.Wait()
+}
+
+// newSlaveWithMockMaster creates a Slave listening on an ephemeral port and
+// a mockMaster that dials it.  It waits for the slave to accept the master
+// connection before returning.  The caller must defer Close() on both.
+func newSlaveWithMockMaster(t *testing.T, cfg *Config) (*Slave, *mockMaster) {
+	t.Helper()
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:0"
+	}
+	slave, err := NewSlave(cfg)
+	if err != nil {
+		t.Fatal("NewSlave:", err)
+	}
+	// Start acceptLoop after construction (handlers should be registered
+	// before this; for tests using mockMaster we start first since the test
+	// registers handlers after the master connects — see TestSlaveMasterHandler).
+	slave.Start()
+	master := newMockMaster(t, slave.listener.Addr().String())
+	// Wait for slave to accept the master connection
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		slave.mu.RLock()
+		mc := slave.masterConn
+		slave.mu.RUnlock()
+		if mc != nil {
+			return slave, master
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("slave did not accept master connection in time")
+	return nil, nil
 }
