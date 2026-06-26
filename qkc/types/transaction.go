@@ -490,7 +490,10 @@ type Transactions []*Transaction
 func (s Transactions) Len() int { return len(s) }
 
 func (s Transactions) Bytes(i int) []byte {
-	enc, _ := serialize.SerializeToBytes(s[i]) //todo error handle?
+	enc, err := serialize.SerializeToBytes(s[i])
+	if err != nil {
+		panic(err)
+	}
 	return enc
 }
 

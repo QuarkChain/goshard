@@ -310,7 +310,10 @@ func (b *RootBlock) Size() common.StorageSize {
 		return size.(common.StorageSize)
 	}
 
-	bytes, _ := serialize.SerializeToBytes(b)
+	bytes, err := serialize.SerializeToBytes(b)
+	if err != nil {
+		panic(err)
+	}
 	b.size.Store(common.StorageSize(len(bytes)))
 	return common.StorageSize(len(bytes))
 }

@@ -126,7 +126,10 @@ func (s MinorBlockHeaders) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 // Bytes implements DerivableList and returns the i'th element of s in serialize.
 func (s MinorBlockHeaders) Bytes(i int) []byte {
-	enc, _ := serialize.SerializeToBytes(s[i])
+	enc, err := serialize.SerializeToBytes(s[i])
+	if err != nil {
+		panic(err)
+	}
 	return enc
 }
 
@@ -355,7 +358,10 @@ func (b *MinorBlock) Size() common.StorageSize {
 		return size.(common.StorageSize)
 	}
 
-	bytes, _ := serialize.SerializeToBytes(b)
+	bytes, err := serialize.SerializeToBytes(b)
+	if err != nil {
+		panic(err)
+	}
 	b.size.Store(common.StorageSize(len(bytes)))
 	return common.StorageSize(len(bytes))
 }
