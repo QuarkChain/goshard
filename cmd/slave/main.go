@@ -31,10 +31,7 @@ var (
 func main() {
 	app := flags.NewApp("the goshard slave node")
 	app.Name = "slave"
-	app.Flags = slices.Concat(
-		[]cli.Flag{},
-		debug.Flags,
-	)
+	app.Flags = slices.Concat(debug.Flags)
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)
 		return debug.Setup(ctx)
