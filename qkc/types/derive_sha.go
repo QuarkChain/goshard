@@ -52,7 +52,13 @@ func CalculateMerkleRoot(list interface{}) (h common.Hash) {
 		hashList = append(hashList, common.Hash{})
 	} else {
 		for i := 0; i < val.Len(); i++ {
-			bytes, _ := serialize.SerializeToBytes(val.Index(i).Interface())
+			bytes, err := serialize.SerializeToBytes(val.Index(i).Interface())
+			if err != nil {
+				// A serialize failure here would silently hash nil and corrupt the
+				// Merkle root in consensus-critical paths (NewMinorBlock, Finalize);
+				// fail loudly instead, mirroring Receipts.Bytes.
+				panic(err)
+			}
 			hashList[i] = sha3_256(bytes)
 		}
 	}
