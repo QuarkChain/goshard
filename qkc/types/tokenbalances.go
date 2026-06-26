@@ -9,6 +9,7 @@
 package types
 
 import (
+	"fmt"
 	"math/big"
 	"sort"
 
@@ -113,6 +114,9 @@ func (t *TokenBalances) Deserialize(bb *serialize.ByteBuffer) error {
 		}
 		if v.Sign() == 0 {
 			continue
+		}
+		if !k.IsUint64() {
+			return fmt.Errorf("token id %s exceeds uint64 range", k)
 		}
 		t.balances[k.Uint64()] = v
 	}
