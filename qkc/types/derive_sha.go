@@ -44,7 +44,10 @@ var EmptyHash = common.Hash{}
 
 func CalculateMerkleRoot(list interface{}) (h common.Hash) {
 	val := reflect.ValueOf(list)
-	if val.Type().Kind() != reflect.Slice {
+	// Use Kind() rather than Type().Kind(): a nil list is the zero reflect.Value,
+	// whose Kind() is Invalid (no panic), so the clear error below fires instead of
+	// Type()'s opaque "reflect: call of reflect.Value.Type on zero Value" panic.
+	if val.Kind() != reflect.Slice {
 		panic("expect slice input for CalculateMerkleRoot")
 	}
 	hashList := make([]common.Hash, val.Len())
