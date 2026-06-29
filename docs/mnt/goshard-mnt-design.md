@@ -153,7 +153,7 @@ Two storage formats exist in goquarkchain based on number of non-zero token bala
 - Token IDs encoded as 32-byte keys, uint64 at bytes 24-31 (big-endian)
 - Balances are RLP-encoded `*uint256.Int` (variable length)
 
-**goshard limitation**: The trie format (`0x01`) is **not implemented**. `SerializeToBytes` returns an error if more than 16 non-zero token balances are present. `NewTokenBalancesFromBytes` returns an error on `0x01`-prefixed input.
+**goshard limitation**: The trie format (`0x01`) is **not implemented** — no mainnet accounts with >16 MNT tokens have been observed in practice. `SerializeToBytes` returns an error if `Len() > 16`; `NewTokenBalancesFromBytes` returns an error on `0x01`-prefixed input.
 
 ---
 
@@ -349,7 +349,7 @@ This prevents accidental double-storage (QKC would exist in both `Balance` and `
 
 | # | File Path | Description | Lines |
 |---|-----------|-------------|-------|
-| 1 | `core/types/token_balances.go` | `TokenBalances`, `TokenBalancePair` types | ~200 |
+| 1 | `core/types/token.go` | `TokenBalances`, `TokenBalancePair` types | ~200 |
 | 2 | `core/types/uint32_rlp.go` | `Uint32` custom RLP type for FullShardKey | ~50 |
 | 3 | `common/token_codec.go` | Token ID 36-base encoding/decoding | ~80 |
 | 4 | `common/utils.go` (add) | `EncodeToByte32` utility | ~5 |
@@ -377,21 +377,18 @@ This prevents accidental double-storage (QKC would exist in both `Balance` and `
 
 ## 7. Detailed Implementation
 
-### 7.1 `core/types/token_balances.go` — TokenBalances
+### 7.1 `core/types/token.go` — TokenBalances
 
-Ported from goquarkchain `core/types/token.go` with dependency path changes.
+Ported from goquarkchain `core/types/token.go` with dependency path changes. **Trie format (>16 tokens) is not implemented** — no real mainnet accounts with >16 MNT tokens have been observed in practice.
 
 ```go
 package types
 
 import (
-    "bytes"
-    "io"
+    "fmt"
     "sort"
 
-    "github.com/ethereum/go-ethereum/common"
     "github.com/ethereum/go-ethereum/rlp"
-    "github.com/ethereum/go-ethereum/trie"
     "github.com/holiman/uint256"
 )
 
@@ -404,18 +401,16 @@ type TokenBalancePair struct {
 }
 
 // TokenBalances holds multiple token balances.
-// When non-zero balances <= 16, stored as RLP list.
-// When > 16, switches to a SecureTrie for efficient storage.
+// balances only stores non-zero values: SetValue with zero removes the entry.
+// Therefore IsBlank() ≡ len(balances)==0, with no ambiguity.
 type TokenBalances struct {
-    db        *trie.Database
-    tokenTrie *trie.SecureTrie  // nil when using list format
-    balances  map[uint64]*uint256.Int  // in-memory cache
+    balances map[uint64]*uint256.Int
 }
 
 // Constructors
 func NewEmptyTokenBalances() *TokenBalances
 func NewTokenBalancesWithMap(data map[uint64]*uint256.Int) *TokenBalances
-func NewTokenBalances(data []byte, db *trie.Database) (*TokenBalances, error)
+func NewTokenBalancesFromBytes(data []byte) (*TokenBalances, error)
 
 // Core operations
 func (t *TokenBalances) SetValue(amount *uint256.Int, tokenID uint64)
@@ -425,27 +420,19 @@ func (t *TokenBalances) GetBalanceMap() map[uint64]*uint256.Int
 // Helpers
 func (t *TokenBalances) Len() int
 func (t *TokenBalances) IsBlank() bool
-func (t *TokenBalances) nonZeroEntriesInBalancesCache() int
-func (t *TokenBalances) notUsingTrie() bool
 
-// Commit flushes in-memory balances to the SecureTrie (if trie format).
-func (t *TokenBalances) Commit(db *trie.Database)
-
-// Serialization
+// Serialization — returns error if Len() > TokenTrieThreshold (trie format unsupported)
 func (t *TokenBalances) SerializeToBytes() ([]byte, error)
-func (t *TokenBalances) EncodeRLP(w io.Writer) error
-func (t *TokenBalances) DecodeRLP(s *rlp.Stream) error
 
 // Copy
 func (t *TokenBalances) Copy() *TokenBalances
 ```
 
 **Key details**:
-- `SerializeToBytes()` for list: `0x00` prefix + RLP-encoded `[]TokenBalancePair` (sorted by TokenID ascending, zero balances excluded)
-- `SerializeToBytes()` for trie: `0x01` prefix + 32 bytes of SecureTrie merkle root
-- Token IDs in trie are encoded as 32-byte keys (uint64 at bytes 24-31, big-endian)
-- Balances in trie are RLP-encoded `*uint256.Int` (variable length)
-- `Commit()` populates the SecureTrie from in-memory balances and computes root
+- `balances` field stores only non-zero values. `SetValue` with zero or nil deletes the entry; `NewTokenBalancesWithMap` skips zero values. This invariant means `IsBlank()` (`len==0`) is unambiguous — there is no "non-empty map with all-zero values" state.
+- `SerializeToBytes()` for list format: `0x00` prefix + RLP-encoded `[]TokenBalancePair` (sorted by TokenID ascending, zero balances excluded)
+- `SerializeToBytes()` returns an error if `Len() > TokenTrieThreshold` — trie format (`0x01`) is not implemented; no mainnet accounts with >16 MNT tokens have been observed in practice
+- `NewTokenBalancesFromBytes()` returns an error on `0x01`-prefixed (trie format) input
 
 ### 7.2 `core/types/uint32_rlp.go` — Uint32
 
@@ -1252,20 +1239,21 @@ MNT balance → StateAccount.MntBalances (*TokenBalances)
 
 ### 9.3 How `transferMnt` Works (Identical to goquarkchain)
 
+The precompile does **not** move balances directly. It validates, does a read-only balance check, swaps `TransferTokenID`, and delegates the single transfer to `evm.Call`. Doing a direct Sub/Add here *plus* letting `evm.Call` transfer would double-spend the value.
+
 ```
 transferMnt precompile:
   Input: to, tokenID, value, data
 
-  1. Check: GetMntBalance(caller, tokenID) >= value
-  2. Directly: SubMntBalance(caller, value, tokenID)
-  3. Directly: AddMntBalance(to, value, tokenID)
-  4. Set: t = evm.TransferTokenID; evm.TransferTokenID = tokenID
-  5. Call: evm.Call(caller, to, data, gas, value)
+  1. Validate: tokenID, to address, staticcall guard
+  2. Check (read-only): GetMntBalance(caller, tokenID) >= value
+  3. Set: t = evm.TransferTokenID; evm.TransferTokenID = tokenID
+  4. Call: evm.Call(caller, to, data, gas, value)
      → CanTransfer(StateDB, caller, value, evm.TransferTokenID) → routes to MNT balance
      → Transfer(StateDB, caller, to, value, evm.TransferTokenID) → routes to MNT balance
      → checkTokenIDQueried: if recipient contract didn't call currentMntID → revert
-  6. Restore: evm.TransferTokenID = t
-  7. Return inner call's return data
+  5. Restore: evm.TransferTokenID = t
+  6. Return inner call's return data
 ```
 
 ---
@@ -1289,7 +1277,7 @@ transferMnt precompile:
 1. `common/token_codec.go` — Token ID encoding
 2. `common/utils.go` — EncodeToByte32
 3. `core/types/uint32_rlp.go` — Uint32 custom RLP
-4. `core/types/token_balances.go` — TokenBalances type
+4. `core/types/token.go` — TokenBalances type
 
 ### Phase 2: State Extensions
 5. `core/types/state_account.go` — Add `MntBalances` field to StateAccount
@@ -2137,17 +2125,16 @@ Contract A (via transferMnt precompile):
 transferMnt.precompile.Run(input)
   │
   ├─ 1. Parse: to=0xB, tokenID=5, value=100
-  ├─ 2. Check: GetMntBalance(0xA, 5) >= 100  → true
-  ├─ 3. SubMntBalance(0xA, 100, 5)
-  │     → MntBalances[5] = oldBalance - 100  [in-memory map]
-  │     → journal: snapshot prev MntBalances
-  ├─ 4. AddMntBalance(0xB, 100, 5)
-  │     → MntBalances[5] = 100  [in-memory map, newly created]
-  │     → journal: snapshot prev MntBalances (nil)
-  ├─ 5. evm.Call(0xA, 0xB, data, gas, value)
-  │     → CanTransfer(StateDB, 0xA, value, tokenID=5) → true
-  │     → Transfer(StateDB, 0xA, 0xB, value, tokenID=5) → MNT balance ops
-  └─ 6. Return inner call's return data
+  ├─ 2. Validate: tokenID, to address, staticcall guard
+  ├─ 3. Check (read-only): GetMntBalance(0xA, 5) >= 100  → true
+  ├─ 4. Swap: evm.TxContext.TransferTokenID = 5
+  ├─ 5. evm.Call(0xA, 0xB, data, gas, value=100)
+  │     → CanTransfer(StateDB, 0xA, 100, tokenID=5) → routes to MNT balance → true
+  │     → Transfer(StateDB, 0xA, 0xB, 100, tokenID=5)
+  │         → SubMntBalance(0xA, 100, 5)  [journal: prev MntBalances of 0xA]
+  │         → AddMntBalance(0xB, 100, 5)  [journal: prev MntBalances of 0xB]
+  │     → checkTokenIDQueried: if 0xB contract didn't call currentMntID → revert
+  └─ 6. Restore: evm.TxContext.TransferTokenID = original
   │
   ▼
 StateDB.Commit()
