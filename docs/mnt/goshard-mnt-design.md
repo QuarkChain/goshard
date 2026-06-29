@@ -362,7 +362,7 @@ This prevents accidental double-storage (QKC would exist in both `Balance` and `
 | # | File Path | Change | Lines |
 |---|-----------|--------|-------|
 | 1 | `core/types/state_account.go` | Add `MntBalances` field; custom RLP encoder | ~25 |
-| 2 | `core/types/transaction.go` | Add `GasTokenID`, `TransferTokenID` fields to transaction and `Message` interface | ~30 |
+| 2 | `core/state_transition.go` | Add `GasTokenID`, `TransferTokenID` fields to `Message` struct; `buyGas` uses `GasTokenID`; `TransitionDb` uses `TransferTokenID` for preCheck | ~35 |
 | 3 | `core/state/statedb.go` | MNT balance methods; modify `updateStateObject` | ~20 |
 | 4 | `core/state/reader.go` | Decode QuarkChain 6-element format | ~40 |
 | 5 | `core/state/journal.go` | MNT balance journal entries | ~30 |
