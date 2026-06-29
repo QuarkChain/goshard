@@ -151,11 +151,12 @@ func (c *transferMnt) RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]
 		gasToCall += params.CallStipend
 	}
 
-	// Perform the MNT balance transfer.
-	evm.StateDB.SubMntBalance(callerAddr, value, tokenID)
-	evm.StateDB.AddMntBalance(toAddr, value, tokenID)
-
 	// Temporarily set the TransferTokenID for the inner call, then restore.
+	// The value transfer happens exactly once, inside evm.Call, via Transfer
+	// routing on this tokenID. Do NOT Sub/Add MNT balances directly here — that
+	// plus the evm.Call transfer would double-spend. Mirrors pyquarkchain
+	// proc_transfer_mnt (evm/specials.py), which only validates and delegates the
+	// single move to apply_msg.
 	savedTokenID := evm.TxContext.TransferTokenID
 	evm.TxContext.TransferTokenID = tokenID
 
@@ -213,8 +214,20 @@ func (m *mintMNT) RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]byte
 		return nil, errors.New("mintMNT: cannot mint zero amount")
 	}
 
+	// Charge CallNewAccountGas if the recipient doesn't exist, matching goquarkchain
+	// (contracts.go:722). Without this, minting to a fresh account costs 25000 less
+	// gas than goquarkchain, diverging gas/state.
+	if !evm.StateDB.Exist(recipientAddr) {
+		if contract.Gas.RegularGas < params.CallNewAccountGas {
+			contract.Gas.Exhaust()
+			return nil, ErrOutOfGas
+		}
+		contract.UseGas(GasCosts{RegularGas: params.CallNewAccountGas}, nil, tracing.GasChangeCallPrecompiledContract)
+	}
+
 	evm.StateDB.AddMntBalance(recipientAddr, amount, tokenID)
-	return nil, nil
+	// Return 32-byte success (0x...01) matching goquarkchain mintMNTSuccess.
+	return common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000001"), nil
 }
 
 // ---------------------------------------------------------------------------

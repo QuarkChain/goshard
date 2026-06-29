@@ -91,3 +91,54 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	assert.Equal(t, uint256.NewInt(1e18), s2.GetBalance(addr), "QKC balance")
 	assert.Equal(t, uint256.NewInt(500), s2.GetMntBalance(addr, 100), "MNT balance")
 }
+
+// TestEmptyAccountWithMntNotPruned guards the EIP-158 divergence: an account
+// with nonce==0 / QKC==0 / MNT!=0 / no code must NOT be treated as empty, since
+// pyquarkchain's is_blank spans all tokens and keeps it. Pruning it here would
+// diverge the state root. Removing the MNT balance must flip it back to empty.
+func TestEmptyAccountWithMntNotPruned(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0xBEEF")
+	s.CreateAccount(addr)
+
+	const tokenID = uint64(100)
+	s.AddMntBalance(addr, uint256.NewInt(500), tokenID)
+
+	// nonce==0, QKC==0, MNT!=0, no code → not empty.
+	require.True(t, s.GetBalance(addr).IsZero(), "QKC balance must be zero for this case")
+	require.Zero(t, s.GetNonce(addr), "nonce must be zero for this case")
+	assert.False(t, s.Empty(addr), "account with non-zero MNT balance must not be empty")
+
+	// Finalise with deleteEmptyObjects=true must keep the account.
+	s.Finalise(true)
+	assert.True(t, s.Exist(addr), "MNT-only account must survive empty-object pruning")
+	assert.Equal(t, uint256.NewInt(500), s.GetMntBalance(addr, tokenID), "MNT balance must survive")
+
+	// Draining the last MNT balance makes the account empty/prunable again.
+	s.SubMntBalance(addr, uint256.NewInt(500), tokenID)
+	assert.True(t, s.Empty(addr), "account with no QKC, no MNT, no code, nonce 0 must be empty")
+}
+
+// TestCopyDoesNotAliasMntBalances guards the deepCopy aliasing bug: StateDB.Copy()
+// must deep-copy the MntBalances map, or a mutation on the copy corrupts the
+// original (and vice versa), diverging the state root.
+func TestCopyDoesNotAliasMntBalances(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0xA11A5")
+	s.CreateAccount(addr)
+	const tokenID = uint64(777)
+	s.AddMntBalance(addr, uint256.NewInt(1000), tokenID)
+
+	cp := s.Copy()
+	// Mutate the copy; the original must be unaffected.
+	cp.AddMntBalance(addr, uint256.NewInt(500), tokenID)
+
+	assert.Equal(t, uint256.NewInt(1000), s.GetMntBalance(addr, tokenID), "original must not see copy's MNT mutation")
+	assert.Equal(t, uint256.NewInt(1500), cp.GetMntBalance(addr, tokenID), "copy must reflect its own mutation")
+
+	// And the reverse direction.
+	s.AddMntBalance(addr, uint256.NewInt(1), tokenID)
+	assert.Equal(t, uint256.NewInt(1001), s.GetMntBalance(addr, tokenID), "original reflects its own mutation")
+	assert.Equal(t, uint256.NewInt(1500), cp.GetMntBalance(addr, tokenID), "copy must not see original's later mutation")
+}
+

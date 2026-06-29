@@ -65,3 +65,13 @@ func (s *stateObject) GetMntBalance(tokenID uint64) *uint256.Int {
 	}
 	return s.data.MntBalances.GetTokenBalance(tokenID)
 }
+
+// IsBlankMnt reports whether the account holds no non-QKC (MNT) token balances.
+// It is consumed by empty() so that the EIP-158 empty-account check spans every
+// token, matching pyquarkchain's _Account.is_blank (which evaluates
+// token_balances.is_blank() across all tokens). Without this, an account with
+// nonce==0 / QKC==0 / MNT!=0 / no code would be pruned here but kept by
+// pyquarkchain, producing a divergent state root.
+func (s *stateObject) IsBlankMnt() bool {
+	return s.data.MntBalances == nil || s.data.MntBalances.IsBlank()
+}

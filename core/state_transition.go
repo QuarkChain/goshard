@@ -417,7 +417,10 @@ func (st *stateTransition) buyGas() error {
 		}
 	}
 	gasTokenID := st.msg.GasTokenID
-	if gasTokenID == 35760 {
+	// Both 0 and DefaultTokenID (35760) denote the default QKC gas token, matching
+	// core/evm.go CanTransfer/Transfer routing. Treating 0 as a non-QKC MNT token
+	// here would debit GetMntBalance(from, 0) and diverge from the rest of the system.
+	if gasTokenID == 0 || gasTokenID == types.DefaultTokenID {
 		// QKC gas: check native balance
 		if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
 			return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
@@ -439,7 +442,7 @@ func (st *stateTransition) buyGas() error {
 	st.gasRemaining = vm.NewGasBudget(st.msg.GasLimit)
 	st.initialBudget = st.gasRemaining.Copy()
 
-	if gasTokenID == 35760 {
+	if gasTokenID == 0 || gasTokenID == types.DefaultTokenID {
 		st.state.SubBalance(st.msg.From, mgval, tracing.BalanceDecreaseGasBuy)
 	} else {
 		st.state.SubMntBalance(st.msg.From, mgval, gasTokenID)
