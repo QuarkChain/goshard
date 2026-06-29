@@ -592,6 +592,14 @@ func (s *stateObject) MntBalances() *types.TokenBalances {
 func (s *stateObject) IsBlankMnt() bool {
     return s.data.MntBalances == nil || s.data.MntBalances.IsBlank()
 }
+
+// empty overrides the geth default to include MNT balances in the EIP-158 check,
+// matching pyquarkchain is_blank semantics (core/state/state_object.go).
+func (s *stateObject) empty() bool {
+    return s.data.Nonce == 0 && s.data.Balance.IsZero() &&
+        s.IsBlankMnt() &&
+        bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
+}
 ```
 
 ### 7.5 `core/state/statedb_qkc.go` — MNT Balance Methods
@@ -838,13 +846,12 @@ func (c *currentMntID) Name() string { return "currentMntID" }
 3. Validate tokenID ≤ TOKENIDMAX
 4. Validate tokenID ≠ QKC tokenID (QKC uses `AddBalance`/`SubBalance`)
 5. Validate recipient ≠ transferMnt itself
-6. Compute gas cost
-7. Check caller has sufficient MNT balance: `GetMntBalance(caller, tokenID) >= value`
-8. **Directly**: `SubMntBalance(caller, value, tokenID)` then `AddMntBalance(to, value, tokenID)`
-9. **Directly**: `evm.Call(caller, to, data, gas, value)` (value is passed but EVM's CanTransfer now accepts tokenID)
-10. Return inner call's return data
+6. Compute gas cost (`CallValueTransferGas`, plus `CallNewAccountGas` if recipient is new)
+7. Read-only check that caller has sufficient MNT balance: `GetMntBalance(caller, tokenID) >= value` (and depth < CallCreateDepth)
+8. Swap `evm.TransferTokenID = tokenID`, then `evm.Call(caller, to, data, gas+stipend, value)`. The transfer happens **once**, inside `evm.Call` via `Transfer` routing on the swapped tokenID — the precompile does **not** move balances directly. Restore `evm.TransferTokenID` afterwards.
+9. Return inner call's return data
 
-**Identical to goquarkchain**: Temporarily sets `evm.TransferTokenID = tokenID` around the inner `evm.Call`, then restores the original value. The `CanTransfer`/`Transfer` functions receive tokenID explicitly as a parameter, routing to MNT balance operations for non-QKC tokens.
+**Identical to goquarkchain `proc_transfer_mnt`**: validate → read-only balance check → `apply_msg(new_msg)` with `transfer_token_id=tokenID`. There is no direct balance mutation in the precompile; the single transfer is performed by the message call itself. Doing a direct `Sub/Add` here *and* letting `evm.Call` transfer would double-spend the value.
 
 #### 7.9.3 `deploySystemContract` — Deploy System Contract
 
@@ -1054,61 +1061,15 @@ func (c *mintMNT) Run(input []byte, evm *EVM, contract *Contract) ([]byte, error
 
 #### 7.11.5 transferMnt Caller Check Full Implementation
 
-`transferMnt` has no address-level caller restriction (any account or contract may call it), but enforces the following checks:
+`transferMnt` has no address-level caller restriction (any account or contract may call it), but enforces the following checks. It does **not** move balances directly: the single value transfer is performed inside `evm.Call` by `Transfer` routing on the swapped `TransferTokenID` — mirroring pyquarkchain `proc_transfer_mnt`, which only validates, does a read-only balance check, and delegates the move to `apply_msg`. A direct `Sub/Add` here *plus* the `evm.Call` transfer would double-spend.
 
-```go
-func (c *transferMnt) Run(input []byte, evm *EVM, contract *Contract) ([]byte, error) {
-    // 1. Reject staticcall
-    if evm.interpreter.readOnly {
-        return nil, ErrWriteProtection
-    }
-    if len(input) < 128 {
-        return nil, ErrExecutionReverted
-    }
-
-    to      := common.BytesToAddress(input[12:32])
-    tokenID := new(big.Int).SetBytes(input[32:64]).Uint64()
-    value   := new(uint256.Int).SetBytes32(input[64:96])
-    data    := input[96:]
-
-    // 2. tokenID must be in valid range
-    if tokenID > TokenIDMax {
-        return nil, ErrExecutionReverted
-    }
-    // 3. QKC transfers must use AddBalance/SubBalance, not this precompile
-    if tokenID == defaultTokenID {
-        return nil, ErrExecutionReverted
-    }
-    // 4. Prevent recursive call: recipient cannot be transferMnt itself
-    if to == transferMntAddr {
-        return nil, ErrExecutionReverted
-    }
-
-    caller := contract.CallerAddress
-
-    // 5. Caller must have sufficient MNT balance
-    if evm.StateDB.GetMntBalance(caller, tokenID).Lt(value) {
-        return nil, ErrExecutionReverted
-    }
-
-    // Directly adjust MNT balances before the inner Call
-    evm.StateDB.SubMntBalance(caller, value, tokenID)
-    evm.StateDB.AddMntBalance(to, value, tokenID)
-
-    // 6. Temporarily set evm.TransferTokenID to the MNT token ID around the inner
-    //    evm.Call, then restore — identical to goquarkchain's TransferTokenID swap.
-    //    CanTransfer/Transfer already route on tokenID, so no function pointer swap needed.
-    t := evm.TransferTokenID
-    evm.TransferTokenID = tokenID
-
-    ret, _, err := evm.Call(vm.AccountRef(caller), to, data, gas, value.ToBig())
-    err = checkTokenIDQueried(err, contract, evm.TransferTokenID, defaultTokenID)
-
-    evm.TransferTokenID = t
-
-    return ret, err
-}
-```
+**Flow**:
+1. Reject staticcall
+2. Parse `to(32) + tokenID(32) + value(32) + data` from input
+3. Validate `tokenID ≤ TokenIDMax`; reject self-transfer to `transferMntAddr`
+4. Charge `CallValueTransferGas` (+ `CallNewAccountGas` if recipient is new); revert on OOG or insufficient MNT balance or depth ≥ CallCreateDepth
+5. Swap `evm.TxContext.TransferTokenID = tokenID`, call `evm.Call(caller, to, data, gas+stipend, value)`, restore `TransferTokenID`
+6. Return inner call's return data
 
 ### 7.11 `core/vm/evm.go` — GasTokenID, TransferTokenID + checkTokenIDQueried
 
@@ -2109,6 +2070,7 @@ func TestGenGoldenRoots(t *testing.T) {
 | **Deleted** | `core/types/gen_account_rlp.go` | Removed — replaced by `StateAccount.EncodeRLP` in `state_account_qkc.go` | -21 |
 | **Modified** | `core/types/state_account.go` | Add `MntBalances *TokenBalances` and `FullShardKey uint32` fields; `Copy()` updated | ~20 |
 | **Modified** | `core/state/statedb.go` | Add `fullShardKey uint32` field + `SetFullShardKey()`; `createObject` inherits/preserves `FullShardKey`; `Copy()` propagates `fullShardKey`; `updateStateObject` uses `rlp.EncodeToBytes(&obj.data)` directly | ~100 |
+| **Modified** | `core/state/state_object.go` | EIP-158 `empty()` must also require `IsBlankMnt()` (§7.4.1) — else `QKC=0/MNT≠0` accounts are pruned, diverging from pyquarkchain | ~3 |
 | **Modified** | `core/state/journal.go` | `mntBalanceChange` journal entry + revert | ~40 |
 | **Modified** | `core/vm/contracts.go` | Merge `PrecompiledContractsMNT` into active precompiles | ~10 |
 | **Modified** | `core/vm/evm.go` | Add `GasTokenID`/`TransferTokenID` to `TxContext`; wire `CanTransfer`/`Transfer`; `checkTokenIDQueried` | ~80 |
