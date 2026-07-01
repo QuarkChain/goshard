@@ -22,10 +22,8 @@ import (
 	"github.com/holiman/uint256"
 )
 
-const defaultTokenID = uint64(35760) // TokenIDEncode("QKC")
-
 func (s *stateObject) SetMntBalance(amount *uint256.Int, tokenID uint64) {
-	if tokenID == defaultTokenID {
+	if tokenID == types.DefaultTokenID {
 		log.Error("SetMntBalance called with QKC tokenID; use SetBalance", "addr", s.address)
 		return
 	}
@@ -39,7 +37,7 @@ func (s *stateObject) AddMntBalance(amount *uint256.Int, tokenID uint64) {
 	if amount.IsZero() {
 		return
 	}
-	if tokenID == defaultTokenID {
+	if tokenID == types.DefaultTokenID {
 		log.Error("AddMntBalance called with QKC tokenID; use AddBalance", "addr", s.address)
 		return
 	}
@@ -51,7 +49,7 @@ func (s *stateObject) SubMntBalance(amount *uint256.Int, tokenID uint64) {
 	if amount.IsZero() {
 		return
 	}
-	if tokenID == defaultTokenID {
+	if tokenID == types.DefaultTokenID {
 		log.Error("SubMntBalance called with QKC tokenID; use SubBalance", "addr", s.address)
 		return
 	}
