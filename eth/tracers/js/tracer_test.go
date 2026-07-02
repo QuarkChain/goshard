@@ -37,8 +37,11 @@ type dummyStatedb struct {
 	state.StateDB
 }
 
-func (*dummyStatedb) GetRefund() uint64                           { return 1337 }
-func (*dummyStatedb) GetBalance(addr common.Address) *uint256.Int { return new(uint256.Int) }
+func (*dummyStatedb) GetRefund() uint64                                                  { return 1337 }
+func (*dummyStatedb) GetBalance(addr common.Address) *uint256.Int                        { return new(uint256.Int) }
+func (*dummyStatedb) GetMntBalance(_ common.Address, _ uint64) *uint256.Int              { return new(uint256.Int) }
+func (*dummyStatedb) AddMntBalance(_ common.Address, _ *uint256.Int, _ uint64)           {}
+func (*dummyStatedb) SubMntBalance(_ common.Address, _ *uint256.Int, _ uint64)           {}
 
 type vmContext struct {
 	blockCtx vm.BlockContext

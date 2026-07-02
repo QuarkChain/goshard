@@ -42,6 +42,11 @@ type Contract struct {
 	IsDeployment bool
 	IsSystemCall bool
 
+	// TokenIDQueried is set by the currentMntID precompile to indicate that the
+	// contract has acknowledged the token ID being transferred. Checked by
+	// evm.Call after execution to enforce the MNT token acknowledgement rule.
+	TokenIDQueried bool
+
 	Gas   GasBudget
 	value *uint256.Int
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
@@ -86,9 +87,11 @@ func NewEVMBlockContext(header *types.Header, chain ChainContext, author *common
 // NewEVMTxContext creates a new transaction context for a single transaction.
 func NewEVMTxContext(msg *Message) vm.TxContext {
 	ctx := vm.TxContext{
-		Origin:     msg.From,
-		GasPrice:   msg.GasPrice,
-		BlobHashes: msg.BlobHashes,
+		Origin:          msg.From,
+		GasPrice:        msg.GasPrice,
+		BlobHashes:      msg.BlobHashes,
+		GasTokenID:      msg.GasTokenID,
+		TransferTokenID: msg.TransferTokenID,
 	}
 	return ctx
 }
@@ -134,15 +137,22 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 
 // CanTransfer checks whether there are enough funds in the address' account to make a transfer.
 // This does not take the necessary gas in to account to make the transfer valid.
-func CanTransfer(db vm.StateDB, addr common.Address, amount *uint256.Int) bool {
-	return db.GetBalance(addr).Cmp(amount) >= 0
+func CanTransfer(db vm.StateDB, addr common.Address, amount *uint256.Int, tokenID uint64) bool {
+	if tokenID == 0 || tokenID == qkccommon.DefaultTokenID {
+		return db.GetBalance(addr).Cmp(amount) >= 0
+	}
+	return db.GetMntBalance(addr, tokenID).Cmp(amount) >= 0
 }
 
 // Transfer subtracts amount from sender and adds amount to recipient using the given Db
-func Transfer(db vm.StateDB, sender, recipient common.Address, amount *uint256.Int, rules *params.Rules) {
-	db.SubBalance(sender, amount, tracing.BalanceChangeTransfer)
-	db.AddBalance(recipient, amount, tracing.BalanceChangeTransfer)
-	if rules.IsAmsterdam && !amount.IsZero() && sender != recipient {
-		db.AddLog(types.EthTransferLog(sender, recipient, amount))
+func Transfer(db vm.StateDB, sender, recipient common.Address, amount *uint256.Int, rules *params.Rules, tokenID uint64) {
+	if tokenID == 0 || tokenID == qkccommon.DefaultTokenID {
+		db.SubBalance(sender, amount, tracing.BalanceChangeTransfer)
+		db.AddBalance(recipient, amount, tracing.BalanceChangeTransfer)
+		// QKC fork: Transfer() does not emit EthTransferLog (Ethereum-specific
+		// EIP-7708). The SELFDESTRUCT opcode still emits it (core/vm/instructions.go).
+	} else {
+		db.SubMntBalance(sender, amount, tokenID)
+		db.AddMntBalance(recipient, amount, tokenID)
 	}
 }

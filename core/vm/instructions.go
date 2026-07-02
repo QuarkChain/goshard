@@ -725,6 +725,20 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	return nil, nil
 }
 
+// ModifyTokenIDQueried sets contract.TokenIDQueried = true if toAddr is the
+// currentMntID precompile, propagating the acknowledgement flag from the callee
+// to the calling frame. This mirrors goquarkchain ModifyTokenIDQueried
+// (instructions.go:755) and is essential for the MNT transfer acknowledgement
+// check in evm.go:322 — without it, the flag set on the throwaway precompile
+// contract in runMNTPrecompiledContract never reaches the recipient's executing
+// frame, and all MNT transfers to contracts unconditionally revert.
+func ModifyTokenIDQueried(contract *Contract, toAddr common.Address) {
+	// currentMntIDAddr = 0x000000000000000000000000000000514b430001
+	if toAddr == common.HexToAddress("0x000000000000000000000000000000514b430001") {
+		contract.TokenIDQueried = true
+	}
+}
+
 func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	stack := scope.Stack
 	// Pop gas. The actual gas in evm.callGasTemp.
@@ -756,6 +770,9 @@ func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	}
 
 	scope.Contract.RefundGas(returnGas, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
+
+	// Propagate TokenIDQueried flag if the callee was currentMntID.
+	ModifyTokenIDQueried(scope.Contract, toAddr)
 
 	evm.returnData = ret
 	return ret, nil
@@ -790,6 +807,9 @@ func opCallCode(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	scope.Contract.RefundGas(returnGas, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
 
+	// Propagate TokenIDQueried flag if the callee was currentMntID.
+	ModifyTokenIDQueried(scope.Contract, toAddr)
+
 	evm.returnData = ret
 	return ret, nil
 }
@@ -819,6 +839,9 @@ func opDelegateCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	scope.Contract.RefundGas(returnGas, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
 
+	// Propagate TokenIDQueried flag if the callee was currentMntID.
+	ModifyTokenIDQueried(scope.Contract, toAddr)
+
 	evm.returnData = ret
 	return ret, nil
 }
@@ -847,6 +870,9 @@ func opStaticCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	}
 
 	scope.Contract.RefundGas(returnGas, evm.Config.Tracer, tracing.GasChangeCallLeftOverRefunded)
+
+	// Propagate TokenIDQueried flag if the callee was currentMntID.
+	ModifyTokenIDQueried(scope.Contract, toAddr)
 
 	evm.returnData = ret
 	return ret, nil
