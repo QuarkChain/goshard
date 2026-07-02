@@ -90,11 +90,12 @@ func apply(db database.NodeDatabase, prevRoot common.Hash, postRoot common.Hash,
 // existent in post-state. Apply the reverse diff and verify if the storage
 // root matches the one in prev-state account.
 func updateAccount(ctx *context, db database.NodeDatabase, addr common.Address) error {
-	// The account was present in prev-state, decode it from the
-	// 'slim-rlp' format bytes.
+	// The account was present in prev-state, decode it from QKC 6-element
+	// format. In production this data comes from database_mpt.go which
+	// re-encodes the slim-RLP accountOrigin to QKC before writing to pathdb.
 	addrHash := crypto.Keccak256Hash(addr.Bytes())
-	prev, err := types.FullAccount(ctx.accounts[addr])
-	if err != nil {
+	var prev types.StateAccount
+	if err := rlp.DecodeBytes(ctx.accounts[addr], &prev); err != nil {
 		return err
 	}
 	// The account may or may not existent in post-state, try to
@@ -147,7 +148,7 @@ func updateAccount(ctx *context, db database.NodeDatabase, addr common.Address) 
 		}
 	}
 	// Write the prev-state account into the main trie
-	full, err := rlp.EncodeToBytes(prev)
+	full, err := rlp.EncodeToBytes(&prev)
 	if err != nil {
 		return err
 	}
