@@ -137,6 +137,11 @@ type StateDB struct {
 	// Snapshot and RevertToSnapshot.
 	journal *journal
 
+	// fullShardKey is the QuarkChain shard key of the current transaction's
+	// destination. It is set once per transaction via SetFullShardKey and
+	// assigned to any newly created accounts that have no prior state.
+	fullShardKey uint32
+
 	// State witness if cross validation is needed
 	witness *stateless.Witness
 
@@ -290,6 +295,13 @@ func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
 // Preimages returns a list of SHA3 preimages that have been submitted.
 func (s *StateDB) Preimages() map[common.Hash][]byte {
 	return s.preimages
+}
+
+// SetFullShardKey sets the QuarkChain shard key for the current transaction
+// context. It is called once per transaction before account operations, and
+// any newly created accounts (with no prior state) inherit this value.
+func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
+	s.fullShardKey = fullShardKey
 }
 
 // AddRefund adds gas to the refund counter
@@ -641,7 +653,16 @@ func (s *StateDB) getOrNewStateObject(addr common.Address) *stateObject {
 // createObject creates a new state object. The assumption is held there is no
 // existing account with the given address, otherwise it will be silently overwritten.
 func (s *StateDB) createObject(addr common.Address) *stateObject {
+	// Check for an existing account so we can preserve its FullShardKey.
+	prev := s.getStateObject(addr)
+
 	obj := newObject(s, addr, nil)
+	// New accounts inherit the current transaction's destination shard key.
+	obj.data.FullShardKey = s.fullShardKey
+	// If the account previously existed, keep its original shard key unchanged.
+	if prev != nil {
+		obj.data.FullShardKey = prev.data.FullShardKey
+	}
 	s.journal.createObject(addr)
 	s.setStateObject(obj)
 	return obj
@@ -696,6 +717,7 @@ func (s *StateDB) Copy() *StateDB {
 		logs:                 make(map[common.Hash][]*types.Log, len(s.logs)),
 		logSize:              s.logSize,
 		preimages:            maps.Clone(s.preimages),
+		fullShardKey:         s.fullShardKey,
 
 		// Do we need to copy the access list and transient storage?
 		// In practice: No. At the start of a transaction, these two lists are empty.
