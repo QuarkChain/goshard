@@ -170,6 +170,21 @@ func TestValidateAllowsCrossSlaveReplica(t *testing.T) {
 	}
 }
 
+// TestValidateEthChainID: a per-chain ETH_CHAIN_ID must equal the derivation
+// pyquarkchain forces on load, BASE_ETH_CHAIN_ID + CHAIN_ID + 1 (config.py:534);
+// a consistent value is accepted, an inconsistent one rejected.
+func TestValidateEthChainID(t *testing.T) {
+	cfg := mustLoad(t)
+	cfg.Quarkchain.Chains[0].EthChainID = cfg.Quarkchain.BaseEthChainID + 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected a consistent ETH_CHAIN_ID: %v", err)
+	}
+	cfg.Quarkchain.Chains[0].EthChainID = 42
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ETH_CHAIN_ID") {
+		t.Fatalf("Validate err = %v, want ETH_CHAIN_ID mismatch", err)
+	}
+}
+
 func TestValidateRejectsBadRootHash(t *testing.T) {
 	cfg := mustLoad(t)
 	cfg.Quarkchain.Root.Genesis.HashPrevBlock = "nothex!!"
