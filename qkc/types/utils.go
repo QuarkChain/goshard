@@ -55,6 +55,8 @@ func serHash(val interface{}, excludeList map[string]bool) (h common.Hash) {
 	}
 	buf.reset()
 	defer bufPool.Put(buf)
-	serialize.SerializeStructWithout(reflect.ValueOf(val), buf.bytes, excludeList)
+	if err := serialize.SerializeStructWithout(reflect.ValueOf(val), buf.bytes, excludeList); err != nil {
+		panic(err)
+	}
 	return buf.getHash()
 }
