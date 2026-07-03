@@ -24,6 +24,9 @@ func (bb *ByteBuffer) GetOffset() int {
 }
 
 func (bb *ByteBuffer) getBytes(size int) ([]byte, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("deser: negative size %d is invalid", size)
+	}
 	if size > bb.size-bb.position {
 		return nil, fmt.Errorf("deser: buffer is shorter than expected")
 	}
