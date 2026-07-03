@@ -127,3 +127,7 @@ func (bb *ByteBuffer) Remaining() int {
 func (bb *ByteBuffer) ReadRemaining() ([]byte, error) {
 	return bb.getBytes(bb.Remaining())
 }
+
+func (bb *ByteBuffer) ReadBytes(n int) ([]byte, error) {
+	return bb.getBytes(n)
+}
