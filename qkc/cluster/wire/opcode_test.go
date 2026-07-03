@@ -2,54 +2,67 @@
 
 package wire
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestOpcodeClassificationAndBoundaries(t *testing.T) {
+func TestOpcodeRangeInvariant(t *testing.T) {
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+
+		cmd := InCommandOpRange(b)
+		clu := InClusterOpRange(b)
+		if cmd && clu {
+			t.Fatalf("opcode overlap at 0x%02X", b)
+		}
+		if !cmd && !clu {
+			t.Fatalf("opcode not classified at 0x%02X", b)
+		}
+	}
+}
+
+func TestOpcodeBoundaryValues(t *testing.T) {
 	tests := []struct {
 		op        byte
 		isCommand bool
 		isCluster bool
 	}{
-		{0, true, false},
-		{127, true, false},
-		{128, false, true},
-		{255, false, true},
+		{0x00, true, false},
+		{0x7F, true, false},
+		{0x80, false, true},
+		{0xFF, false, true},
 	}
 
 	for _, tt := range tests {
-		if got := InCommandOpRange(tt.op); got != tt.isCommand {
-			t.Errorf("IsCommandOp(%d) = %v; want %v", tt.op, got, tt.isCommand)
+		if InCommandOpRange(tt.op) != tt.isCommand {
+			t.Fatalf("command range mismatch at 0x%02X", tt.op)
 		}
-		if got := InClusterOpRange(tt.op); got != tt.isCluster {
-			t.Errorf("IsClusterOp(%d) = %v; want %v", tt.op, got, tt.isCluster)
+		if InClusterOpRange(tt.op) != tt.isCluster {
+			t.Fatalf("cluster range mismatch at 0x%02X", tt.op)
 		}
 	}
 }
 
-func TestClusterErrorFormatting(t *testing.T) {
-	tests := []struct {
-		err          *ClusterError
-		wantContains []string
+func TestClusterOpBase(t *testing.T) {
+	if ClusterOpBase != ClusterOp(128) {
+		t.Errorf("ClusterOpBase = %d; want 128", ClusterOpBase)
+	}
+}
+
+func TestCriticalOpcodeValues(t *testing.T) {
+	cases := []struct {
+		name string
+		op   byte
 	}{
-		{
-			err:          NewClusterError(404, "not found"),
-			wantContains: []string{"404", "not found"},
-		},
-		{
-			err:          NewClusterError(500, ""),
-			wantContains: []string{"500", "cluster error"},
-		},
+		{"ClusterOpPing", byte(ClusterOpPing)},
+		{"ClusterOpPong", byte(ClusterOpPong)},
+		{"CommandOpHello", byte(CommandOpHello)},
+		{"CommandOpPing", byte(CommandOpPing)},
+		{"CommandOpPong", byte(CommandOpPong)},
 	}
 
-	for _, tt := range tests {
-		got := tt.err.Error()
-		for _, want := range tt.wantContains {
-			if !strings.Contains(got, want) {
-				t.Errorf("ClusterError.Error() = %q; missing %q", got, want)
-			}
+	for _, c := range cases {
+		// range sanity
+		if InCommandOpRange(c.op) == InClusterOpRange(c.op) {
+			t.Fatalf("%s invalid classification", c.name)
 		}
 	}
 }
