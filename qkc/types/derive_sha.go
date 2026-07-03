@@ -4,8 +4,7 @@
 // Modified from go-ethereum under GNU Lesser General Public License
 //
 // Adaptations (hash output identical):
-//   - new(trie.Trie)/trie.Update -> trie.NewEmpty(...)/MustUpdate (modern trie API
-//     requires a backing node database; an ephemeral in-memory one is used).
+//   - new(trie.Trie)/trie.Update -> trie.NewEmpty(nil)/MustUpdate.
 //   - sha3.NewKeccak256() -> crypto.NewKeccakState().
 
 package types
@@ -15,13 +14,11 @@ import (
 	"reflect"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/crypto"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
-	"github.com/ethereum/go-ethereum/triedb"
 )
 
 type DerivableList interface {
@@ -31,7 +28,7 @@ type DerivableList interface {
 
 func DeriveSha(list DerivableList) common.Hash {
 	keybuf := new(bytes.Buffer)
-	trie := trie.NewEmpty(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil))
+	trie := trie.NewEmpty(nil)
 	for i := 0; i < list.Len(); i++ {
 		keybuf.Reset()
 		rlp.Encode(keybuf, uint(i))
@@ -40,7 +37,7 @@ func DeriveSha(list DerivableList) common.Hash {
 	return trie.Hash()
 }
 
-var EmptyTrieHash = trie.NewEmpty(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil)).Hash()
+var EmptyTrieHash = trie.NewEmpty(nil).Hash()
 
 var EmptyHash = common.Hash{}
 
