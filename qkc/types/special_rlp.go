@@ -41,7 +41,7 @@ func (u *Uint32) DecodeRLP(s *rlp.Stream) error {
 	}
 
 	if data[0] != prefixOfRlpUint32 {
-		return fmt.Errorf("preString is wrong, is %v should %v", data[0], lenOfRlpUint32)
+		return fmt.Errorf("preString is wrong, is %v should %v", data[0], prefixOfRlpUint32)
 
 	}
 
