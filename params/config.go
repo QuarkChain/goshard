@@ -294,6 +294,7 @@ var (
 		PragueTime:              nil,
 		OsakaTime:               nil,
 		UBTTime:                 nil,
+		QKCMNTTime:              newUint64(0),
 		TerminalTotalDifficulty: big.NewInt(math.MaxInt64),
 		Ethash:                  new(EthashConfig),
 		Clique:                  nil,
@@ -324,6 +325,7 @@ var (
 		PragueTime:              newUint64(0),
 		OsakaTime:               newUint64(0),
 		UBTTime:                 nil,
+		QKCMNTTime:              newUint64(0),
 		TerminalTotalDifficulty: big.NewInt(0),
 		Ethash:                  new(EthashConfig),
 		Clique:                  nil,
@@ -467,6 +469,13 @@ type ChainConfig struct {
 	BPO5Time      *uint64 `json:"bpo5Time,omitempty"`      // BPO5 switch time (nil = no fork, 0 = already on bpo5)
 	AmsterdamTime *uint64 `json:"amsterdamTime,omitempty"` // Amsterdam switch time (nil = no fork, 0 = already on amsterdam)
 	UBTTime       *uint64 `json:"ubtTime,omitempty"`       // UBT switch time (nil = no fork, 0 = already on UBT)
+
+	// QKCMNTTime is the QuarkChain multi-native-token (MNT) activation time
+	// (nil = MNT disabled, 0 = already active). Before this timestamp the MNT
+	// precompile addresses are treated as ordinary accounts, so replaying
+	// pre-activation history produces identical state. Mirrors goquarkchain's
+	// per-contract enableTime gating (see goquarkchain core/vm/evm.go run()).
+	QKCMNTTime *uint64 `json:"qkcMNTTime,omitempty"`
 
 	// TerminalTotalDifficulty is the amount of total difficulty reached by
 	// the network that triggers the consensus upgrade.
@@ -869,6 +878,13 @@ func (c *ChainConfig) IsAmsterdam(num *big.Int, time uint64) bool {
 // IsUBT returns whether time is either equal to the Verkle fork time or greater.
 func (c *ChainConfig) IsUBT(num *big.Int, time uint64) bool {
 	return c.IsLondon(num) && isTimestampForked(c.UBTTime, time)
+}
+
+// IsQKCMNT reports whether the QuarkChain multi-native-token (MNT) precompiles
+// are active at the given timestamp. Before activation the MNT precompile
+// addresses must behave as ordinary accounts to keep history replay consistent.
+func (c *ChainConfig) IsQKCMNT(time uint64) bool {
+	return isTimestampForked(c.QKCMNTTime, time)
 }
 
 // IsUBTGenesis checks whether the verkle fork is activated at the genesis block.
@@ -1381,6 +1397,7 @@ type Rules struct {
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague, IsOsaka        bool
 	IsAmsterdam, IsUBT                                      bool
+	IsQKCMNT                                                bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -1408,5 +1425,6 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsAmsterdam:      isMerge && c.IsAmsterdam(num, timestamp),
 		IsUBT:            isUBT,
 		IsEIP4762:        isUBT,
+		IsQKCMNT:         c.IsQKCMNT(timestamp),
 	}
 }

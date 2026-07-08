@@ -242,8 +242,14 @@ func activePrecompiledContracts(rules params.Rules) PrecompiledContracts {
 		base = PrecompiledContractsHomestead
 	}
 	contracts := maps.Clone(base)
-	for addr, p := range PrecompiledContractsMNT {
-		contracts[addr] = p
+	// Merge the QuarkChain MNT precompiles only once their activation timestamp
+	// has been reached. Before activation these addresses must behave as ordinary
+	// accounts, otherwise replaying pre-activation history would diverge. This
+	// mirrors goquarkchain's per-contract enableTime gating in core/vm/evm.go run().
+	if rules.IsQKCMNT {
+		for addr, p := range PrecompiledContractsMNT {
+			contracts[addr] = p
+		}
 	}
 	return contracts
 }
