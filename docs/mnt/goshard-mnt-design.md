@@ -831,14 +831,13 @@ func (c *currentMntID) Name() string { return "currentMntID" }
 1. Parse 4 inputs from calldata
 2. Reject if staticcall
 3. Validate tokenID ≤ TOKENIDMAX
-4. Validate tokenID ≠ QKC tokenID (QKC uses `AddBalance`/`SubBalance`)
-5. Validate recipient ≠ transferMnt itself
-6. Compute gas cost (`CallValueTransferGas`, plus `CallNewAccountGas` if recipient is new)
-7. Read-only check that caller has sufficient MNT balance: `GetMntBalance(caller, tokenID) >= value` (and depth < CallCreateDepth)
-8. Swap `evm.TransferTokenID = tokenID`, then `evm.Call(caller, to, data, gas+stipend, value)`. The transfer happens **once**, inside `evm.Call` via `Transfer` routing on the swapped tokenID — the precompile does **not** move balances directly. Restore `evm.TransferTokenID` afterwards.
-9. Return inner call's return data
+4. Validate recipient ≠ transferMnt itself
+5. Compute gas cost (`CallValueTransferGas`, plus `CallNewAccountGas` if recipient is new)
+6. Read-only check that caller has sufficient MNT balance: `GetMntBalance(caller, tokenID) >= value` (and depth < CallCreateDepth)
+7. Swap `evm.TransferTokenID = tokenID`, then `evm.Call(caller, to, data, gas+stipend, value)`. The transfer happens **once**, inside `evm.Call` via `Transfer` routing on the swapped tokenID — the precompile does **not** move balances directly. Restore `evm.TransferTokenID` afterwards.
+8. Return inner call's return data
 
-**Identical to goquarkchain `proc_transfer_mnt`**: validate → read-only balance check → `apply_msg(new_msg)` with `transfer_token_id=tokenID`. There is no direct balance mutation in the precompile; the single transfer is performed by the message call itself. Doing a direct `Sub/Add` here *and* letting `evm.Call` transfer would double-spend the value.
+**Identical to goquarkchain `transferMnt.Run`**: validate → read-only balance check → `evm.Call` with swapped `TransferTokenID`. There is no explicit `tokenID ≠ QKC tokenID` guard here and no such guard exists in goquarkchain either — the EVM-level `CanTransfer`/`Transfer` routing already handles QKC balances via `AddBalance`/`SubBalance` when `tokenID == defaultTokenID`. There is no direct balance mutation in the precompile; the single transfer is performed by the inner call itself. Doing a direct `Sub/Add` here *and* letting `evm.Call` transfer would double-spend the value.
 
 #### 7.9.3 `deploySystemContract` — Deploy System Contract
 
@@ -897,12 +896,28 @@ var PrecompiledContractsMNT = PrecompiledContracts{
     common.HexToAddress("0x000000000000000000000000000000514b430005"): &balanceMNT{},
 }
 
+// In params/config.go, ChainConfig:
+//
+//   QKCMNTTime *uint64 `json:"qkcMNTTime,omitempty"` // unix seconds; nil = MNT disabled
+//
+// In params/config.go, Rules struct:
+//
+//   IsQKCMNT bool
+//
+// In params/config.go, ChainConfig.Rules():
+//
+//   IsQKCMNT: c.IsQKCMNT(num, timestamp),
+//
 // In core/vm/contracts.go, activePrecompiledContracts():
 func activePrecompiledContracts(rules params.Rules) PrecompiledContracts {
     base := // ... existing logic returns base precompiles ...
-    // Merge MNT precompiles
-    for addr, p := range PrecompiledContractsMNT {
-        base[addr] = p
+    // Merge MNT precompiles only after the QKC MNT activation timestamp.
+    // Before activation the addresses are unreserved and treated as ordinary accounts,
+    // exactly matching goquarkchain's enableTime gating for history replay safety.
+    if rules.IsQKCMNT {
+        for addr, p := range PrecompiledContractsMNT {
+            base[addr] = p
+        }
     }
     return base
 }
@@ -1262,7 +1277,6 @@ transferMnt precompile:
 
 - `*uint256.Int` balance type in EVM and state machine (QKC always uses `Balance`)
 - Any EVM bytecode interpretation
-- Snapshot tree logic
 - Transaction signing/verification (new fields added but format is backward-compatible)
 - P2P protocol
 - `StateAccount` struct fields (number of fields and types are the goshard-internal representation)
@@ -1280,18 +1294,19 @@ transferMnt precompile:
 4. `core/types/token.go` — TokenBalances type
 
 ### Phase 2: State Extensions
-5. `core/types/state_account.go` — Add `MntBalances` field to StateAccount
+5. `core/types/state_account.go` — Add `MntBalances` field to StateAccount; **extend `SlimAccount` with `MntBalances *TokenBalances` and `FullShardKey uint32` (both `rlp:"optional"`) so snapshots preserve QKC fields through the trie→slim→snapshot→slim→StateAccount round-trip**
 6. `core/state/state_object_qkc.go` — MNT accessor methods (use `s.data.MntBalances`)
 7. `core/state/statedb_qkc.go` — MNT balance methods
 8. `core/state/statedb.go` — Modify `updateStateObject`, add MNT methods
-9. `core/state/reader.go` — Decode QuarkChain 6-element format into `StateAccount.MntBalances`
+9. `core/state/reader.go` — Decode QuarkChain 6-element format into `StateAccount.MntBalances`; **update `flatReader.Account()` to copy `MntBalances` and `FullShardKey` from the decoded `SlimAccount`**
 10. `core/state/journal.go` — MNT balance journal entries
 
 ### Phase 3: EVM Integration
 11. `core/evm.go` — `CanTransfer`/`Transfer` + `tokenID` param
 12. `core/vm/contracts_qkc.go` — 5 MNT precompile contracts
-13. `core/vm/contracts.go` — Merge `PrecompiledContractsMNT`
-14. `core/state_transition.go` — MNT-aware preCheck (QKC path only)
+13. `params/config.go` — Add `QKCMNTTime *uint64` to `ChainConfig`; add `IsQKCMNT bool` to `Rules`
+14. `core/vm/contracts.go` — Merge `PrecompiledContractsMNT` gated behind `rules.IsQKCMNT`
+15. `core/state_transition.go` — MNT-aware preCheck (QKC path only)
 
 ### Phase 4: Genesis & Testing
 15. Genesis alloc support for MNT balances
