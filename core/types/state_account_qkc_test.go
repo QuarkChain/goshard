@@ -259,6 +259,13 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		{"nonzero balance, empty root", StateAccount{Nonce: 5, Balance: uint256.NewInt(1_000_000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes()}},
 		{"with storage root", StateAccount{Nonce: 1, Balance: uint256.NewInt(42), Root: common.HexToHash("0xabcdef"), CodeHash: EmptyCodeHash.Bytes()}},
 		{"with code hash", StateAccount{Nonce: 99, Balance: uint256.NewInt(999), Root: EmptyRootHash, CodeHash: common.FromHex("0xdeadbeef" + strings.Repeat("00", 28))}},
+		// The following cases guard the slim format carrying QKC-specific fields:
+		// before SlimAccount was extended, FullShardKey and MntBalances were dropped
+		// on the slim round-trip, forking the trie root when a snapshot-served account
+		// was re-committed.
+		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
+		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
+		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

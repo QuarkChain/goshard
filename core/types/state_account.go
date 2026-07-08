@@ -24,7 +24,10 @@ import (
 	"github.com/holiman/uint256"
 )
 
-//go:generate go run ../../rlp/rlpgen -type StateAccount -out gen_account_rlp.go
+// NOTE: StateAccount uses a hand-written QuarkChain codec (EncodeRLP/DecodeRLP in
+// state_account_qkc.go) for the 6-element MNT account format. The rlpgen go:generate
+// directive was intentionally removed: regenerating gen_account_rlp.go would create a
+// conflicting standard 4-field codec and silently drop MntBalances / FullShardKey.
 
 // StateAccount is the Ethereum consensus representation of accounts.
 // These objects are stored in the main account trie.
@@ -70,24 +73,52 @@ func (acct *StateAccount) Copy() *StateAccount {
 // SlimAccount is a modified version of an Account, where the root is replaced
 // with a byte slice. This format can be used to represent full-consensus format
 // or slim format which replaces the empty root and code hash as nil byte slice.
+// MntBal and FullShardKey are rlp:"optional" so accounts without MNT tokens
+// still decode cleanly from pre-MNT snapshots (trailing optional fields decode
+// to nil / 0 when absent).
+//
+// MntBal holds TokenBalances.SerializeToBytes() output rather than the
+// *TokenBalances value directly: TokenBalances stores its balances in an
+// unexported map, so it is not RLP-struct-encodable and must go through the
+// same []byte serialization the trie account uses. The nil-vs-non-nil
+// distinction of MntBal mirrors StateAccount.MntBalances (nil TokenBalances vs
+// empty-but-present), which is what keeps the 0x80 / 0x8200c0 trie encoding
+// stable across a snapshot round-trip.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
 	Root     []byte // Nil if root equals to types.EmptyRootHash
 	CodeHash []byte // Nil if hash equals to types.EmptyCodeHash
+	// QKC-specific fields; both optional so old snapshots remain readable.
+	MntBal       []byte `rlp:"optional"` // SerializeToBytes output; nil = MntBalances nil
+	FullShardKey uint32 `rlp:"optional"` // QuarkChain shard key
 }
 
 // SlimAccountRLP encodes the state account in 'slim RLP' format.
 func SlimAccountRLP(account StateAccount) []byte {
 	slim := SlimAccount{
-		Nonce:   account.Nonce,
-		Balance: account.Balance,
+		Nonce:        account.Nonce,
+		Balance:      account.Balance,
+		FullShardKey: account.FullShardKey,
 	}
 	if account.Root != EmptyRootHash {
 		slim.Root = account.Root[:]
 	}
 	if !bytes.Equal(account.CodeHash, EmptyCodeHash[:]) {
 		slim.CodeHash = account.CodeHash
+	}
+	// Serialize MNT balances through the same []byte path as the trie account
+	// (TokenBalances holds an unexported map, so it cannot be RLP-struct-encoded).
+	// nil MntBalances stays nil MntBal; an empty-but-present map serializes to a
+	// non-nil 0x00c0, preserving the nil-vs-empty distinction across the round-trip.
+	// Note: unlike the trie qkcAccountRLP.TokenBal, the QKC default balance is NOT
+	// merged in here — the slim format keeps it in the separate Balance field.
+	if account.MntBalances != nil {
+		mntBal, err := account.MntBalances.SerializeToBytes()
+		if err != nil {
+			panic(err)
+		}
+		slim.MntBal = mntBal
 	}
 	data, err := rlp.EncodeToBytes(slim)
 	if err != nil {
@@ -105,6 +136,17 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	}
 	var account StateAccount
 	account.Nonce, account.Balance = slim.Nonce, slim.Balance
+	account.FullShardKey = slim.FullShardKey
+
+	// A non-nil MntBal decodes back to a (possibly empty) TokenBalances so the
+	// nil-vs-empty distinction survives; nil MntBal leaves MntBalances nil.
+	if slim.MntBal != nil {
+		tb, err := NewTokenBalancesFromBytes(slim.MntBal)
+		if err != nil {
+			return nil, err
+		}
+		account.MntBalances = tb
+	}
 
 	// Interpret the storage root and code hash in slim format.
 	if len(slim.Root) == 0 {
