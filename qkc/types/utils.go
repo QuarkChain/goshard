@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Ported from github.com/QuarkChain/goquarkchain/core/types (byte-compatible).
+// QKC serialization hash helper; output matches pyquarkchain wire hashing.
 // Adaptation: sha3.NewKeccak256() -> crypto.Keccak256Hash() (identical Keccak-256 digest).
 
 package types

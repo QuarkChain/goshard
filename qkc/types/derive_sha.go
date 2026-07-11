@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Ported from github.com/QuarkChain/goquarkchain/core/types (byte-compatible).
+// QKC trie/hash helpers follow pyquarkchain-compatible wire hashing.
 // Modified from go-ethereum under GNU Lesser General Public License
 //
 // Adaptations (hash output identical):

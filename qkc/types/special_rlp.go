@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Ported verbatim from github.com/QuarkChain/goquarkchain/core/types (byte-compatible).
+// Uint32 uses pyquarkchain's fixed-width uint32 RLP form.
 
 package types
 
