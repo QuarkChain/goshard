@@ -11,8 +11,14 @@ import (
 )
 
 type ChainConfig struct {
-	ChainID           uint32 `json:"CHAIN_ID"`
-	ShardSize         uint32 `json:"SHARD_SIZE"`
+	ChainID   uint32 `json:"CHAIN_ID"`
+	ShardSize uint32 `json:"SHARD_SIZE"`
+	// EthChainID is pyquarkchain's per-chain ETH_CHAIN_ID (absent in goquarkchain).
+	// pyquarkchain always derives it as BASE_ETH_CHAIN_ID + CHAIN_ID + 1 and
+	// overwrites any configured value with that derivation (config.py:534), so a
+	// present value is only accepted when consistent (checked in Validate). Zero
+	// means absent: real chain ids start at BASE_ETH_CHAIN_ID + 1 > 0.
+	EthChainID        uint32 `json:"ETH_CHAIN_ID,omitempty"`
 	DefaultChainToken string `json:"DEFAULT_CHAIN_TOKEN"`
 	ConsensusType     string `json:"CONSENSUS_TYPE"`
 

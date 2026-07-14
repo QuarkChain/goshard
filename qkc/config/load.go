@@ -84,7 +84,9 @@ func unmarshalClusterConfig(content []byte) (cfg *ClusterConfig, err error) {
 //     and validated at the master layer);
 //   - each owned shard's genesis ROOT_HEIGHT equals ROOT.GENESIS.HEIGHT (this
 //     issue derives only the genesis root block);
-//   - the root genesis hash fields are well-formed hex.
+//   - the root genesis hash fields are well-formed hex;
+//   - any per-chain ETH_CHAIN_ID equals BASE_ETH_CHAIN_ID + CHAIN_ID + 1, the
+//     derivation pyquarkchain forces on load (config.py:534).
 func (c *ClusterConfig) Validate() error {
 	if c.Quarkchain == nil {
 		return fmt.Errorf("missing QUARKCHAIN config")
@@ -106,6 +108,13 @@ func (c *ClusterConfig) Validate() error {
 	} {
 		if err := validateRootHashHex(name.value); err != nil {
 			return fmt.Errorf("ROOT.GENESIS.%s: %w", name.field, err)
+		}
+	}
+
+	for _, chain := range c.Quarkchain.Chains {
+		if want := c.Quarkchain.BaseEthChainID + chain.ChainID + 1; chain.EthChainID != 0 && chain.EthChainID != want {
+			return fmt.Errorf("chain %d ETH_CHAIN_ID %d != BASE_ETH_CHAIN_ID %d + CHAIN_ID + 1 = %d",
+				chain.ChainID, chain.EthChainID, c.Quarkchain.BaseEthChainID, want)
 		}
 	}
 
