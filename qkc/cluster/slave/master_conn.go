@@ -53,7 +53,7 @@ func newMasterConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 		return wire.ReadFrame(r, maxPayloadSize)
 	}
 	mc := &MasterConn{
-		rpcConn:              newRPCConn(conn, readFrame, wire.WriteFrame, logger),
+		rpcConn:              newRPCConnFromConn(conn, readFrame, wire.WriteFrame, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 	}
