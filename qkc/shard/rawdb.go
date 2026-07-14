@@ -82,30 +82,31 @@ func WriteGenesisMeta(db ethdb.KeyValueWriter, meta *GenesisMeta) error {
 }
 
 // ReconcileGenesisMeta is the reopen check: on a fresh chaindb it records the
-// expected (config-derived) metadata; on an existing one it passes only on an
-// exact match and hard-errors otherwise, so a cluster config change since
-// initialization is caught loudly instead of silently keeping the stored genesis.
-// Once the real chain lands, its own genesis check stacks on top of this.
+// expected (config-derived) metadata and reports existed=false; on an existing one
+// it passes (existed=true) only on an exact match and hard-errors otherwise, so a
+// cluster config change since initialization is caught loudly instead of silently
+// keeping the stored genesis. Once the real chain lands, its own genesis check
+// stacks on top of this.
 //
 // TODO: temporary — remove once QKC block format (#1) lands.
-func ReconcileGenesisMeta(db ethdb.KeyValueStore, expected *GenesisMeta, dbPath string) error {
+func ReconcileGenesisMeta(db ethdb.KeyValueStore, expected *GenesisMeta, dbPath string) (existed bool, err error) {
 	stored, err := ReadGenesisMeta(db)
 	if err != nil {
-		return fmt.Errorf("shard 0x%08x: read genesis metadata (db %s): %w", expected.FullShardID, dbPath, err)
+		return false, fmt.Errorf("shard 0x%08x: read genesis metadata (db %s): %w", expected.FullShardID, dbPath, err)
 	}
 	if stored == nil {
 		if err := WriteGenesisMeta(db, expected); err != nil {
-			return fmt.Errorf("shard 0x%08x: write genesis metadata (db %s): %w", expected.FullShardID, dbPath, err)
+			return false, fmt.Errorf("shard 0x%08x: write genesis metadata (db %s): %w", expected.FullShardID, dbPath, err)
 		}
-		return nil
+		return false, nil
 	}
 	if *stored == *expected {
-		return nil
+		return true, nil
 	}
 	if stored.ChainGenesisHash != expected.ChainGenesisHash {
-		return fmt.Errorf("shard 0x%08x: stored genesis %s does not match config genesis %s (db %s) — cluster config changed since initialization",
+		return true, fmt.Errorf("shard 0x%08x: stored genesis %s does not match config genesis %s (db %s) — cluster config changed since initialization",
 			expected.FullShardID, stored.ChainGenesisHash, expected.ChainGenesisHash, dbPath)
 	}
-	return fmt.Errorf("shard 0x%08x: stored genesis metadata %+v does not match config-derived metadata %+v (db %s) — cluster config changed since initialization",
+	return true, fmt.Errorf("shard 0x%08x: stored genesis metadata %+v does not match config-derived metadata %+v (db %s) — cluster config changed since initialization",
 		expected.FullShardID, stored, expected, dbPath)
 }

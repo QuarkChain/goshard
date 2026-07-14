@@ -14,6 +14,23 @@ make slave
 This installs the binary to `./build/bin/slave` (the same convention as `geth`).
 The commands below are run from the repo root so the relative config paths resolve.
 
+## Running a slave (milestone M3)
+
+The default action boots every shard assigned to `--node_id` and runs until
+interrupted — a drop-in for how pyquarkchain's `cluster.py` starts a slave:
+
+```
+./build/bin/slave --cluster_config ./qkc/config/singularity/devnet.json --node_id S0
+```
+
+Each owned shard gets an isolated chaindb under
+`{DB_PATH_ROOT}/shard-0x{full_shard_id}/` (relative to the working directory) and
+logs `shard started` with its genesis hash and head height. `^C` (or SIGTERM)
+shuts every shard down cleanly and exits 0; a second signal force-quits. Rerunning
+against the same datadir validates the stored genesis metadata against the config
+(`existing genesis validated`) and refuses to start if the config changed since
+initialization.
+
 ## Subcommands (milestone M1)
 
 ### `slave config`
@@ -77,7 +94,5 @@ Both real (singularity) cluster configs are checked in under
 
 ## Not yet implemented
 
-The default run action — eager per-shard boot with signal-driven shutdown — and
-the `inspect` subcommand land in later milestones. The launch form will be a
-drop-in for how pyquarkchain's `cluster.py` starts a slave
-(`slave --cluster_config=<file> --node_id=<id>`).
+The `inspect` subcommand (read-only per-shard state dump from a datadir, no
+config needed) lands in milestone M4.

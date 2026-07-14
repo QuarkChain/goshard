@@ -47,18 +47,18 @@ func TestReconcileGenesisMeta(t *testing.T) {
 	expected := testMeta()
 
 	// Fresh db: the record is written.
-	if err := ReconcileGenesisMeta(db, expected, "/tmp/x"); err != nil {
-		t.Fatalf("Reconcile(fresh): %v", err)
+	if existed, err := ReconcileGenesisMeta(db, expected, "/tmp/x"); err != nil || existed {
+		t.Fatalf("Reconcile(fresh) = %v, %v, want false, nil", existed, err)
 	}
 	// Reopen with identical expectation: passes.
-	if err := ReconcileGenesisMeta(db, expected, "/tmp/x"); err != nil {
-		t.Fatalf("Reconcile(reopen): %v", err)
+	if existed, err := ReconcileGenesisMeta(db, expected, "/tmp/x"); err != nil || !existed {
+		t.Fatalf("Reconcile(reopen) = %v, %v, want true, nil", existed, err)
 	}
 
 	// Changed shard genesis: the canonical loud error, naming both hashes and the db.
 	changed := testMeta()
 	changed.ChainGenesisHash = common.HexToHash("0x22")
-	err := ReconcileGenesisMeta(db, changed, "/tmp/x")
+	_, err := ReconcileGenesisMeta(db, changed, "/tmp/x")
 	if err == nil || !strings.Contains(err.Error(), "does not match config genesis") ||
 		!strings.Contains(err.Error(), "/tmp/x") ||
 		!strings.Contains(err.Error(), "cluster config changed since initialization") {
@@ -68,7 +68,7 @@ func TestReconcileGenesisMeta(t *testing.T) {
 	// Changed root linkage with the same chain genesis: still a hard error.
 	changed = testMeta()
 	changed.RootGenesisHash = common.HexToHash("0x33")
-	err = ReconcileGenesisMeta(db, changed, "/tmp/x")
+	_, err = ReconcileGenesisMeta(db, changed, "/tmp/x")
 	if err == nil || !strings.Contains(err.Error(), "cluster config changed since initialization") {
 		t.Fatalf("Reconcile(changed root linkage) err = %v, want loud mismatch", err)
 	}

@@ -4,6 +4,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,6 +45,74 @@ func TestConfigSummaryOutput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// loadFixtureWithTempDBRoot loads a fixture with its DB_PATH_ROOT redirected into
+// t.TempDir(), so booting from it never writes into the repo tree.
+func loadFixtureWithTempDBRoot(t *testing.T, path string) *config.ClusterConfig {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	doc["DB_PATH_ROOT"], _ = json.Marshal(t.TempDir())
+	rewritten, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	tmpPath := filepath.Join(t.TempDir(), "cluster_config.json")
+	if err := os.WriteFile(tmpPath, rewritten, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	cfg, err := config.LoadClusterConfig(tmpPath)
+	if err != nil {
+		t.Fatalf("load rewritten fixture: %v", err)
+	}
+	return cfg
+}
+
+// TestBootSlave drives the default action's boot pipeline end to end from each
+// real network config: resolve S0, derive the root genesis, start both owned
+// shards, stop, and boot again from the same datadir.
+func TestBootSlave(t *testing.T) {
+	for _, f := range fixtures {
+		t.Run(f.name, func(t *testing.T) {
+			cfg := loadFixtureWithTempDBRoot(t, f.path)
+
+			backend, err := bootSlave(cfg, "S0")
+			if err != nil {
+				t.Fatalf("bootSlave: %v", err)
+			}
+			if got := len(backend.Shards()); got != 2 {
+				t.Errorf("booted %d shards, want 2", got)
+			}
+			if err := backend.Stop(); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+
+			backend, err = bootSlave(cfg, "S0")
+			if err != nil {
+				t.Fatalf("bootSlave(reopen): %v", err)
+			}
+			if err := backend.Stop(); err != nil {
+				t.Fatalf("Stop(reopen): %v", err)
+			}
+		})
+	}
+}
+
+func TestBootSlaveRejectsBadNodeID(t *testing.T) {
+	cfg := loadFixtureWithTempDBRoot(t, fixtures[0].path)
+	if _, err := bootSlave(cfg, ""); err == nil || !strings.Contains(err.Error(), "--node_id is required") {
+		t.Errorf("bootSlave(\"\") err = %v, want required-flag error", err)
+	}
+	if _, err := bootSlave(cfg, "S9"); err == nil || !strings.Contains(err.Error(), `unknown node id "S9"`) {
+		t.Errorf("bootSlave(S9) err = %v, want unknown node id", err)
 	}
 }
 

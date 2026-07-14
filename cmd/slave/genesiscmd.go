@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/genesis"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/urfave/cli/v2"
@@ -27,7 +26,7 @@ GenesisManager.create_root_block().header.get_hash().`,
 }
 
 func runGenesis(ctx *cli.Context) error {
-	cfg, err := config.LoadClusterConfig(ctx.String(clusterConfigFlag.Name))
+	cfg, err := loadClusterConfig(ctx)
 	if err != nil {
 		return err
 	}
