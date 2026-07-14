@@ -173,20 +173,33 @@ type stateObject struct {
 }
 ```
 
-### 5.2 `GasTokenID` and `TransferTokenID` in EVM TxContext
+### 5.2 `GasTokenID` (TxContext) and `TransferTokenID` (call scope)
 
-Real mainnet data (`mainnet-mnt-txs.md`) shows transactions where `transfer_token_id` is non-QKC (e.g. 46347397) and `gas_token_id` is QKC (35760). These are plain EVM transactions — not `transferMnt` precompile calls — so the EVM context must carry both fields.
+Real mainnet data (`mainnet-mnt-txs.md`) shows transactions where `transfer_token_id` is non-QKC (e.g. 46347397) and `gas_token_id` is QKC (35760). These are plain EVM transactions — not `transferMnt` precompile calls — so the EVM must carry both token IDs (the gas token per-tx, the transfer token per call frame).
 
-**Why `TxContext`, not `BlockContext`**: go-ethereum v1.17+ separates `BlockContext` (block-level, shared by all txs: coinbase, gas limit, block number, timestamp) from `TxContext` (per-transaction: origin, gas price, etc.). `GasTokenID` and `TransferTokenID` come from individual transaction fields — different transactions in the same block may use different tokens — so they belong in `TxContext`.
+**`GasTokenID` → `TxContext` (immutable per-tx); `TransferTokenID` → call scope (`Contract`).** go-ethereum v1.17+ separates `BlockContext` (block-level) from `TxContext` (per-transaction: origin, gas price, etc.). The two token IDs behave differently:
 
-**goshard `TxContext` struct** (`core/vm/evm.go`):
+- **`GasTokenID`** is a genuine per-transaction constant. In pyquarkchain every child `Message` inherits `gas_token_id` unchanged and **no precompile ever switches it** — gas is always paid from the transaction's gas token. So it belongs in `TxContext` and is never mutated during execution.
+- **`TransferTokenID`** is **not** constant within a transaction: the `transferMnt` precompile sets a *different* transfer token for its inner call (pyquarkchain builds a new `Message` with `transfer_token_id=token_id`; `proc_transfer_mnt`, `specials.py`). It is therefore a **call-frame property**, exactly like `value` and `caller` — it lives on the `Contract` scope, not on `TxContext`. This mirrors pyquarkchain's `Message.transfer_token_id` and go-ethereum's per-call scoping model.
+
+**goshard `TxContext` struct** (`core/vm/evm.go`) — only `GasTokenID`:
 
 ```go
 // core/vm/evm.go — TxContext struct
 type TxContext struct {
     // ... existing fields (Origin, GasPrice, ...) ...
-    GasTokenID      uint64  // tokenID used to pay gas (from tx.GasTokenID)
-    TransferTokenID uint64  // tokenID used for value transfer (from tx.TransferTokenID)
+    GasTokenID uint64  // tokenID used to pay gas (from tx.GasTokenID); per-tx, never mutated
+}
+```
+
+**`Contract` struct** (`core/vm/contract.go`) carries the active transfer token for the frame (alongside the existing `TokenIDQueried` flag):
+
+```go
+// core/vm/contract.go
+type Contract struct {
+    // ... existing fields unchanged ...
+    TransferTokenID uint64 // active transfer token for this frame (inherited from caller)
+    TokenIDQueried  bool   // set by currentMntID; checked by evm.Call after execution
 }
 ```
 
@@ -198,26 +211,40 @@ type CanTransferFunc func(StateDB, common.Address, *uint256.Int, uint64) bool
 type TransferFunc    func(StateDB, common.Address, common.Address, *uint256.Int, *params.Rules, uint64)
 ```
 
-**`NewEVMBlockContext` / `SetTxContext`**: block-level context is set once per block; `TxContext` (including both token IDs) is set per transaction via `evm.SetTxContext(txCtx)`:
+**`SetTxContext`**: `GasTokenID` is set per transaction via `evm.SetTxContext(txCtx)`. `TransferTokenID` is **not** in `TxContext` — it is passed into the top-level call from the message:
 
 ```go
-// TxContext is built from the message before each transaction
+// TxContext carries only the per-tx gas token
 txCtx := vm.TxContext{
     // ...
-    GasTokenID:      msg.GasTokenID,
-    TransferTokenID: msg.TransferTokenID,
+    GasTokenID: msg.GasTokenID,
 }
 evm.SetTxContext(txCtx)
 ```
 
-**`evm.Call()`** uses `evm.TxContext.TransferTokenID` for balance checks and transfer:
+**`evm.Call()` gains an explicit `tokenID uint64` parameter** (threaded like `value`). It uses that parameter for the balance check and transfer, and records it on the new frame's `Contract`:
 
 ```go
-if !evm.Context.CanTransfer(evm.StateDB, caller, value, evm.TxContext.TransferTokenID) {
+// core/vm/evm.go — Call(caller, addr, input, gas, value, tokenID)
+if !evm.Context.CanTransfer(evm.StateDB, caller, value, tokenID) {
     return nil, gas, ErrInsufficientBalance
 }
-evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules, evm.TxContext.TransferTokenID)
+evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules, tokenID)
+// ...
+contract := NewContract(caller, addr, value, gas, evm.jumpDests)
+contract.TransferTokenID = tokenID   // frame-scoped, available to currentMntID
 ```
+
+**Who supplies `tokenID`:**
+
+| Call site | tokenID passed |
+|-----------|----------------|
+| Top-level tx (`state_transition.go`) | `msg.TransferTokenID` |
+| `CALL` / `CALLCODE` / `CREATE` opcodes | `scope.Contract.TransferTokenID` (inherited from parent frame) |
+| `DELEGATECALL` / `STATICCALL` opcodes | `scope.Contract.TransferTokenID` (propagated; no new value transfer) |
+| `transferMnt` precompile | the parsed `tokenID` argument (the *only* place a new token is introduced) |
+
+This reproduces pyquarkchain exactly: every child frame inherits the parent's `transfer_token_id`, and only `proc_transfer_mnt` overrides it for its single inner call — but via scope threading instead of mutating shared state.
 
 **`CanTransfer` / `Transfer`** implementations route on tokenID:
 
@@ -240,15 +267,14 @@ func Transfer(db vm.StateDB, sender, recipient common.Address, amount *uint256.I
 }
 ```
 
-**`transferMnt` precompile** temporarily swaps `evm.TxContext.TransferTokenID` around the inner `evm.Call`, then restores it:
+**`transferMnt` precompile** passes its parsed `tokenID` as the call's token argument — **no swap, no restore**. The token lives on the inner frame's `Contract`; `checkTokenIDQueried` runs inside `evm.Call` on that frame:
 
 ```go
-savedTokenID := evm.TxContext.TransferTokenID
-evm.TxContext.TransferTokenID = tokenID
-ret, _, err := evm.Call(vm.AccountRef(caller), to, data, gas, value)
-err = checkTokenIDQueried(err, contract, evm.TxContext.TransferTokenID, defaultTokenID)
-evm.TxContext.TransferTokenID = savedTokenID
+// tokenID is the value parsed from calldata; it becomes the inner frame's transfer token
+ret, leftOverGas, err := evm.Call(callerAddr, toAddr, data, innerGas, value, tokenID)
 ```
+
+This matches pyquarkchain's `proc_transfer_mnt`, which builds a new `Message(..., transfer_token_id=token_id)` and hands it to `apply_msg` — it never mutates a shared transfer-token field. Because the token is scoped to the frame, an early return or panic in the inner call cannot corrupt the parent frame's token.
 
 **Gas payment** in `state_transition.go` reads `GasTokenID` from `msg` (set into `TxContext`):
 
@@ -260,9 +286,9 @@ func (st *stateTransition) buyGas() error {
 }
 ```
 
-**NOTE — Why `evm.TransferTokenID` cannot be removed:**
+**NOTE — Why transfer-token routing cannot be removed:**
 
-The `mnt-data.md` mainnet data contains two real transactions with `transfer_token_id = 46347397` (non-QKC, see `gas_token_is_qkc=true` / `transfer_token_is_qkc=false`). These are plain EVM value-transfer transactions — the token ID is set at the transaction level, not via the `transferMnt` precompile. If goshard tried to handle these by routing through `transferMnt` instead, the gas used would differ (at minimum +9000 for `CallValueTransferGas`), making the transaction receipt different and causing state root mismatch with goquarkchain. Therefore `evm.TransferTokenID` (and its routing through `CanTransfer`/`Transfer`) is a hard requirement for historical chain compatibility.
+The `mnt-data.md` mainnet data contains two real transactions with `transfer_token_id = 46347397` (non-QKC, see `gas_token_is_qkc=true` / `transfer_token_is_qkc=false`). These are plain EVM value-transfer transactions — the token ID is set at the transaction level and flows into the top-level call's `tokenID` argument, not via the `transferMnt` precompile. If goshard tried to handle these by routing through `transferMnt` instead, the gas used would differ (at minimum +9000 for `CallValueTransferGas`), making the transaction receipt different and causing state root mismatch with goquarkchain. Therefore the call-scoped transfer token (and its routing through `CanTransfer`/`Transfer`) is a hard requirement for historical chain compatibility.
 
 **QUESTION — Should `evm.GasTokenID` be retained?**
 
@@ -274,7 +300,7 @@ The 5 MNT precompile implementations are ~400 lines. To keep `contracts.go` mini
 
 ### 5.4 `currentMntID` — `TokenIDQueried` and `checkTokenIDQueried`
 
-`currentMntID` (`core/vm/contracts.go:534` in goquarkchain) returns `evm.TransferTokenID` and sets `contract.TokenIDQueried = true`. The `checkTokenIDQueried` logic lives **inside `evm.Call`**: after executing the recipient contract, `evm.Call` checks whether `contract.TokenIDQueried` was set — if not, and `evm.TransferTokenID != defaultTokenID` with `value > 0`, it reverts. `TokenIDQueried` is therefore a **contract-level** flag, read from the same `contract` local variable inside `evm.Call`.
+In goquarkchain (`core/vm/contracts.go:534`) `currentMntID` returns `evm.TransferTokenID` and sets `contract.TokenIDQueried = true`. The `checkTokenIDQueried` logic lives **inside `evm.Call`**: after executing the recipient contract, `evm.Call` checks whether `contract.TokenIDQueried` was set — if not, and the transfer token `!= defaultTokenID` with `value > 0`, it reverts. `TokenIDQueried` is a **contract-level** flag, read from the `contract` local variable inside `evm.Call`. In goshard the token source becomes the frame-scoped `contract.TransferTokenID` / the `evm.Call` `tokenID` parameter instead of a mutable `evm.TransferTokenID`, but the flag mechanism is unchanged.
 
 **Both behaviors must be preserved in goshard** — removing `checkTokenIDQueried` would cause state divergence.
 
@@ -290,23 +316,23 @@ type Contract struct {
 }
 ```
 
-`currentMntID` returns `evm.TxContext.TransferTokenID` (the currently active MNT token ID):
+`currentMntID` returns the **current frame's** transfer token, `contract.TransferTokenID`. The precompile runs in its own frame (`runMNTPrecompiledContract` builds a `Contract` for it), which inherited the token from the CALL that reached it; the caller frame's `TokenIDQueried` flag is set separately by `ModifyTokenIDQueried` in the opcode handler:
 
 ```go
 func (c *currentMntID) RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]byte, error) {
     contract.TokenIDQueried = true
     output := make([]byte, 32)
-    binary.BigEndian.PutUint64(output[24:], evm.TxContext.TransferTokenID)
+    binary.BigEndian.PutUint64(output[24:], contract.TransferTokenID)
     return output, nil
 }
 ```
 
-`evm.Call` check condition — adds a `!= 0` guard (0 = unset / default QKC) alongside `!= defaultTokenID`:
+`evm.Call` check condition uses the frame's `tokenID` parameter (`== contract.TransferTokenID`). Adds a `!= 0` guard (0 = unset / default QKC) alongside `!= defaultTokenID`:
 
 ```go
-// Inside evm.Call, after contract execution:
+// Inside evm.Call(caller, addr, input, gas, value, tokenID), after contract execution:
 if err == nil && len(contract.Code) != 0 && !contract.TokenIDQueried &&
-    evm.TxContext.TransferTokenID != 0 && evm.TxContext.TransferTokenID != types.DefaultTokenID &&
+    tokenID != 0 && tokenID != types.DefaultTokenID &&
     value.Sign() > 0 {
     ret = nil
     err = ErrExecutionReverted
@@ -318,10 +344,11 @@ if err == nil && len(contract.Code) != 0 && !contract.TokenIDQueried &&
 | Aspect | goquarkchain | goshard |
 |--------|-------------|---------|
 | `TokenIDQueried` location | `Contract` struct | `Contract` struct (same) |
-| `GasTokenID` location | `Context` (`uint64`) | `TxContext` (`uint64`) — go-ethereum v1.17+ split |
-| `TransferTokenID` location | `Context` (`uint64`) | `TxContext` (`uint64`) — go-ethereum v1.17+ split |
-| Trigger condition in `evm.Call` | `evm.TransferTokenID != defaultTokenID` | `evm.TxContext.TransferTokenID != 0 && != defaultTokenID` |
-| `currentMntID` return value | `evm.TransferTokenID` | `evm.TxContext.TransferTokenID` (same semantics) |
+| `GasTokenID` location | `Context` (`uint64`, mutable) | `TxContext` (`uint64`) — per-tx, never mutated |
+| `TransferTokenID` location | `Context` (`uint64`, mutated by transferMnt) | `Contract` scope + `evm.Call` `tokenID` param — call-scoped, never a shared mutable field |
+| Trigger condition in `evm.Call` | `evm.TransferTokenID != defaultTokenID` | `tokenID != 0 && tokenID != defaultTokenID` (frame param) |
+| `currentMntID` return value | `evm.TransferTokenID` | `contract.TransferTokenID` (frame-scoped, same semantics) |
+| `transferMnt` inner call | swap `evm.TransferTokenID`, call, restore | pass `tokenID` as `evm.Call` param — no swap/restore |
 | `CanTransferFunc` / `TransferFunc` signature | includes `uint64 tokenID` | includes `uint64 tokenID`; `Transfer` also takes `*params.Rules` |
 
 ### 5.5 MNT Operations Must Reject QKC TokenID
@@ -362,14 +389,16 @@ This prevents accidental double-storage (QKC would exist in both `Balance` and `
 | # | File Path | Change | Lines |
 |---|-----------|--------|-------|
 | 1 | `core/types/state_account.go` | Add `MntBalances` field; custom RLP encoder | ~25 |
-| 2 | `core/state_transition.go` | Add `GasTokenID`, `TransferTokenID` fields to `Message` struct; `buyGas` uses `GasTokenID`; `TransitionDb` uses `TransferTokenID` for preCheck | ~35 |
+| 2 | `core/state_transition.go` | Add `GasTokenID`, `TransferTokenID` fields to `Message` struct; `buyGas` uses `TxContext.GasTokenID`; `preCheck` and top-level `evm.Call` use `msg.TransferTokenID` | ~35 |
 | 3 | `core/state/statedb.go` | MNT balance methods; modify `updateStateObject` | ~20 |
 | 4 | `core/state/reader.go` | Decode QuarkChain 6-element format | ~40 |
 | 5 | `core/state/journal.go` | MNT balance journal entries | ~30 |
 | 6 | `core/vm/contracts.go` | Merge `PrecompiledContractsMNT` | ~10 |
-| 7 | `core/vm/evm.go` | Add `GasTokenID`, `TransferTokenID` to `Context`; update `evm.Call()` to pass tokenID to `CanTransfer`/`Transfer`; update `checkTokenIDQueried` condition | ~20 |
-| 8 | `core/evm.go` | `CanTransferFunc`/`TransferFunc` with `uint64 tokenID` param; `CanTransfer`/`Transfer` implementations routing on tokenID; `NewEVMContext` sets `GasTokenID`/`TransferTokenID` from message | ~40 |
-| 9 | `core/state_transition.go` | `buyGas` uses `evm.GasTokenID`; `TransitionDb` uses `evm.TransferTokenID` for preCheck | ~30 |
+| 7 | `core/vm/evm.go` | Add `GasTokenID` to `TxContext`; add `tokenID` param to `Call`/`CallCode`/`Create`/`Create2`/`DelegateCall`/`StaticCall` (`…Token` variants + default wrappers); store on `Contract`; `checkTokenIDQueried` uses frame token | ~40 |
+| 8 | `core/vm/contract.go` | Add `TransferTokenID uint64` + `TokenIDQueried bool` to `Contract` | ~5 |
+| 9 | `core/vm/instructions.go` | CALL family passes `scope.Contract.TransferTokenID` to inner call | ~15 |
+| 10 | `core/evm.go` | `CanTransferFunc`/`TransferFunc` with `uint64 tokenID` param; `CanTransfer`/`Transfer` routing on tokenID; `NewEVMTxContext` sets `GasTokenID` from message | ~40 |
+| 11 | `core/state_transition.go` | `buyGas` uses `TxContext.GasTokenID`; `preCheck` + top-level `evm.Call` use `msg.TransferTokenID` | ~30 |
 
 **Total new code**: ~1035 lines | **Total modified code**: ~245 lines
 
@@ -800,15 +829,15 @@ New file with 5 precompiled contracts using the `0x514b43` ("QKC") prefix scheme
 **Input**: None
 **Output**: 32 bytes — first 24 bytes zero + last 8 bytes = QKC token ID (35760) big-endian uint64
 
-Sets `contract.TokenIDQueried = true` (contract-level flag, checked by `evm.Call` after executing the recipient). Returns `evm.TransferTokenID` — the currently active transfer token ID (identical to goquarkchain).
+Sets `contract.TokenIDQueried = true` on its own frame; the caller frame's flag is set by `ModifyTokenIDQueried` in the opcode handler and read by `evm.Call` after executing the recipient. Returns `contract.TransferTokenID` — the current frame's active transfer token ID (same semantics as goquarkchain's `evm.TransferTokenID`, but frame-scoped).
 
 ```go
 type currentMntID struct{}
 func (c *currentMntID) RequiredGas(input []byte) uint64 { return 3 }
-func (c *currentMntID) Run(input []byte, evm *EVM, contract *Contract) ([]byte, error) {
+func (c *currentMntID) RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]byte, error) {
     contract.TokenIDQueried = true
     output := make([]byte, 32)
-    binary.BigEndian.PutUint64(output[24:], evm.TransferTokenID) // returns active transfer token ID
+    binary.BigEndian.PutUint64(output[24:], contract.TransferTokenID) // active transfer token, from frame scope
     return output, nil
 }
 func (c *currentMntID) Name() string { return "currentMntID" }
@@ -834,10 +863,10 @@ func (c *currentMntID) Name() string { return "currentMntID" }
 4. Validate recipient ≠ transferMnt itself
 5. Compute gas cost (`CallValueTransferGas`, plus `CallNewAccountGas` if recipient is new)
 6. Read-only check that caller has sufficient MNT balance: `GetMntBalance(caller, tokenID) >= value` (and depth < CallCreateDepth)
-7. Swap `evm.TransferTokenID = tokenID`, then `evm.Call(caller, to, data, gas+stipend, value)`. The transfer happens **once**, inside `evm.Call` via `Transfer` routing on the swapped tokenID — the precompile does **not** move balances directly. Restore `evm.TransferTokenID` afterwards.
+7. Call `evm.Call(caller, to, data, gas+stipend, value, tokenID)` — passing the parsed `tokenID` as the inner frame's transfer token. The transfer happens **once**, inside `evm.Call` via `Transfer` routing on that tokenID — the precompile does **not** move balances directly. No swap/restore: the token is scoped to the inner frame.
 8. Return inner call's return data
 
-**Identical to goquarkchain `transferMnt.Run`**: validate → read-only balance check → `evm.Call` with swapped `TransferTokenID`. There is no explicit `tokenID ≠ QKC tokenID` guard here and no such guard exists in goquarkchain either — the EVM-level `CanTransfer`/`Transfer` routing already handles QKC balances via `AddBalance`/`SubBalance` when `tokenID == defaultTokenID`. There is no direct balance mutation in the precompile; the single transfer is performed by the inner call itself. Doing a direct `Sub/Add` here *and* letting `evm.Call` transfer would double-spend the value.
+**Same semantics as goquarkchain `transferMnt.Run`** (validate → read-only balance check → inner `evm.Call` carrying the transfer token), but the token is passed as a call argument rather than swapped onto shared EVM state — matching pyquarkchain's `proc_transfer_mnt`, which constructs a new `Message(transfer_token_id=token_id)`. There is no explicit `tokenID ≠ QKC tokenID` guard here (none exists in goquarkchain either) — the EVM-level `CanTransfer`/`Transfer` routing already handles QKC balances via `AddBalance`/`SubBalance` when `tokenID == defaultTokenID`. There is no direct balance mutation in the precompile; the single transfer is performed by the inner call itself. Doing a direct `Sub/Add` here *and* letting `evm.Call` transfer would double-spend the value.
 
 #### 7.9.3 `deploySystemContract` — Deploy System Contract
 
@@ -1063,92 +1092,103 @@ func (c *mintMNT) Run(input []byte, evm *EVM, contract *Contract) ([]byte, error
 
 #### 7.11.5 transferMnt Caller Check Full Implementation
 
-`transferMnt` has no address-level caller restriction (any account or contract may call it), but enforces the following checks. It does **not** move balances directly: the single value transfer is performed inside `evm.Call` by `Transfer` routing on the swapped `TransferTokenID` — mirroring pyquarkchain `proc_transfer_mnt`, which only validates, does a read-only balance check, and delegates the move to `apply_msg`. A direct `Sub/Add` here *plus* the `evm.Call` transfer would double-spend.
+`transferMnt` has no address-level caller restriction (any account or contract may call it), but enforces the following checks. It does **not** move balances directly: the single value transfer is performed inside `evm.Call` by `Transfer` routing on the `tokenID` passed as the call argument — mirroring pyquarkchain `proc_transfer_mnt`, which only validates, does a read-only balance check, and delegates the move to `apply_msg` via a new `Message`. A direct `Sub/Add` here *plus* the `evm.Call` transfer would double-spend.
 
 **Flow**:
 1. Reject staticcall
 2. Parse `to(32) + tokenID(32) + value(32) + data` from input
 3. Validate `tokenID ≤ TokenIDMax`; reject self-transfer to `transferMntAddr`
 4. Charge `CallValueTransferGas` (+ `CallNewAccountGas` if recipient is new); revert on OOG or insufficient MNT balance or depth ≥ CallCreateDepth
-5. Swap `evm.TxContext.TransferTokenID = tokenID`, call `evm.Call(caller, to, data, gas+stipend, value)`, restore `TransferTokenID`
+5. Call `evm.Call(caller, to, data, gas+stipend, value, tokenID)` — the parsed `tokenID` becomes the inner frame's transfer token. No swap/restore of any shared field.
 6. Return inner call's return data
 
-### 7.11 `core/vm/evm.go` — GasTokenID, TransferTokenID + checkTokenIDQueried
+### 7.11 `core/vm/evm.go` — GasTokenID (TxContext), call-scoped TransferTokenID + checkTokenIDQueried
 
-Three changes:
+Four changes:
 
-**1. Add `GasTokenID` and `TransferTokenID` to `TxContext`** (not `BlockContext` — these are per-transaction, not per-block):
+**1. Add only `GasTokenID` to `TxContext`** (per-transaction, never mutated during execution):
 
 ```go
 // core/vm/evm.go — TxContext struct
 type TxContext struct {
     // ... existing fields ...
-    GasTokenID      uint64  // tokenID used to pay gas (from tx.GasTokenID)
-    TransferTokenID uint64  // tokenID used for value transfer (from tx.TransferTokenID)
+    GasTokenID uint64  // tokenID used to pay gas (from tx.GasTokenID); per-tx
 }
 ```
 
-**2. Update `evm.Call()` to pass `evm.TxContext.TransferTokenID` to `CanTransfer`/`Transfer`**:
+**2. Add a `tokenID uint64` parameter to the value-carrying call methods** and store it on the new frame. The full set: `Call`, `CallCode`, `Create`, `Create2` (they perform transfers); `DelegateCall`, `StaticCall` also take it to *propagate* the frame token to children even though they do not transfer. To avoid churning the ~60 non-MNT call sites and upstream geth code, keep the existing signatures as thin wrappers that default to `types.DefaultTokenID` and forward to a `…Token`-suffixed variant carrying the parameter; MNT-relevant sites (opcodes, state-transition entry, `transferMnt`) call the `…Token` variant.
 
 ```go
-// core/vm/evm.go — inside Call()
-if !evm.Context.CanTransfer(evm.StateDB, caller, value, evm.TxContext.TransferTokenID) {
+// core/vm/evm.go — inside Call (…Token variant)
+if !evm.Context.CanTransfer(evm.StateDB, caller, value, tokenID) {
     return nil, gas, ErrInsufficientBalance
 }
-evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules, evm.TxContext.TransferTokenID)
+evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules, tokenID)
+// ... after creating the frame:
+contract.TransferTokenID = tokenID
 ```
 
-**3. Add `checkTokenIDQueried` check inside `evm.Call`** (after contract execution). Uses two guards: `!= 0` (unset/default) and `!= types.DefaultTokenID` (QKC):
+**3. Opcodes thread the caller frame's token down; state-transition seeds from the message.** In `instructions.go` the CALL family passes `scope.Contract.TransferTokenID`; `state_transition.go` passes `msg.TransferTokenID` into the top-level call. `ModifyTokenIDQueried(scope.Contract, toAddr)` is unchanged — it still sets the caller frame's flag when the callee is `currentMntID`.
+
+**4. `checkTokenIDQueried` inside `evm.Call`** uses the frame's `tokenID` parameter (`== contract.TransferTokenID`). Two guards: `!= 0` (unset/default) and `!= types.DefaultTokenID` (QKC):
 
 ```go
-// core/vm/evm.go — inside Call(), after contract execution
+// core/vm/evm.go — inside Call(caller, addr, input, gas, value, tokenID), after execution
 if err == nil && len(contract.Code) != 0 && !contract.TokenIDQueried &&
-    evm.TxContext.TransferTokenID != 0 && evm.TxContext.TransferTokenID != types.DefaultTokenID &&
+    tokenID != 0 && tokenID != types.DefaultTokenID &&
     value.Sign() > 0 {
     ret = nil
     err = ErrExecutionReverted
 }
 ```
 
-`contract.TokenIDQueried` is the contract-level flag set by `currentMntID`. When `TransferTokenID` is 0 or equals QKC (`types.DefaultTokenID`), the check is never triggered.
+`contract.TokenIDQueried` is the frame-level flag set by `ModifyTokenIDQueried` (caller frame) / `currentMntID` (its own frame). When the frame token is 0 or equals QKC (`types.DefaultTokenID`), the check is never triggered.
 
-**Also add `TokenIDQueried bool` to `Contract`** (`core/vm/contract.go`):
+**Also add `TransferTokenID uint64` and `TokenIDQueried bool` to `Contract`** (`core/vm/contract.go`):
 
 ```go
 type Contract struct {
     // ... existing fields unchanged ...
-    TokenIDQueried bool  // set by currentMntID precompile during execution
+    TransferTokenID uint64 // active transfer token for this frame (inherited from caller / set by transferMnt)
+    TokenIDQueried  bool   // set by currentMntID / ModifyTokenIDQueried; checked by evm.Call
 }
 ```
 
 ### 7.12 Modified `core/state_transition.go` — MNT-Aware Transaction Flow
 
-The state transition uses `evm.GasTokenID` for gas payment and `evm.TransferTokenID` for value transfer, mirroring goquarkchain.
+The state transition reads `GasTokenID` from `TxContext` for gas payment and `TransferTokenID` **from the message** for the value transfer / preCheck (the message field is the single source of the transfer token; it is passed straight into the top-level `evm.Call` rather than stored on `TxContext`).
 
 **`buyGas`** deducts gas fee from `GasTokenID` balance (mirrors goquarkchain `state_transition.go:170`):
 
 ```go
 func (st *StateTransition) buyGas() error {
     mgval := new(big.Int).Mul(new(big.Int).SetUint64(st.msg.Gas()), st.gasPrice)
-    if st.state.GetBalance(st.msg.From(), st.evm.GasTokenID).Cmp(mgval) < 0 {
+    if st.state.GetBalance(st.msg.From(), st.evm.TxContext.GasTokenID).Cmp(mgval) < 0 {
         return errInsufficientBalanceForGas
     }
-    st.state.SubBalance(st.msg.From(), mgval, st.evm.GasTokenID)
+    st.state.SubBalance(st.msg.From(), mgval, st.evm.TxContext.GasTokenID)
     // ...
 }
 ```
 
-**`preCheck`** validates both token balances (mirrors goquarkchain `state_transition.go:325`):
+**`preCheck`** validates the transfer-token balance using `msg.TransferTokenID` (mirrors goquarkchain `state_transition.go:325`):
 
 ```go
 func (st *StateTransition) preCheck() error {
-    // Check transfer token balance (may be non-QKC)
-    if !st.evm.CanTransfer(st.state, st.msg.From(), st.value, st.evm.TransferTokenID) {
+    // Check transfer token balance (may be non-QKC) — token comes from the message
+    if !st.evm.Context.CanTransfer(st.state, st.msg.From(), st.value, st.msg.TransferTokenID) {
         return ErrInsufficientFunds
     }
     // ... nonce check ...
     return nil
 }
+```
+
+**Top-level call** passes the message's transfer token as the `tokenID` argument:
+
+```go
+ret, st.gasRemaining, vmerr = st.evm.Call(
+    msg.From, st.to(), msg.Data, st.gasRemaining, value, msg.TransferTokenID)
 ```
 
 For QKC-only transactions (`TransferTokenID == GasTokenID == defaultTokenID`), behavior is unchanged — `CanTransfer`/`Transfer` route to the standard `GetBalance`/`SubBalance`/`AddBalance` path.
@@ -1254,7 +1294,7 @@ MNT balance → StateAccount.MntBalances (*TokenBalances)
 
 ### 9.3 How `transferMnt` Works (Identical to goquarkchain)
 
-The precompile does **not** move balances directly. It validates, does a read-only balance check, swaps `TransferTokenID`, and delegates the single transfer to `evm.Call`. Doing a direct Sub/Add here *plus* letting `evm.Call` transfer would double-spend the value.
+The precompile does **not** move balances directly. It validates, does a read-only balance check, and passes the `tokenID` as the inner call's transfer-token argument — the single transfer happens inside `evm.Call`. Doing a direct Sub/Add here *plus* letting `evm.Call` transfer would double-spend the value.
 
 ```
 transferMnt precompile:
@@ -1262,13 +1302,12 @@ transferMnt precompile:
 
   1. Validate: tokenID, to address, staticcall guard
   2. Check (read-only): GetMntBalance(caller, tokenID) >= value
-  3. Set: t = evm.TransferTokenID; evm.TransferTokenID = tokenID
-  4. Call: evm.Call(caller, to, data, gas, value)
-     → CanTransfer(StateDB, caller, value, evm.TransferTokenID) → routes to MNT balance
-     → Transfer(StateDB, caller, to, value, evm.TransferTokenID) → routes to MNT balance
+  3. Call: evm.Call(caller, to, data, gas, value, tokenID)   // tokenID passed as arg, not swapped
+     → new inner frame gets Contract.TransferTokenID = tokenID
+     → CanTransfer(StateDB, caller, value, tokenID) → routes to MNT balance
+     → Transfer(StateDB, caller, to, value, tokenID)  → routes to MNT balance
      → checkTokenIDQueried: if recipient contract didn't call currentMntID → revert
-  5. Restore: evm.TransferTokenID = t
-  6. Return inner call's return data
+  4. Return inner call's return data   // no restore needed; token was frame-scoped
 ```
 
 ---
@@ -2076,10 +2115,11 @@ func TestGenGoldenRoots(t *testing.T) {
 | **Modified** | `core/state/state_object.go` | EIP-158 `empty()` must also require `IsBlankMnt()` (§7.4.1) — else `QKC=0/MNT≠0` accounts are pruned, diverging from pyquarkchain | ~3 |
 | **Modified** | `core/state/journal.go` | `mntBalanceChange` journal entry + revert | ~40 |
 | **Modified** | `core/vm/contracts.go` | Merge `PrecompiledContractsMNT` into active precompiles | ~10 |
-| **Modified** | `core/vm/evm.go` | Add `GasTokenID`/`TransferTokenID` to `TxContext`; wire `CanTransfer`/`Transfer`; `checkTokenIDQueried` | ~80 |
-| **Modified** | `core/vm/contract.go` | Add `TokenIDQueried bool` to `Contract` | ~5 |
-| **Modified** | `core/evm.go` | `CanTransfer`/`Transfer` with `tokenID` param; set token IDs in block context | ~30 |
-| **Modified** | `core/state_transition.go` | `buyGas`/`preCheck` use `GasTokenID`/`TransferTokenID` from message | ~55 |
+| **Modified** | `core/vm/evm.go` | Add `GasTokenID` to `TxContext`; `tokenID` param on `Call`/`Create`/etc. (`…Token` variants + default wrappers); wire `CanTransfer`/`Transfer`; `checkTokenIDQueried` on frame token | ~90 |
+| **Modified** | `core/vm/contract.go` | Add `TransferTokenID uint64` + `TokenIDQueried bool` to `Contract` | ~6 |
+| **Modified** | `core/vm/instructions.go` | CALL family threads `scope.Contract.TransferTokenID` into inner calls | ~15 |
+| **Modified** | `core/evm.go` | `CanTransfer`/`Transfer` with `tokenID` param; set `GasTokenID` in tx context | ~30 |
+| **Modified** | `core/state_transition.go` | `buyGas` uses `TxContext.GasTokenID`; `preCheck` + top-level `evm.Call` use `msg.TransferTokenID` | ~55 |
 | ~~**Modified**~~ | ~~`params/config.go`~~ | ~~Genesis MNT alloc~~ | ~~out of scope~~ |
 
 **Total**: ~1200 lines of new/modified code
@@ -2142,14 +2182,14 @@ transferMnt.precompile.Run(input)
   ├─ 1. Parse: to=0xB, tokenID=5, value=100
   ├─ 2. Validate: tokenID, to address, staticcall guard
   ├─ 3. Check (read-only): GetMntBalance(0xA, 5) >= 100  → true
-  ├─ 4. Swap: evm.TxContext.TransferTokenID = 5
-  ├─ 5. evm.Call(0xA, 0xB, data, gas, value=100)
+  ├─ 4. evm.Call(0xA, 0xB, data, gas, value=100, tokenID=5)
+  │     → inner frame Contract.TransferTokenID = 5
   │     → CanTransfer(StateDB, 0xA, 100, tokenID=5) → routes to MNT balance → true
   │     → Transfer(StateDB, 0xA, 0xB, 100, tokenID=5)
   │         → SubMntBalance(0xA, 100, 5)  [journal: prev MntBalances of 0xA]
   │         → AddMntBalance(0xB, 100, 5)  [journal: prev MntBalances of 0xB]
   │     → checkTokenIDQueried: if 0xB contract didn't call currentMntID → revert
-  └─ 6. Restore: evm.TxContext.TransferTokenID = original
+  └─ 5. Return inner call's return data  (no restore; token was frame-scoped)
   │
   ▼
 StateDB.Commit()
