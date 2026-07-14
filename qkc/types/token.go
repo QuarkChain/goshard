@@ -1,11 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
 // Token balance encoding follows pyquarkchain-compatible QKC wire bytes.
-// Adaptations (serialize form identical):
-//   - *trie.Database -> *triedb.Database; trie.NewSecure(root, db, 0) ->
-//     trie.NewStateTrie(trie.TrieID(root), db) (modern trie API).
-//   - Trie node persistence in Commit goes through triedb.Database.Update;
-//     full incremental-commit wiring is part of the deferred execution issue.
 
 package types
 
@@ -16,22 +11,13 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"runtime/debug"
 	"sort"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	qCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ethereum/go-ethereum/trie"
-	"github.com/ethereum/go-ethereum/trie/trienode"
-	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
-)
-
-const (
-	TokenTrieThreshold = 16
 )
 
 type TokenBalancePair struct {
@@ -40,9 +26,7 @@ type TokenBalancePair struct {
 }
 
 type TokenBalances struct {
-	db        *triedb.Database
-	tokenTrie *trie.SecureTrie
-	balances  map[uint64]*uint256.Int
+	balances map[uint64]*uint256.Int
 }
 
 type TokenBalancesAlias TokenBalances
@@ -111,9 +95,8 @@ func NewTokenBalancesWithMap(data map[uint64]*uint256.Int) *TokenBalances {
 	return t
 }
 
-func NewTokenBalances(data []byte, db *triedb.Database) (*TokenBalances, error) {
+func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	tokenBalances := NewEmptyTokenBalances()
-	tokenBalances.db = db
 	if len(data) == 0 {
 		return tokenBalances, nil
 	}
@@ -125,14 +108,13 @@ func NewTokenBalances(data []byte, db *triedb.Database) (*TokenBalances, error) 
 			return nil, err
 		}
 		for _, v := range balanceList {
-			tokenBalances.balances[v.TokenID] = v.Balance
+			if v == nil || v.Balance == nil {
+				continue
+			}
+			tokenBalances.balances[v.TokenID] = new(uint256.Int).Set(v.Balance)
 		}
 	case byte(1):
-		var err error
-		tokenBalances.tokenTrie, err = trie.NewStateTrie(trie.TrieID(common.BytesToHash(data[1:])), db)
-		if err != nil {
-			return nil, err
-		}
+		return nil, errors.New("token balance trie encoding is unsupported")
 	default:
 		return nil, fmt.Errorf("Unknown enum byte in token_balances:%v", data[0])
 
@@ -141,46 +123,11 @@ func NewTokenBalances(data []byte, db *triedb.Database) (*TokenBalances, error) 
 }
 
 func (t *TokenBalances) Commit() {
-	if t.notUsingTrie() {
-		return
-	}
-	if t.tokenTrie == nil {
-		var err error
-		t.tokenTrie, err = trie.NewStateTrie(trie.TrieID(common.Hash{}), t.db)
-		if err != nil {
-			panic(err)
-		}
-	}
-	for tokenID, bal := range t.balances {
-		k := qCommon.EncodeToByte32(tokenID)
-		if bal != nil && !bal.IsZero() {
-			val, err := rlp.EncodeToBytes(bal)
-			if err != nil {
-				panic(err)
-			}
-			t.tokenTrie.MustUpdate(k, val)
-		} else {
-			t.tokenTrie.MustDelete(k)
-		}
-	}
-	// TODO(execution-issue): thread the previous trie root through for proper
-	// incremental commits; EmptyTrieHash as parent only covers the initial commit.
-	root, nodes := t.tokenTrie.Commit(false)
-	if nodes != nil {
-		if err := t.db.Update(root, EmptyTrieHash, 0, trienode.NewWithNodeSet(nodes), nil); err != nil {
-			panic(err)
-		}
-	}
-	newTrie, err := trie.NewStateTrie(trie.TrieID(root), t.db)
-	if err != nil {
-		panic(err)
-	}
-	t.tokenTrie = newTrie
-	t.balances = make(map[uint64]*uint256.Int, 0)
+	// TokenBalances is map-backed. Commit is kept as a no-op for callers that
+	// share code with older trie-backed implementations.
 }
 
 func (t *TokenBalances) Add(other map[uint64]*uint256.Int) {
-	//TODO only for test? need to delete
 	for k, v := range other {
 		if v == nil {
 			continue
@@ -206,17 +153,6 @@ func (t *TokenBalances) GetTokenBalance(tokenID uint64) *uint256.Int {
 		return new(uint256.Int).Set(data)
 	}
 
-	if t.tokenTrie != nil {
-		v := t.tokenTrie.MustGet(qCommon.EncodeToByte32(tokenID))
-		ret := new(uint256.Int)
-		if len(v) != 0 {
-			if err := rlp.DecodeBytes(v, ret); err != nil {
-				panic(err)
-			}
-			t.balances[tokenID] = new(uint256.Int).Set(ret)
-		}
-		return ret
-	}
 	return new(uint256.Int)
 }
 
@@ -240,14 +176,7 @@ func (t *TokenBalances) nonZeroEntriesInBalancesCache() int {
 }
 
 func (t *TokenBalances) IsBlank() bool {
-	return t.tokenTrie == nil && t.nonZeroEntriesInBalancesCache() == 0
-}
-
-func (t *TokenBalances) CopyWithDB() *TokenBalances {
-	data := t.Copy()
-	data.db = t.db
-	data.tokenTrie = t.tokenTrie
-	return data
+	return t.nonZeroEntriesInBalancesCache() == 0
 }
 
 func (t *TokenBalances) Copy() *TokenBalances {
@@ -263,31 +192,7 @@ func (t *TokenBalances) Copy() *TokenBalances {
 	}
 }
 
-func (t *TokenBalances) notUsingTrie() bool {
-	return t.tokenTrie == nil && t.nonZeroEntriesInBalancesCache() <= TokenTrieThreshold
-}
-
 func (t *TokenBalances) SerializeToBytes() ([]byte, error) {
-	readyBeforeSer := func() bool {
-		if t.notUsingTrie() {
-			return true
-		}
-
-		if t.tokenTrie != nil && len(t.balances) == 0 {
-			return true
-		}
-		return false
-	}
-	if !readyBeforeSer() {
-		return nil, errors.New("bug here")
-	}
-	if t.tokenTrie != nil {
-		w := make([]byte, 33)
-		w[0] = byte(1)
-		copy(w[1:], t.tokenTrie.Hash().Bytes())
-		return w, nil
-	}
-
 	if t.Len() == 0 {
 		return nil, nil
 	}
@@ -300,6 +205,9 @@ func (t *TokenBalances) SerializeToBytes() ([]byte, error) {
 			TokenID: k,
 			Balance: v,
 		})
+	}
+	if len(list) == 0 {
+		return nil, nil
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].TokenID < (list[j].TokenID) })
 	rlpData := new(bytes.Buffer)
@@ -332,19 +240,13 @@ func (t *TokenBalances) DecodeRLP(s *rlp.Stream) error {
 	dataRlp := new([]byte)
 	err = rlp.DecodeBytes(dataRawBytes, dataRlp)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	if t.db == nil {
-		debug.PrintStack()
-		panic("bug here")
-	}
-	//!!!need to set db before decode
-	b, err := NewTokenBalances(*dataRlp, t.db)
+	b, err := NewTokenBalances(*dataRlp)
 	if err != nil {
 		return err
 	}
 	(*t).balances = (*b).balances
-	(*t).tokenTrie = (*b).tokenTrie
 	return err
 }
 
