@@ -20,6 +20,7 @@ import (
 	"io"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
@@ -33,25 +34,25 @@ type qkcAccountRLP struct {
 	TokenBal     []byte // SerializeToBytes output; nil = no balances
 	Root         common.Hash
 	CodeHash     []byte
-	FullShardKey Uint32
+	FullShardKey qkccommon.Uint32
 	Optional     []byte
 }
 
 // mergeQKCTokenBalances combines the QKC native balance (tokenID=35760) and MNT
 // balances into a single TokenBalances for wire encoding. Returns nil if both empty,
 // which causes EncodeRLP to write 0x80 (RLP nil/empty) matching goquarkchain behavior.
-func mergeQKCTokenBalances(balance *uint256.Int, mnt *TokenBalances) *TokenBalances {
+func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances) *qkccommon.TokenBalances {
 	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.IsBlank()) {
 		return nil
 	}
-	merged := NewEmptyTokenBalances()
+	merged := qkccommon.NewEmptyTokenBalances()
 	if mnt != nil {
 		for id, bal := range mnt.GetBalanceMap() {
 			merged.SetValue(bal, id)
 		}
 	}
 	if balance != nil && !balance.IsZero() {
-		merged.SetValue(balance, DefaultTokenID)
+		merged.SetValue(balance, qkccommon.DefaultTokenID)
 	}
 	return merged
 }
@@ -86,7 +87,7 @@ func (acct *StateAccount) EncodeRLP(w io.Writer) error {
 		Root:         acct.Root,
 		CodeHash:     acct.CodeHash,
 		TokenBal:     tokenBal,
-		FullShardKey: Uint32(acct.FullShardKey),
+		FullShardKey: qkccommon.Uint32(acct.FullShardKey),
 		Optional:     nil,
 	}
 	return rlp.Encode(w, qkc)
@@ -109,19 +110,19 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 	acct.FullShardKey = uint32(qkc.FullShardKey)
 	acct.Balance = new(uint256.Int)
 	if len(qkc.TokenBal) > 0 {
-		tb, err := NewTokenBalancesFromBytes(qkc.TokenBal)
+		tb, err := qkccommon.NewTokenBalances(qkc.TokenBal)
 		if err != nil {
 			return err
 		}
 		balMap := tb.GetBalanceMap()
-		if qkcBal, ok := balMap[DefaultTokenID]; ok {
+		if qkcBal, ok := balMap[qkccommon.DefaultTokenID]; ok {
 			acct.Balance.Set(qkcBal)
-			delete(balMap, DefaultTokenID)
+			delete(balMap, qkccommon.DefaultTokenID)
 		}
 		// Always set MntBalances when TokenBal has content — even if empty
 		// after stripping QKC, this lets EncodeRLP produce 0x8200c0 instead
 		// of 0x80, preserving byte-identical round-trip.
-		acct.MntBalances = &TokenBalances{balances: balMap}
+		acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
 	}
 	return nil
 }

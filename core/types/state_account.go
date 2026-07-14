@@ -20,6 +20,7 @@ import (
 	"bytes"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
@@ -34,10 +35,10 @@ import (
 type StateAccount struct {
 	Nonce        uint64
 	Balance      *uint256.Int
-	Root         common.Hash    // merkle root of the storage trie
+	Root         common.Hash // merkle root of the storage trie
 	CodeHash     []byte
-	MntBalances  *TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
-	FullShardKey uint32         // QuarkChain shard key; set on first tx, preserved thereafter
+	MntBalances  *qkccommon.TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
+	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
 
 }
 
@@ -56,7 +57,7 @@ func (acct *StateAccount) Copy() *StateAccount {
 	if acct.Balance != nil {
 		balance = new(uint256.Int).Set(acct.Balance)
 	}
-	var mnt *TokenBalances
+	var mnt *qkccommon.TokenBalances
 	if acct.MntBalances != nil {
 		mnt = acct.MntBalances.Copy()
 	}
@@ -141,7 +142,7 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	// A non-nil MntBal decodes back to a (possibly empty) TokenBalances so the
 	// nil-vs-empty distinction survives; nil MntBal leaves MntBalances nil.
 	if slim.MntBal != nil {
-		tb, err := NewTokenBalancesFromBytes(slim.MntBal)
+		tb, err := qkccommon.NewTokenBalances(slim.MntBal)
 		if err != nil {
 			return nil, err
 		}
