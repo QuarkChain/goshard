@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/assert"
@@ -43,9 +44,9 @@ import (
 //   - full_shard_key = 1  (BigEndianInt(4) → always 4 bytes on the wire)
 //   - optional = b""
 var (
-	pyqkcVecNonce1QKC1000        = mustHex("f853018900c7c6828bb08203e8a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470840000000180")
-	pyqkcVecNonce5QKC2000MNT500  = mustHex("f858058e00ccc4648201f4c6828bb08207d0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470840000000180")
-	pyqkcVecZeroAccount          = mustHex("f84a8080a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470840000000180")
+	pyqkcVecNonce1QKC1000       = mustHex("f853018900c7c6828bb08203e8a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470840000000180")
+	pyqkcVecNonce5QKC2000MNT500 = mustHex("f858058e00ccc4648201f4c6828bb08207d0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470840000000180")
+	pyqkcVecZeroAccount         = mustHex("f84a8080a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470840000000180")
 )
 
 func mustHex(s string) []byte {
@@ -84,7 +85,7 @@ func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 				Balance:  uint256.NewInt(2000),
 				Root:     EmptyRootHash,
 				CodeHash: EmptyCodeHash[:],
-				MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+				MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
 					100: uint256.NewInt(500),
 				}),
 				FullShardKey: 0x2f3e,
@@ -211,7 +212,7 @@ func TestStateAccountPyquarkchainEncodeCompatibility(t *testing.T) {
 				Balance:  uint256.NewInt(2000),
 				Root:     EmptyRootHash,
 				CodeHash: EmptyCodeHash[:],
-				MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+				MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
 					100: uint256.NewInt(500),
 				}),
 				FullShardKey: 1,
@@ -264,8 +265,8 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		// on the slim round-trip, forking the trie root when a snapshot-served account
 		// was re-committed.
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
-		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
-		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
+		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
+		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
