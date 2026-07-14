@@ -61,6 +61,18 @@ const (
 	ConnectionStateClosed
 )
 
+// ── transport abstraction ────────────────────────────────────────────────────
+
+// frameTransport is the minimal transport contract required by rpcConn.
+// It lets rpcConn run over both a real TCP socket (transport) and a
+// virtual in-memory channel (virtualTransport used by PeerConn).
+type frameTransport interface {
+	readFrame() (*wire.Frame, error)
+	writeFrame(*wire.Frame) error
+	close() error
+	RemoteAddr() string
+}
+
 // ── transport: pure I/O layer ─────────────────────────────────────────────────
 
 // transport wraps a net.Conn with metadata-aware frame read/write.
@@ -136,12 +148,17 @@ type rpcResult struct {
 //
 // Lock ordering (must be maintained to avoid deadlocks):
 //
-//	closeMu → pendingMu     (SendRPCMeta, Close)
-//	closeMu → stateMu       (Close)
+// closeMu → pendingMu     (SendRPCMeta, Close)
+// closeMu → stateMu       (Close)
 //
 // pendingMu and stateMu are never held together; readLoop only holds pendingMu.
 type rpcConn struct {
-	*transport
+	frameTransport
+
+	// conn is the underlying net.Conn for TCP-based connections. It is kept
+	// as a separate field so existing code/tests can access it directly.
+	// It is nil for virtual transports (PeerConn).
+	conn net.Conn
 
 	stateMu    sync.Mutex
 	state      ConnectionState
@@ -183,29 +200,35 @@ type rpcConn struct {
 	log log.Logger
 }
 
-func newRPCConn(
+func newRPCConn(tr frameTransport, logger log.Logger) *rpcConn {
+	if logger == nil {
+		logger = log.Root()
+	}
+	rc := &rpcConn{
+		frameTransport: tr,
+		typedHandlers:  make(map[byte]TypedHandler),
+		serializers:    make(map[byte]*OpSerializer),
+		pending:        make(map[uint64]chan rpcResult),
+		peerRPCID:      -1,
+		nonRPCOps:      make(map[byte]struct{}),
+		state:          ConnectionStateConnecting,
+		activeChan:     make(chan struct{}),
+		closedChan:     make(chan struct{}),
+		errChan:        make(chan error, 1),
+		log:            logger,
+	}
+	rc.validateRPCID = rc.defaultValidateRPCID
+	return rc
+}
+
+func newRPCConnFromConn(
 	conn net.Conn,
 	readFrame func(io.Reader) (*wire.Frame, error),
 	writeFrame func(io.Writer, *wire.Frame) error,
 	logger log.Logger,
 ) *rpcConn {
-	if logger == nil {
-		logger = log.Root()
-	}
-	rc := &rpcConn{
-		transport:     newTransport(conn, readFrame, writeFrame),
-		typedHandlers: make(map[byte]TypedHandler),
-		serializers:   make(map[byte]*OpSerializer),
-		pending:       make(map[uint64]chan rpcResult),
-		peerRPCID:     -1,
-		nonRPCOps:     make(map[byte]struct{}),
-		state:         ConnectionStateConnecting,
-		activeChan:    make(chan struct{}),
-		closedChan:    make(chan struct{}),
-		errChan:       make(chan error, 1),
-		log:           logger,
-	}
-	rc.validateRPCID = rc.defaultValidateRPCID
+	rc := newRPCConn(newTransport(conn, readFrame, writeFrame), logger)
+	rc.conn = conn
 	return rc
 }
 
@@ -255,7 +278,7 @@ func (c *rpcConn) Close() error {
 	}
 	c.pendingMu.Unlock()
 
-	return c.transport.close()
+	return c.close()
 }
 
 func (c *rpcConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool {
@@ -357,7 +380,7 @@ func (c *rpcConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, 
 		RPCID:   rpcID,
 		Payload: payload,
 	}
-	if err := c.transport.writeFrame(frame); err != nil {
+	if err := c.writeFrame(frame); err != nil {
 		return nil, err
 	}
 
@@ -383,7 +406,7 @@ func (c *rpcConn) readLoop() {
 	defer c.Close()
 
 	for {
-		frame, err := c.transport.readFrame()
+		frame, err := c.readFrame()
 		if err != nil {
 			select {
 			case c.errChan <- err:
@@ -506,7 +529,7 @@ func (c *rpcConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeria
 		RPCID:   frame.RPCID,
 		Payload: respPayload,
 	}
-	if err := c.transport.writeFrame(respFrame); err != nil {
+	if err := c.writeFrame(respFrame); err != nil {
 		c.log.Error("write response failed", "opcode", respFrame.Opcode, "err", err)
 		c.Close()
 	}
@@ -515,7 +538,7 @@ func (c *rpcConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeria
 // ── Query helpers ─────────────────────────────────────────────────────────────
 
 func (c *rpcConn) Error() <-chan error              { return c.errChan }
-func (c *rpcConn) RemoteAddr() string               { return c.transport.RemoteAddr() }
+func (c *rpcConn) RemoteAddr() string               { return c.frameTransport.RemoteAddr() }
 func (c *rpcConn) WaitUntilActive() <-chan struct{} { return c.activeChan }
 func (c *rpcConn) WaitUntilClosed() <-chan struct{} { return c.closedChan }
 

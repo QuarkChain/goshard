@@ -65,7 +65,7 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 		return wire.ReadFrameNoMeta(r, maxPayloadSize)
 	}
 	xc := &XshardConn{
-		rpcConn:              newRPCConn(conn, readFrame, wire.WriteFrameNoMeta, logger),
+		rpcConn:              newRPCConnFromConn(conn, readFrame, wire.WriteFrameNoMeta, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 		pingReceived:         make(chan struct{}),
