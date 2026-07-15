@@ -137,7 +137,8 @@ To cross-validate a `slave genesis` run against pyquarkchain, derive the same
 header there (swap the path for devnet) and compare with the `hash:` line:
 
 ```
-# from the root of a pyquarkchain checkout:
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed (bare system python lacks e.g. aiohttp):
 python -c "
 import json
 from quarkchain.cluster.cluster_config import ClusterConfig
