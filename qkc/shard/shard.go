@@ -87,18 +87,13 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		db.Close()
 		return nil, err
 	}
-	if existed {
-		log.Info("existing genesis validated", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
-	} else {
-		log.Info("genesis metadata written", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
-	}
 
 	chain, err := opts.chainService().New(db, genesis)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("shard 0x%08x: construct chain: %w", fullShardID, err)
 	}
-	// The seam's genesis must be the one the metadata recorded. The stub derives
+	// The seam's genesis must be the one the metadata records. The stub derives
 	// both from the descriptor, so this only fires when a chain implementation
 	// disagrees with the record — the moment the metadata scaffold must go.
 	if got := chain.GenesisHash(); got != expected.ChainGenesisHash {
@@ -106,6 +101,20 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		db.Close()
 		return nil, fmt.Errorf("shard 0x%08x: chain genesis %s does not match recorded genesis %s (db %s)",
 			fullShardID, got, expected.ChainGenesisHash, dbPath)
+	}
+
+	if existed {
+		log.Info("existing genesis validated", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
+	} else {
+		// Committed only after the chain stands at this genesis: a boot that
+		// failed earlier left no record, so the retry re-runs the fresh path
+		// instead of reporting a never-validated record as existing.
+		if err := WriteGenesisMeta(db, expected); err != nil {
+			chain.Stop()
+			db.Close()
+			return nil, fmt.Errorf("shard 0x%08x: write genesis metadata (db %s): %w", fullShardID, dbPath, err)
+		}
+		log.Info("genesis metadata written", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
 	}
 
 	return &Shard{Branch: branch, cfg: shardCfg, db: db, chain: chain}, nil

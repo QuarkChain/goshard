@@ -81,10 +81,13 @@ func WriteGenesisMeta(db ethdb.KeyValueWriter, meta *GenesisMeta) error {
 	return db.Put(genesisMetaKey, data)
 }
 
-// ReconcileGenesisMeta is the reopen check: on a fresh chaindb it records the
-// expected (config-derived) metadata and reports existed=false; on an existing one
-// it passes (existed=true) only on an exact match and hard-errors otherwise, so a
-// cluster config change since initialization is caught loudly instead of silently
+// ReconcileGenesisMeta is the reopen check: it compares the stored record against
+// the config-derived expectation. A fresh chaindb (no record) reports
+// existed=false and writes nothing — the caller commits the record with
+// WriteGenesisMeta only after the chain is constructed at that genesis, so a
+// boot that fails mid-way leaves no record behind. An existing record passes
+// (existed=true) only on an exact match and hard-errors otherwise, so a cluster
+// config change since initialization is caught loudly instead of silently
 // keeping the stored genesis. Once the real chain lands, its own genesis check
 // stacks on top of this.
 //
@@ -95,9 +98,6 @@ func ReconcileGenesisMeta(db ethdb.KeyValueStore, expected *GenesisMeta, dbPath 
 		return false, fmt.Errorf("shard 0x%08x: read genesis metadata (db %s): %w", expected.FullShardID, dbPath, err)
 	}
 	if stored == nil {
-		if err := WriteGenesisMeta(db, expected); err != nil {
-			return false, fmt.Errorf("shard 0x%08x: write genesis metadata (db %s): %w", expected.FullShardID, dbPath, err)
-		}
 		return false, nil
 	}
 	if *stored == *expected {
