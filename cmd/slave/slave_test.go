@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/genesis"
+	"github.com/urfave/cli/v2"
 )
 
 var fixtures = []struct {
@@ -48,9 +50,10 @@ func TestConfigSummaryOutput(t *testing.T) {
 	}
 }
 
-// loadFixtureWithTempDBRoot loads a fixture with its DB_PATH_ROOT redirected into
-// t.TempDir(), so booting from it never writes into the repo tree.
-func loadFixtureWithTempDBRoot(t *testing.T, path string) *config.ClusterConfig {
+// writeFixtureWithTempDBRoot copies a fixture with its DB_PATH_ROOT redirected
+// into t.TempDir(), so booting from it never writes into the repo tree, and
+// returns the rewritten config's path.
+func writeFixtureWithTempDBRoot(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -69,7 +72,12 @@ func loadFixtureWithTempDBRoot(t *testing.T, path string) *config.ClusterConfig 
 	if err := os.WriteFile(tmpPath, rewritten, 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	cfg, err := config.LoadClusterConfig(tmpPath)
+	return tmpPath
+}
+
+func loadFixtureWithTempDBRoot(t *testing.T, path string) *config.ClusterConfig {
+	t.Helper()
+	cfg, err := config.LoadClusterConfig(writeFixtureWithTempDBRoot(t, path))
 	if err != nil {
 		t.Fatalf("load rewritten fixture: %v", err)
 	}
@@ -113,6 +121,47 @@ func TestBootSlaveRejectsBadNodeID(t *testing.T) {
 	}
 	if _, err := bootSlave(cfg, "S9"); err == nil || !strings.Contains(err.Error(), `unknown node id "S9"`) {
 		t.Errorf("bootSlave(S9) err = %v, want unknown node id", err)
+	}
+}
+
+// TestNoNetworkedDebugFlags pins the no-network-I/O boundary of the CLI: no
+// registered debug flag may be able to open a socket, and every allowlisted
+// debug flag must still exist upstream so a geth merge that renames or drops
+// one fails loudly instead of silently shrinking the slave's flag surface.
+func TestNoNetworkedDebugFlags(t *testing.T) {
+	app := newApp()
+	registered := map[string]bool{}
+	collect := func(fs []cli.Flag) {
+		for _, f := range fs {
+			for _, name := range f.Names() {
+				registered[name] = true
+			}
+		}
+	}
+	collect(app.Flags)
+	for _, cmd := range app.Commands {
+		collect(cmd.Flags)
+	}
+
+	networked := []string{
+		"pprof", "pprof.addr", "pprof.port",
+		"pyroscope", "pyroscope.server", "pyroscope.username", "pyroscope.password", "pyroscope.tags",
+	}
+	for _, name := range networked {
+		if registered[name] {
+			t.Errorf("networked debug flag --%s is registered", name)
+		}
+	}
+	for name := range debugFlagAllowlist {
+		if !registered[name] {
+			t.Errorf("allowlisted debug flag --%s missing from the app (renamed upstream?)", name)
+		}
+	}
+
+	app = newApp()
+	app.Writer, app.ErrWriter = io.Discard, io.Discard
+	if err := app.Run([]string{"slave", "--pprof"}); err == nil || !strings.Contains(err.Error(), "pprof") {
+		t.Errorf("--pprof accepted, err = %v, want unknown-flag error", err)
 	}
 }
 

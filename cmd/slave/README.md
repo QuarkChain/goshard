@@ -28,10 +28,15 @@ Each owned shard gets an isolated chaindb under
 logs `shard started` with its genesis hash and head height. An empty
 `DB_PATH_ROOT` is pyquarkchain's mem-db mode (`use_mem_db`): every shard runs on
 an ephemeral in-memory database and nothing is written to disk. `^C` (or SIGTERM)
-shuts every shard down cleanly and exits 0; a second signal force-quits. Rerunning
-against the same datadir validates the stored genesis metadata against the config
-(`existing genesis validated`) and refuses to start if the config changed since
-initialization.
+shuts every shard down cleanly and exits 0; a second signal force-quits. The
+handler is installed before any resource opens, so a signal that lands mid-boot
+is honored as soon as boot settles. Rerunning against the same datadir validates
+the stored genesis metadata against the config (`existing genesis validated`)
+and refuses to start if the config changed since initialization.
+
+Only geth's logging and file-based profiling debug flags are exposed. The debug
+flags that would open a socket — the `--pprof` HTTP server and `--pyroscope.*`
+push — are deliberately not registered, keeping the process free of network I/O.
 
 ## Subcommands (milestone M1)
 

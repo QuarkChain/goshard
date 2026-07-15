@@ -19,6 +19,20 @@ import (
 // runSlave is the default action: boot every shard owned by --node_id and run
 // until interrupted, then shut down cleanly.
 func runSlave(ctx *cli.Context) error {
+	// Catch SIGINT/SIGTERM before any resource opens, so a signal that lands
+	// during config load or shard boot still funnels into the blocking Stop()
+	// below instead of the OS default termination. The watcher restores default
+	// signal handling the moment the first signal lands, so a second signal
+	// force-quits the process even while boot or the shutdown drain is still
+	// in flight.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-sigCtx.Done()
+		stop()
+	}()
+
+	log.Info("slave booting", "node_id", ctx.String(nodeIDFlag.Name))
 	cfg, err := loadClusterConfig(ctx)
 	if err != nil {
 		return err
@@ -28,13 +42,10 @@ func runSlave(ctx *cli.Context) error {
 		return err
 	}
 
-	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	log.Info("slave running", "node_id", backend.ID, "shards", len(backend.Shards()))
-	<-sigCtx.Done()
-	// Restore default signal handling before the blocking shutdown, so a second
-	// signal force-quits the process instead of waiting.
-	stop()
+	if sigCtx.Err() == nil {
+		log.Info("slave running", "node_id", backend.ID, "shards", len(backend.Shards()))
+		<-sigCtx.Done()
+	}
 	log.Info("slave shutting down", "node_id", backend.ID)
 	return backend.Stop()
 }

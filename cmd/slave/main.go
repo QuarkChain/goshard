@@ -34,10 +34,45 @@ var (
 	}
 )
 
-func main() {
+// debugFlagAllowlist selects which of geth's debug.Flags the slave registers:
+// logging and file-based profiling only. The slave performs no network I/O of
+// any kind, so the debug flags that open sockets — the pprof HTTP server and
+// pyroscope push — are deliberately absent; debug.Setup treats an unregistered
+// flag as unset and never starts a listener. An allowlist (rather than a
+// blocklist) keeps that boundary fail-closed when a geth merge grows debug.Flags.
+var debugFlagAllowlist = map[string]bool{
+	"verbosity":              true,
+	"log.vmodule":            true,
+	"vmodule":                true,
+	"log.json":               true,
+	"log.format":             true,
+	"log.file":               true,
+	"log.rotate":             true,
+	"log.maxsize":            true,
+	"log.maxbackups":         true,
+	"log.maxage":             true,
+	"log.compress":           true,
+	"pprof.memprofilerate":   true,
+	"pprof.blockprofilerate": true,
+	"pprof.cpuprofile":       true,
+	"go-execution-trace":     true,
+}
+
+func slaveDebugFlags() []cli.Flag {
+	var kept []cli.Flag
+	for _, f := range debug.Flags {
+		if debugFlagAllowlist[f.Names()[0]] {
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
+// newApp assembles the slave CLI app; tests construct it directly.
+func newApp() *cli.App {
 	app := flags.NewApp("the goshard slave node")
 	app.Name = "slave"
-	app.Flags = slices.Concat([]cli.Flag{clusterConfigFlag, nodeIDFlag}, debug.Flags)
+	app.Flags = slices.Concat([]cli.Flag{clusterConfigFlag, nodeIDFlag}, slaveDebugFlags())
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)
 		return debug.Setup(ctx)
@@ -51,8 +86,11 @@ func main() {
 		configCommand,
 		genesisCommand,
 	}
+	return app
+}
 
-	if err := app.Run(os.Args); err != nil {
+func main() {
+	if err := newApp().Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
