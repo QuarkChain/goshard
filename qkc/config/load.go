@@ -112,7 +112,10 @@ func (c *ClusterConfig) Validate() error {
 	}
 
 	for _, chain := range c.Quarkchain.Chains {
-		if want := c.Quarkchain.BaseEthChainID + chain.ChainID + 1; chain.EthChainID != 0 && chain.EthChainID != want {
+		// Computed in uint64: pyquarkchain's arithmetic is unbounded, so the
+		// derivation may exceed uint32 and must not silently wrap.
+		want := uint64(c.Quarkchain.BaseEthChainID) + uint64(chain.ChainID) + 1
+		if chain.EthChainID != 0 && uint64(chain.EthChainID) != want {
 			return fmt.Errorf("chain %d ETH_CHAIN_ID %d != BASE_ETH_CHAIN_ID %d + CHAIN_ID + 1 = %d",
 				chain.ChainID, chain.EthChainID, c.Quarkchain.BaseEthChainID, want)
 		}
