@@ -14,7 +14,7 @@ make slave
 This installs the binary to `./build/bin/slave` (the same convention as `geth`).
 The commands below are run from the repo root so the relative config paths resolve.
 
-## Running a slave (milestone M3)
+## Running a slave
 
 The default action boots every shard assigned to `--node_id` and runs until
 interrupted — a drop-in for how pyquarkchain's `cluster.py` starts a slave:
@@ -38,7 +38,7 @@ Only geth's logging and file-based profiling debug flags are exposed. The debug
 flags that would open a socket — the `--pprof` HTTP server and `--pyroscope.*`
 push — are deliberately not registered, keeping the process free of network I/O.
 
-## Inspecting a datadir (milestone M4)
+## Inspecting a datadir
 
 `slave inspect` is read-only and needs no config: it scans `--datadir` for shard
 chaindb directories (`shard-0x{full_shard_id}/`), opens each in read-only mode,
@@ -69,7 +69,7 @@ A chaindb whose bootstrap was interrupted before the metadata record committed
 prints `genesis metadata: none (bootstrap never completed; next boot
 re-initializes)` — the next `slave` run re-runs the fresh initialization path.
 
-## Subcommands (milestone M1)
+## Subcommands
 
 ### `slave config`
 
@@ -152,3 +152,27 @@ print('hash', h.get_hash().hex())
 The shard-level `chain genesis` printed by `slave inspect` is the config
 descriptor's fingerprint, not a pyquarkchain minor-block hash; it becomes the
 real shard genesis block hash when the QKC block format (#1) lands.
+
+## Follow-up integration checklist
+
+The slave currently provides the process, per-shard database ownership, and
+lifecycle around a stub chain. The following replacement points are deliberate:
+
+- **Real shard chain:** when the `qkc/core` shard chain, QKC block format (#1),
+  and genesis state materialization are ready, inject its `ChainService` from
+  `cmd/slave` instead of relying on `StubChainService`. Adapt `GenesisHash`,
+  `Head`, and `Stop`; `Stop` must wait for every chain-owned goroutine before the
+  shard database closes.
+- **Genesis persistence and inspection:** at the same integration point, delete
+  the temporary `GenesisMeta`, descriptor `Fingerprint`, and metadata
+  reconciliation path rather than migrating them. Re-bootstrap the genesis-only
+  databases, make the real chain reject both genesis and chain-rule changes, and
+  update `slave inspect` to read the canonical QKC minor genesis/head through
+  `qkc/core/rawdb`, including the branch, previous root block, and x-shard cursor.
+- **Integration tests:** switch the boot/reopen, inspect, mismatch, and goleak
+  coverage to the real chain. Keep the goleak allowlist empty for slave-owned
+  goroutines; fix their `Stop` path instead of ignoring them.
+- **Master-driven creation:** when the cluster protocol (#5) lands, replace eager
+  shard creation with the pyquarkchain-compatible `PING(root_tip)` trigger while
+  preserving partial-boot rollback, idempotent blocking shutdown, and the
+  `DBDirName` datadir convention.

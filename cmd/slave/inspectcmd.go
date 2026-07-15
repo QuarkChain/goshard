@@ -92,6 +92,10 @@ func inspectShardDB(out io.Writer, path string, id uint32) error {
 	}
 	defer kv.Close()
 
+	// TODO(#1): when the real QKC shard chain lands, replace GenesisMeta and
+	// geth rawdb reads with qkc/core/rawdb's canonical minor genesis and head.
+	// Read branch/prev-root/x-shard fields from the real block and update the
+	// stub-specific output and tests with it.
 	meta, err := shard.ReadGenesisMeta(kv)
 	if err != nil {
 		return fmt.Errorf("read genesis metadata (db %s): %w", path, err)

@@ -9,5 +9,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// When the real chain is injected into these smoke tests, keep the allowlist
+	// empty for slave-owned goroutines and fix their blocking Stop path instead.
 	goleak.VerifyTestMain(m)
 }

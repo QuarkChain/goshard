@@ -26,7 +26,8 @@ func TestMain(m *testing.M) {
 	}
 	// No ignore list: with metrics disabled (no --metrics flag registered at
 	// all) neither geth nor pebble leaves a background goroutine behind after
-	// Stop(), and this stays pinned so the real chain's arrival is heard here.
+	// Stop(). When bootSlave wires the real chain, fix its Stop path instead of
+	// allowlisting slave-owned goroutines here.
 	goleak.VerifyTestMain(m)
 }
 
@@ -91,6 +92,8 @@ func TestRunHonorsSignalDuringStartup(t *testing.T) {
 	}
 }
 
+// TODO(real shard chain): retain this binary-level contract with a real QKC
+// block 0, and add a case where chain rules change without changing block 0.
 // TestRunGenesisMismatchExitsLoudly initializes a datadir from the mainnet
 // config, then reruns the slave against the same datadir with the devnet
 // config: the run must exit 1 and say which genesis is stored, which one the

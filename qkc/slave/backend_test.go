@@ -41,10 +41,10 @@ func bootEnv(t *testing.T, path string) (*config.SlaveContext, *types.RootBlockH
 	return ctx, root
 }
 
-// TestSlaveBootAndReopen is the milestone demo: boot S0's shards from each real
-// network config, assert the registry matches the config assignment with every
-// shard at head height 0, stop, and boot again from the same datadir — the
-// reopen reconciles against the stored genesis metadata and passes.
+// TODO(real shard chain): inject the qkc/core service here and assert its
+// canonical genesis/head plus blocking shutdown of its background work.
+// TestSlaveBootAndReopen boots S0 from each real network config, checks its shard
+// registry, stops it, and verifies that the same databases reopen cleanly.
 func TestSlaveBootAndReopen(t *testing.T) {
 	for _, path := range []string{fixtureMainnet, fixtureDevnet} {
 		t.Run(filepath.Base(path), func(t *testing.T) {

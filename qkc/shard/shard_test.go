@@ -35,10 +35,10 @@ func bootEnv(t *testing.T, path string) (*config.SlaveContext, *types.RootBlockH
 	return ctx, root
 }
 
-// TestShardNewAndReopen is the milestone demo: construct a single shard from each
-// real network config into t.TempDir(), assert the stub chain reports head height
-// 0 at the genesis descriptor's identity and the metadata record is stored, then
-// stop and reopen from the same directory — Reconcile passes.
+// TODO(#1): replace the stub fingerprint and GenesisMeta assertions with the
+// real QKC minor genesis/head and native reopen compatibility checks.
+// TestShardNewAndReopen constructs a single shard from each real network config,
+// stops it, and verifies that the same database reopens cleanly.
 func TestShardNewAndReopen(t *testing.T) {
 	for _, path := range []string{fixtureMainnet, fixtureDevnet} {
 		t.Run(filepath.Base(path), func(t *testing.T) {

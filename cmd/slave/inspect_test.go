@@ -29,6 +29,8 @@ func initDataDir(t *testing.T, fixturePath, dbRoot string) {
 	}
 }
 
+// TODO(#1): initialize the real QKC shard chain and assert its canonical minor
+// genesis/head once inspectShardDB stops reading the temporary GenesisMeta.
 func TestInspectDataDir(t *testing.T) {
 	dbRoot := t.TempDir()
 	initDataDir(t, fixtures[0].path, dbRoot)

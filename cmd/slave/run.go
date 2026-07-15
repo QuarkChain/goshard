@@ -64,5 +64,7 @@ func bootSlave(cfg *config.ClusterConfig, nodeID string) (*slave.SlaveBackend, e
 	if err != nil {
 		return nil, err
 	}
+	// TODO(real shard chain): inject the qkc/core ChainService here once QKC
+	// block genesis and state materialization are ready; Options{} uses the stub.
 	return slave.New(slaveCtx, root, shard.Options{})
 }

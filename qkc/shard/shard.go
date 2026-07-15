@@ -93,6 +93,8 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 	}
 
 	rootHash := rootGenesis.Hash()
+	// TODO(#1): delete this metadata reconciliation/write path when the real
+	// chain owns canonical QKC genesis and chain-config compatibility checks.
 	expected := &GenesisMeta{
 		Version:           genesisMetaVersion,
 		FullShardID:       fullShardID,
