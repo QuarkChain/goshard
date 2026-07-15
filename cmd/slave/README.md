@@ -25,7 +25,9 @@ interrupted — a drop-in for how pyquarkchain's `cluster.py` starts a slave:
 
 Each owned shard gets an isolated chaindb under
 `{DB_PATH_ROOT}/shard-0x{full_shard_id}/` (relative to the working directory) and
-logs `shard started` with its genesis hash and head height. `^C` (or SIGTERM)
+logs `shard started` with its genesis hash and head height. An empty
+`DB_PATH_ROOT` is pyquarkchain's mem-db mode (`use_mem_db`): every shard runs on
+an ephemeral in-memory database and nothing is written to disk. `^C` (or SIGTERM)
 shuts every shard down cleanly and exits 0; a second signal force-quits. Rerunning
 against the same datadir validates the stored genesis metadata against the config
 (`existing genesis validated`) and refuses to start if the config changed since
