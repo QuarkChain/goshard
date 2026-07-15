@@ -5,10 +5,12 @@
 package types
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"reflect"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/assert"
@@ -125,4 +127,25 @@ func TestTokenBalancesRLPRoundTripWithoutDB(t *testing.T) {
 	assert.Equal(t, testU256(42), decoded.GetTokenBalance(1))
 	assert.Equal(t, testU256(99), decoded.GetTokenBalance(3))
 	assert.Equal(t, new(uint256.Int), decoded.GetTokenBalance(2))
+}
+
+func TestTokenBalancesQKCSerializePythonGolden(t *testing.T) {
+	golden, err := hex.DecodeString("00000002020ca0016d020def030f423f")
+	assert.NoError(t, err)
+
+	tb := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		3232: testU256(109),
+		0:    testU256(0),
+		3567: testU256(999999),
+	})
+	encoded, err := serialize.SerializeToBytes(tb)
+	assert.NoError(t, err)
+	assert.Equal(t, golden, encoded)
+
+	var decoded TokenBalances
+	assert.NoError(t, serialize.DeserializeFromBytes(golden, &decoded))
+	assert.Equal(t, 2, decoded.Len())
+	assert.Equal(t, testU256(109), decoded.GetTokenBalance(3232))
+	assert.Equal(t, testU256(999999), decoded.GetTokenBalance(3567))
+	assert.Equal(t, new(uint256.Int), decoded.GetTokenBalance(0))
 }
