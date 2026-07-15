@@ -228,6 +228,117 @@ func dialPythonPeer(t *testing.T, extraArgs ...string) (*XshardConn, func()) {
 	return xc, cleanup
 }
 
+// startPythonPeerMaster starts a Python peer_master.py subprocess that simulates
+// a Master creating PeerConn and sending peer traffic. Returns the TCP port,
+// a function to retrieve captured stdout lines, and a cleanup function.
+func startPythonPeerMaster(t *testing.T, extraArgs ...string) (int, func() []string, func()) {
+	t.Helper()
+
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot get caller path")
+	}
+	pyScript := filepath.Join(filepath.Dir(filename), "testdata", "pyproto", "peer_master.py")
+
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not found in PATH")
+	}
+	if _, err := os.Stat(pyScript); err != nil {
+		t.Skipf("peer_master.py not found at %s", pyScript)
+	}
+
+	args := []string{pyScript, "--port", "0", "--id", "py-master", "--shards", "1,2", "--cluster-peer-id", "42"}
+	args = append(args, extraArgs...)
+
+	cmd := exec.Command("python3", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start python peer master: %v", err)
+	}
+
+	portCh := make(chan int, 1)
+	var outputLines []string
+	var outputMu sync.Mutex
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputMu.Lock()
+			outputLines = append(outputLines, line)
+			outputMu.Unlock()
+			if strings.HasPrefix(line, "PORT:") {
+				var port int
+				if _, err := fmt.Sscanf(line, "PORT:%d", &port); err == nil {
+					portCh <- port
+				}
+			}
+		}
+	}()
+
+	var port int
+	select {
+	case port = <-portCh:
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatal("timeout waiting for python peer master port")
+	}
+
+	getOutput := func() []string {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		out := make([]string, len(outputLines))
+		copy(out, outputLines)
+		return out
+	}
+
+	cleanup := func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	}
+
+	return port, getOutput, cleanup
+}
+
+// dialPythonPeerMaster starts python peer_master.py and dials the port it listens
+// on, wrapping the connection in a MasterConn with a Dispatcher. Returns the
+// MasterConn, Dispatcher, a function to retrieve captured stdout lines, and a
+// cleanup function.
+func dialPythonPeerMaster(t *testing.T) (*MasterConn, *Dispatcher, func() []string, func()) {
+	t.Helper()
+
+	port, getOutput, cleanupPy := startPythonPeerMaster(t)
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	mc, err := NewMasterConn(
+		addr,
+		0,
+		[]byte("go-slave"),
+		[]uint32{0x00010001, 0x00020001},
+		log.New(),
+	)
+	if err != nil {
+		cleanupPy()
+		t.Fatalf("create MasterConn: %v", err)
+	}
+
+	dispatcher := NewDispatcher(log.New())
+	mc.SetDispatcher(dispatcher)
+	mc.Start()
+
+	cleanup := func() {
+		mc.Close()
+		cleanupPy()
+	}
+
+	return mc, dispatcher, getOutput, cleanup
+}
+
 // ---------------------------------------------------------------------------
 // Test: Python → Go PING/PONG
 //
@@ -474,6 +585,69 @@ func TestPythonCompat_MasterFullFlow(t *testing.T) {
 		if !found {
 			t.Fatalf("expected output line %q not found in %v", exp, output)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Python Master → Go Slave PeerConn integration flow
+//
+// Validates: Python Master creates PeerConn via CreateClusterPeerConnectionRequest,
+// sends peer traffic (CommandOp frames with cluster_peer_id != 0), and destroys
+// PeerConn via DestroyClusterPeerConnectionCommand. Go must correctly route frames
+// through Dispatcher, handle peer RPC and non-RPC traffic, and maintain MasterConn
+// alive after PeerConn lifecycle events.
+//
+// drives the entire flow, and Go must respond with protocol-compatible behavior.
+// ---------------------------------------------------------------------------
+func TestPythonCompat_PeerConnIntegrationFlow(t *testing.T) {
+	mc, dispatcher, getOutput, cleanup := dialPythonPeerMaster(t)
+	defer cleanup()
+
+	// Wait for the Python peer master to finish its scripted exchange.
+	select {
+	case <-mc.WaitUntilClosed():
+	case <-time.After(15 * time.Second):
+		output := getOutput()
+		t.Fatalf("MasterConn did not close after Python peer master finished; output=%v", output)
+	}
+
+	// Allow a moment for the scanner goroutine to drain the Python stdout pipe.
+	time.Sleep(100 * time.Millisecond)
+
+	output := getOutput()
+
+	// Verify all expected Python outputs are present.
+	expected := []string{
+		"PONG_OK id=676f2d736c617665", // hex of "go-slave"
+		"CREATE_OK error_code=0",
+		"PEER_RPC_OK opcode=0x0a rpc_id=100",
+		"PEER_NONRPC_OK",
+		"DESTROY_OK",
+		"POST_DESTROY_PONG_OK id=676f2d736c617665",
+		"DISCONNECTED",
+	}
+
+	for _, exp := range expected {
+		found := false
+		for _, line := range output {
+			if line == exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected output line %q not found in %v", exp, output)
+		}
+	}
+
+	// Verify that the Dispatcher created and destroyed the PeerConn.
+	// After the Python script finishes, the PeerConn should have been destroyed.
+	dispatcher.mu.RLock()
+	peerCount := len(dispatcher.peers)
+	dispatcher.mu.RUnlock()
+
+	if peerCount != 0 {
+		t.Fatalf("expected 0 peers after destroy, got %d", peerCount)
 	}
 }
 
