@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/types"
@@ -73,9 +74,15 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		XShardCursor:     XShardCursor{RootBlockHeight: uint64(rootGenesis.Number)},
 		ChainGenesisHash: genesis.Fingerprint(),
 	}
-	if err := ReconcileGenesisMeta(db, expected, dbPath); err != nil {
+	existed, err := ReconcileGenesisMeta(db, expected, dbPath)
+	if err != nil {
 		db.Close()
 		return nil, err
+	}
+	if existed {
+		log.Info("existing genesis validated", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
+	} else {
+		log.Info("genesis metadata written", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
 	}
 
 	chain, err := opts.chainService().New(db, genesis)
