@@ -41,8 +41,10 @@ func NewGenesis(qkc *config.QuarkChainConfig, shardCfg *config.ShardConfig) (*Ge
 	if shardCfg == nil || shardCfg.Genesis == nil {
 		return nil, fmt.Errorf("shard config has no GENESIS")
 	}
-	ethChainID := qkc.BaseEthChainID + shardCfg.ChainID + 1
-	if shardCfg.EthChainID != 0 && shardCfg.EthChainID != ethChainID {
+	// Computed in uint64: pyquarkchain's arithmetic is unbounded, so the
+	// derivation may exceed uint32 and must not silently wrap.
+	ethChainID := uint64(qkc.BaseEthChainID) + uint64(shardCfg.ChainID) + 1
+	if shardCfg.EthChainID != 0 && uint64(shardCfg.EthChainID) != ethChainID {
 		return nil, fmt.Errorf("chain %d ETH_CHAIN_ID %d != BASE_ETH_CHAIN_ID %d + CHAIN_ID + 1 = %d",
 			shardCfg.ChainID, shardCfg.EthChainID, qkc.BaseEthChainID, ethChainID)
 	}
@@ -61,10 +63,10 @@ func NewGenesis(qkc *config.QuarkChainConfig, shardCfg *config.ShardConfig) (*Ge
 
 // petersburgChainConfig returns a chain config with every fork up to and
 // including Petersburg active from block 0 and nothing after it.
-func petersburgChainConfig(ethChainID uint32) *params.ChainConfig {
+func petersburgChainConfig(ethChainID uint64) *params.ChainConfig {
 	zero := big.NewInt(0)
 	return &params.ChainConfig{
-		ChainID:             new(big.Int).SetUint64(uint64(ethChainID)),
+		ChainID:             new(big.Int).SetUint64(ethChainID),
 		HomesteadBlock:      zero,
 		EIP150Block:         zero,
 		EIP155Block:         zero,
@@ -89,14 +91,17 @@ func (g *Genesis) Fingerprint() common.Hash {
 	// and storage as maps too, so the encoding is canonical.
 	enc, err := json.Marshal(struct {
 		FullShardID uint32
-		EthChainID  *big.Int
+		// The full EVM rule set (chain id + compiled-in fork schedule): a code
+		// change to the rules changes every fingerprint, forcing a loud
+		// re-bootstrap instead of silently executing new semantics on an old db.
+		ChainConfig *params.ChainConfig
 		Timestamp   uint64
 		Difficulty  uint64
 		GasLimit    uint64
 		Nonce       uint32
 		ExtraData   string
 		Alloc       map[string]config.Allocation
-	}{g.FullShardID, g.ChainConfig.ChainID, g.Timestamp, g.Difficulty, g.GasLimit, g.Nonce, common.Bytes2Hex(g.ExtraData), alloc})
+	}{g.FullShardID, g.ChainConfig, g.Timestamp, g.Difficulty, g.GasLimit, g.Nonce, common.Bytes2Hex(g.ExtraData), alloc})
 	if err != nil {
 		panic(fmt.Sprintf("qkc/shard: encode genesis descriptor for fingerprint: %v", err))
 	}
