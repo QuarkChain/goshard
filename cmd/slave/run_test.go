@@ -4,8 +4,10 @@ package main
 
 import (
 	"bufio"
-	"os"
+	"context"
+	"errors"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/internal/reexec"
 	"github.com/ethereum/go-ethereum/qkc/config"
+	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
@@ -21,7 +24,10 @@ func TestMain(m *testing.M) {
 	if reexec.Init() {
 		return
 	}
-	os.Exit(m.Run())
+	// No ignore list: with metrics disabled (no --metrics flag registered at
+	// all) neither geth nor pebble leaves a background goroutine behind after
+	// Stop(), and this stays pinned so the real chain's arrival is heard here.
+	goleak.VerifyTestMain(m)
 }
 
 // TestRunHonorsSignalDuringStartup sends SIGTERM as soon as the run action
@@ -82,5 +88,35 @@ func TestRunHonorsSignalDuringStartup(t *testing.T) {
 	}
 	if err := backend.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+// TestRunGenesisMismatchExitsLoudly initializes a datadir from the mainnet
+// config, then reruns the slave against the same datadir with the devnet
+// config: the run must exit 1 and say which genesis is stored, which one the
+// config derives, and which db holds the stored one.
+func TestRunGenesisMismatchExitsLoudly(t *testing.T) {
+	dbRoot := t.TempDir()
+	initDataDir(t, fixtures[0].path, dbRoot)
+	devnetCfg := writeFixtureWithDBRoot(t, fixtures[1].path, dbRoot)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, reexec.Self(), "--cluster_config", devnetCfg, "--node_id", "S0")
+	cmd.Args[0] = "slave-test"
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("slave exited with %v, want exit 1; output:\n%s", err, out)
+	}
+	for _, want := range []string{
+		"stored genesis 0x",
+		"does not match config genesis 0x",
+		"cluster config changed since initialization",
+		filepath.Join(dbRoot, "shard-0x00000001"),
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("mismatch report missing %q:\n%s", want, out)
+		}
 	}
 }
