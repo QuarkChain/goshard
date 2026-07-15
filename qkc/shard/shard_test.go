@@ -95,6 +95,32 @@ func TestShardNewAndReopen(t *testing.T) {
 	}
 }
 
+// TestShardMemDB: an empty datadir is pyquarkchain's mem-db mode (use_mem_db,
+// cluster_config.py:247) — the shard runs on an ephemeral in-memory database
+// and writes nothing to disk.
+func TestShardMemDB(t *testing.T) {
+	ctx, root := bootEnv(t, fixtureMainnet)
+	branch := account.NewBranch(firstShardID)
+
+	s, err := New(ctx, branch, root, "", Options{})
+	if err != nil {
+		t.Fatalf("shard.New(mem): %v", err)
+	}
+	// No shard directory appears in the working directory.
+	if _, err := os.Stat(fmt.Sprintf("shard-0x%08x", firstShardID)); !os.IsNotExist(err) {
+		t.Errorf("shard-0x%08x was created in the working directory (stat err = %v)", firstShardID, err)
+	}
+	if height, head := s.Chain().Head(); height != 0 || head != s.Chain().GenesisHash() {
+		t.Errorf("head = %d/%s, want 0 at the genesis hash", height, head)
+	}
+	if meta, err := ReadGenesisMeta(s.DB()); err != nil || meta == nil {
+		t.Fatalf("ReadGenesisMeta = %v, %v", meta, err)
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 // TestShardReopenGenesisMismatch: changing the shard genesis in the config between
 // runs fails the reopen loudly, naming both genesis hashes and the db path.
 func TestShardReopenGenesisMismatch(t *testing.T) {

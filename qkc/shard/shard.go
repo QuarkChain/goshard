@@ -40,9 +40,11 @@ type Shard struct {
 }
 
 // New constructs one shard: it opens an isolated pebble chaindb under
-// {datadir}/shard-0x{full_shard_id}/, writes or reconciles the genesis metadata,
-// and constructs the chain through the ShardChain seam. On any failure the
-// database is closed before returning, so the datadir stays reopenable.
+// {datadir}/shard-0x{full_shard_id}/ — or an ephemeral in-memory database when
+// datadir is empty, pyquarkchain's mem-db mode (use_mem_db, cluster_config.py:247)
+// — writes or reconciles the genesis metadata, and constructs the chain through
+// the ShardChain seam. On any failure the database is closed before returning,
+// so the datadir stays reopenable.
 func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.RootBlockHeader, datadir string, opts Options) (*Shard, error) {
 	fullShardID := branch.GetFullShardID()
 	shardCfg := ctx.Quarkchain.GetShardConfigByFullShardID(fullShardID)
@@ -54,14 +56,20 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		return nil, fmt.Errorf("shard 0x%08x: %w", fullShardID, err)
 	}
 
-	// A directory per shard (not pyquarkchain's shard-{id}.db file): the directory
-	// form is what geth's rawdb expects.
-	dbPath := filepath.Join(datadir, fmt.Sprintf("shard-0x%08x", fullShardID))
-	kv, err := pebble.New(dbPath, dbCacheMB, dbHandles, fmt.Sprintf("qkc/shard/0x%08x/", fullShardID), false)
-	if err != nil {
-		return nil, fmt.Errorf("shard 0x%08x: open chaindb %s: %w", fullShardID, dbPath, err)
+	var db ethdb.Database
+	dbPath := "in-memory"
+	if datadir == "" {
+		db = rawdb.NewMemoryDatabase()
+	} else {
+		// A directory per shard (not pyquarkchain's shard-{id}.db file): the
+		// directory form is what geth's rawdb expects.
+		dbPath = filepath.Join(datadir, fmt.Sprintf("shard-0x%08x", fullShardID))
+		kv, err := pebble.New(dbPath, dbCacheMB, dbHandles, fmt.Sprintf("qkc/shard/0x%08x/", fullShardID), false)
+		if err != nil {
+			return nil, fmt.Errorf("shard 0x%08x: open chaindb %s: %w", fullShardID, dbPath, err)
+		}
+		db = rawdb.NewDatabase(kv)
 	}
-	db := rawdb.NewDatabase(kv)
 
 	rootHash := rootGenesis.Hash()
 	expected := &GenesisMeta{
