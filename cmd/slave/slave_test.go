@@ -50,10 +50,9 @@ func TestConfigSummaryOutput(t *testing.T) {
 	}
 }
 
-// writeFixtureWithTempDBRoot copies a fixture with its DB_PATH_ROOT redirected
-// into t.TempDir(), so booting from it never writes into the repo tree, and
-// returns the rewritten config's path.
-func writeFixtureWithTempDBRoot(t *testing.T, path string) string {
+// writeFixtureWithDBRoot copies a fixture with its DB_PATH_ROOT redirected to
+// dbRoot and returns the rewritten config's path.
+func writeFixtureWithDBRoot(t *testing.T, path, dbRoot string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -63,7 +62,7 @@ func writeFixtureWithTempDBRoot(t *testing.T, path string) string {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("unmarshal fixture: %v", err)
 	}
-	doc["DB_PATH_ROOT"], _ = json.Marshal(t.TempDir())
+	doc["DB_PATH_ROOT"], _ = json.Marshal(dbRoot)
 	rewritten, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatalf("marshal fixture: %v", err)
@@ -73,6 +72,13 @@ func writeFixtureWithTempDBRoot(t *testing.T, path string) string {
 		t.Fatalf("write fixture: %v", err)
 	}
 	return tmpPath
+}
+
+// writeFixtureWithTempDBRoot is writeFixtureWithDBRoot into a fresh t.TempDir(),
+// so booting from it never writes into the repo tree.
+func writeFixtureWithTempDBRoot(t *testing.T, path string) string {
+	t.Helper()
+	return writeFixtureWithDBRoot(t, path, t.TempDir())
 }
 
 func loadFixtureWithTempDBRoot(t *testing.T, path string) *config.ClusterConfig {

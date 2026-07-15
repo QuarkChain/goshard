@@ -38,6 +38,37 @@ Only geth's logging and file-based profiling debug flags are exposed. The debug
 flags that would open a socket — the `--pprof` HTTP server and `--pyroscope.*`
 push — are deliberately not registered, keeping the process free of network I/O.
 
+## Inspecting a datadir (milestone M4)
+
+`slave inspect` is read-only and needs no config: it scans `--datadir` for shard
+chaindb directories (`shard-0x{full_shard_id}/`), opens each in read-only mode,
+and prints the stored genesis metadata record and chain head. A shard that
+cannot be opened or read is reported without aborting the others, and the exit
+status is non-zero if any shard failed. A running slave holds its chaindb locks
+(each shard then reports `resource temporarily unavailable`), so inspect a
+stopped node. The report goes to stdout; log lines go to stderr.
+
+```
+./build/bin/slave inspect --datadir ./qkc-data/devnet
+```
+
+```
+shard 0x00000001 (qkc-data/devnet/shard-0x00000001):
+  meta version:          1
+  chain genesis:         0xea741742184975635c2eb1ba468e7b7f58156025517eee3d7583f4ca0ad2dbca
+  root genesis:          0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
+  hash_prev_root_block:  0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
+  xshard cursor:         root=0 minor=0 deposit=0
+  head block:            none recorded (stub chain persists no head)
+shard 0x00040001 (qkc-data/devnet/shard-0x00040001):
+  ...
+2 shard(s) inspected, 0 failed
+```
+
+A chaindb whose bootstrap was interrupted before the metadata record committed
+prints `genesis metadata: none (bootstrap never completed; next boot
+re-initializes)` — the next `slave` run re-runs the fresh initialization path.
+
 ## Subcommands (milestone M1)
 
 ### `slave config`
@@ -95,11 +126,28 @@ The running devnet config works the same way:
 
 prints `hash: 0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d`.
 
+## Fixtures and pyquarkchain cross-validation
+
 Both real (singularity) cluster configs are checked in under
 [`qkc/config/singularity/`](../../qkc/config/singularity/) — `mainnet.json` and
-`devnet.json` (provenance/regeneration in that directory's README).
+`devnet.json`. They are copied verbatim from pyquarkchain; provenance and the
+regeneration steps live in [that directory's README](../../qkc/config/singularity/README.md).
 
-## Not yet implemented
+To cross-validate a `slave genesis` run against pyquarkchain, derive the same
+header there (swap the path for devnet) and compare with the `hash:` line:
 
-The `inspect` subcommand (read-only per-shard state dump from a datadir, no
-config needed) lands in milestone M4.
+```
+# from the root of a pyquarkchain checkout:
+python -c "
+import json
+from quarkchain.cluster.cluster_config import ClusterConfig
+from quarkchain.genesis import GenesisManager
+raw = json.load(open('mainnet/singularity/cluster_config_template.json'))
+h = GenesisManager(ClusterConfig.from_dict(raw).QUARKCHAIN).create_root_block().header
+print('hash', h.get_hash().hex())
+"
+```
+
+The shard-level `chain genesis` printed by `slave inspect` is the config
+descriptor's fingerprint, not a pyquarkchain minor-block hash; it becomes the
+real shard genesis block hash when the QKC block format (#1) lands.
