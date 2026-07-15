@@ -242,3 +242,23 @@ func TestShardStopIdempotent(t *testing.T) {
 		t.Fatalf("Stop(again): %v", err)
 	}
 }
+
+func TestDBDirNameRoundTrip(t *testing.T) {
+	for _, id := range []uint32{0, 1, 0x00040001, 0xffffffff} {
+		name := DBDirName(id)
+		if got, ok := ParseDBDirName(name); !ok || got != id {
+			t.Errorf("ParseDBDirName(%q) = (0x%08x, %v), want (0x%08x, true)", name, got, ok, id)
+		}
+	}
+	for _, name := range []string{
+		"shard-0x1",         // not zero-padded
+		"shard-0x000000012", // too long
+		"shard-00000001",    // missing 0x
+		"shard-0xzzzzzzzz",  // not hex
+		"chaindata",
+	} {
+		if id, ok := ParseDBDirName(name); ok {
+			t.Errorf("ParseDBDirName(%q) = (0x%08x, true), want rejection", name, id)
+		}
+	}
+}
