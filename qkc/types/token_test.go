@@ -18,6 +18,15 @@ func testU256(v uint64) *uint256.Int {
 	return new(uint256.Int).SetUint64(v)
 }
 
+func testU256Decimal(t *testing.T, v string) *uint256.Int {
+	t.Helper()
+	data, err := uint256.FromDecimal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestNewTokenBalanceMap(t *testing.T) {
 	m0 := make(map[uint64]*uint256.Int)
 	m0[3234] = testU256(1000)
@@ -35,6 +44,24 @@ func TestTokenBalancesJSONEmptyRoundTrip(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.Equal(t, 0, decoded.Len())
 	assert.True(t, decoded.IsBlank())
+}
+
+func TestTokenBalancesJSONLargeValueRoundTrip(t *testing.T) {
+	const (
+		maxTokenID = ^uint64(0)
+		largeValue = "1208925819614629174706176"
+	)
+	original := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		maxTokenID: testU256Decimal(t, largeValue),
+	})
+
+	encoded, err := json.Marshal(original)
+	assert.NoError(t, err)
+	assert.Contains(t, string(encoded), "18446744073709551615:"+largeValue)
+
+	var decoded TokenBalances
+	assert.NoError(t, json.Unmarshal(encoded, &decoded))
+	assert.Equal(t, original.GetTokenBalance(maxTokenID), decoded.GetTokenBalance(maxTokenID))
 }
 
 func TestTokenBalances_Add(t *testing.T) {

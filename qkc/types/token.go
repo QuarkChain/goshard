@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,19 +33,24 @@ type TokenBalances struct {
 type TokenBalancesAlias TokenBalances
 
 func (t *TokenBalances) MarshalJSON() ([]byte, error) {
-	balances := ""
-	for key, val := range t.balances {
-		bal := fmt.Sprintf("%d:%d", key, val.Uint64())
-		if balances == "" {
-			balances = bal
-		} else {
-			balances += "," + bal
+	keys := make([]uint64, 0, len(t.balances))
+	for key := range t.balances {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	balances := make([]string, 0, len(keys))
+	for _, key := range keys {
+		val := t.balances[key]
+		balance := "0"
+		if val != nil {
+			balance = val.Dec()
 		}
+		balances = append(balances, strconv.FormatUint(key, 10)+":"+balance)
 	}
 	jsoncfg := struct {
 		TokenBalancesAlias
 		Balances string `json:"balances"`
-	}{TokenBalancesAlias: TokenBalancesAlias(*t), Balances: balances}
+	}{TokenBalancesAlias: TokenBalancesAlias(*t), Balances: strings.Join(balances, ",")}
 	return json.Marshal(jsoncfg)
 }
 
@@ -63,15 +69,19 @@ func (t *TokenBalances) UnmarshalJSON(input []byte) error {
 	}
 	balList := strings.Split(jsoncfg.Balances, ",")
 	for _, val := range balList {
-		var (
-			key     int
-			balance int
-		)
-		_, err := fmt.Fscanf(strings.NewReader(val), "%d:%d", &key, &balance)
-		if err != nil {
-			return err
+		parts := strings.SplitN(val, ":", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid token balance entry: %q", val)
 		}
-		t.balances[uint64(key)] = new(uint256.Int).SetUint64(uint64(balance))
+		key, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid token id %q: %w", parts[0], err)
+		}
+		balance, err := uint256.FromDecimal(parts[1])
+		if err != nil {
+			return fmt.Errorf("invalid token balance %q: %w", parts[1], err)
+		}
+		t.balances[key] = balance
 	}
 	return nil
 }
