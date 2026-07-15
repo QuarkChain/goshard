@@ -46,11 +46,19 @@ func TestReconcileGenesisMeta(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	expected := testMeta()
 
-	// Fresh db: the record is written.
+	// Fresh db: reported as fresh, and nothing is written — committing the
+	// record is the caller's job once the chain stands at that genesis.
 	if existed, err := ReconcileGenesisMeta(db, expected, "/tmp/x"); err != nil || existed {
 		t.Fatalf("Reconcile(fresh) = %v, %v, want false, nil", existed, err)
 	}
-	// Reopen with identical expectation: passes.
+	if meta, err := ReadGenesisMeta(db); err != nil || meta != nil {
+		t.Fatalf("Reconcile(fresh) wrote a record: %+v, %v", meta, err)
+	}
+
+	// Reopen with identical expectation after the caller committed: passes.
+	if err := WriteGenesisMeta(db, expected); err != nil {
+		t.Fatalf("WriteGenesisMeta: %v", err)
+	}
 	if existed, err := ReconcileGenesisMeta(db, expected, "/tmp/x"); err != nil || !existed {
 		t.Fatalf("Reconcile(reopen) = %v, %v, want true, nil", existed, err)
 	}

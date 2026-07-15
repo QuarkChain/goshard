@@ -3,6 +3,7 @@
 package shard
 
 import (
+	"math"
 	"math/big"
 	"reflect"
 	"strings"
@@ -90,6 +91,24 @@ func TestNewGenesisRejectsInconsistentEthChainID(t *testing.T) {
 	}
 }
 
+// TestNewGenesisEthChainIDNoOverflow: the derivation is computed in uint64 —
+// pyquarkchain's arithmetic is unbounded, so BASE_ETH_CHAIN_ID = MaxUint32
+// derives 4294967296, not a wrapped 0 (which would read as "absent" and put a
+// wrong replay-protection chain id into the EVM rule set).
+func TestNewGenesisEthChainIDNoOverflow(t *testing.T) {
+	cfg := loadFixture(t, fixtureMainnet)
+	cfg.Quarkchain.BaseEthChainID = math.MaxUint32
+	shardCfg := cfg.Quarkchain.GetShardConfigByFullShardID(firstShardID)
+
+	g, err := NewGenesis(cfg.Quarkchain, shardCfg)
+	if err != nil {
+		t.Fatalf("NewGenesis: %v", err)
+	}
+	if want := new(big.Int).SetUint64(1 << 32); g.ChainConfig.ChainID.Cmp(want) != 0 {
+		t.Errorf("ChainID = %v, want %v", g.ChainConfig.ChainID, want)
+	}
+}
+
 // TestGenesisFingerprint: the fingerprint is deterministic and sensitive to every
 // descriptor field Reconcile must catch a change in.
 func TestGenesisFingerprint(t *testing.T) {
@@ -124,5 +143,13 @@ func TestGenesisFingerprint(t *testing.T) {
 	mut, _ = NewGenesis(fresh.Quarkchain, mutCfg)
 	if mut.Fingerprint() == base {
 		t.Error("fingerprint unchanged after ALLOC balance change")
+	}
+
+	// The compiled-in fork schedule is part of the identity: a rule-set change
+	// (a code change, not a config one) must not be silently accepted on reopen.
+	forked, _ := NewGenesis(cfg.Quarkchain, shardCfg)
+	forked.ChainConfig.IstanbulBlock = big.NewInt(0)
+	if forked.Fingerprint() == base {
+		t.Error("fingerprint unchanged after fork-schedule change")
 	}
 }

@@ -3,12 +3,16 @@
 package shard
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/genesis"
@@ -95,6 +99,32 @@ func TestShardNewAndReopen(t *testing.T) {
 	}
 }
 
+// TestShardMemDB: an empty datadir is pyquarkchain's mem-db mode (use_mem_db,
+// cluster_config.py:247) — the shard runs on an ephemeral in-memory database
+// and writes nothing to disk.
+func TestShardMemDB(t *testing.T) {
+	ctx, root := bootEnv(t, fixtureMainnet)
+	branch := account.NewBranch(firstShardID)
+
+	s, err := New(ctx, branch, root, "", Options{})
+	if err != nil {
+		t.Fatalf("shard.New(mem): %v", err)
+	}
+	// No shard directory appears in the working directory.
+	if _, err := os.Stat(fmt.Sprintf("shard-0x%08x", firstShardID)); !os.IsNotExist(err) {
+		t.Errorf("shard-0x%08x was created in the working directory (stat err = %v)", firstShardID, err)
+	}
+	if height, head := s.Chain().Head(); height != 0 || head != s.Chain().GenesisHash() {
+		t.Errorf("head = %d/%s, want 0 at the genesis hash", height, head)
+	}
+	if meta, err := ReadGenesisMeta(s.DB()); err != nil || meta == nil {
+		t.Fatalf("ReadGenesisMeta = %v, %v", meta, err)
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 // TestShardReopenGenesisMismatch: changing the shard genesis in the config between
 // runs fails the reopen loudly, naming both genesis hashes and the db path.
 func TestShardReopenGenesisMismatch(t *testing.T) {
@@ -150,6 +180,52 @@ func TestShardNewRejectsUnknownShard(t *testing.T) {
 	_, err := New(ctx, account.NewBranch(0x00990099), root, t.TempDir(), Options{})
 	if err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("shard.New(unknown) err = %v, want 'not configured'", err)
+	}
+}
+
+// failingChainService fails every chain construction, standing in for a real
+// chain implementation that errors during boot.
+type failingChainService struct{}
+
+func (failingChainService) New(ethdb.Database, *Genesis) (ShardChain, error) {
+	return nil, errors.New("injected chain failure")
+}
+
+// TestShardFailedFirstBootLeavesNoMetadata: a boot that fails at chain
+// construction commits no genesis metadata, so the retry takes the fresh path
+// instead of reporting a never-validated record as existing.
+func TestShardFailedFirstBootLeavesNoMetadata(t *testing.T) {
+	ctx, root := bootEnv(t, fixtureMainnet)
+	datadir := t.TempDir()
+	branch := account.NewBranch(firstShardID)
+
+	if _, err := New(ctx, branch, root, datadir, Options{Chain: failingChainService{}}); err == nil ||
+		!strings.Contains(err.Error(), "injected chain failure") {
+		t.Fatalf("New(failing chain) err = %v, want the injected failure", err)
+	}
+
+	// The half-initialized db carries no record.
+	kv, err := pebble.New(filepath.Join(datadir, fmt.Sprintf("shard-0x%08x", firstShardID)),
+		dbCacheMB, dbHandles, "", false)
+	if err != nil {
+		t.Fatalf("reopen chaindb: %v", err)
+	}
+	meta, err := ReadGenesisMeta(rawdb.NewDatabase(kv))
+	kv.Close()
+	if err != nil || meta != nil {
+		t.Fatalf("metadata after failed boot = %+v, %v, want none", meta, err)
+	}
+
+	// The retry succeeds and commits the record.
+	s, err := New(ctx, branch, root, datadir, Options{})
+	if err != nil {
+		t.Fatalf("shard.New(retry): %v", err)
+	}
+	if meta, err := ReadGenesisMeta(s.DB()); err != nil || meta == nil {
+		t.Fatalf("ReadGenesisMeta after retry = %v, %v", meta, err)
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }
 

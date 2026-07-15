@@ -3,6 +3,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -182,6 +183,19 @@ func TestValidateEthChainID(t *testing.T) {
 	cfg.Quarkchain.Chains[0].EthChainID = 42
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ETH_CHAIN_ID") {
 		t.Fatalf("Validate err = %v, want ETH_CHAIN_ID mismatch", err)
+	}
+
+	// The derivation must not wrap in uint32 (pyquarkchain computes it unbounded):
+	// with BASE_ETH_CHAIN_ID = MaxUint32 and CHAIN_ID = 0 the true derivation is
+	// 4294967296, not a wrapped 0 — which would read as "absent" and pass any value.
+	cfg = mustLoad(t)
+	cfg.Quarkchain.BaseEthChainID = math.MaxUint32
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected an absent ETH_CHAIN_ID at the uint32 boundary: %v", err)
+	}
+	cfg.Quarkchain.Chains[0].EthChainID = 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "4294967296") {
+		t.Fatalf("Validate err = %v, want mismatch against the unwrapped derivation 4294967296", err)
 	}
 }
 
