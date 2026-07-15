@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Solidity ABI tests exercise pyquarkchain-compatible QKC signing inputs.
+// Transaction typed-hash tests exercise pyquarkchain-compatible QKC signing inputs.
 
 package types
 

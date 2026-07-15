@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Solidity ABI helpers follow pyquarkchain-compatible QKC transaction signing.
+// Transaction typed-hash helpers follow pyquarkchain-compatible QKC signing.
 
 package types
 
