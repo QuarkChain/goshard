@@ -123,13 +123,16 @@ func hasSerializer(c *MasterConn, opcode byte) bool {
 // TestMasterConn_AllMasterHandlersRegistered verifies that every master→slave
 // request opcode has a handler registered and that the fire-and-forget opcode
 // is marked as non-RPC.
+//
+// Note: CONNECT_TO_SLAVES_REQUEST is a runtime handler registered by SlaveServer,
+// not by MasterConn. It is excluded from this test.
 func TestMasterConn_AllMasterHandlersRegistered(t *testing.T) {
 	_, server, cleanup := newMasterTestConnPair(t)
 	defer cleanup()
 
 	masterRPCOps := []wire.ClusterOp{
 		wire.ClusterOpPing,
-		wire.ClusterOpConnectToSlavesRequest,
+		// ClusterOpConnectToSlavesRequest: registered by SlaveServer
 		wire.ClusterOpMineRequest,
 		wire.ClusterOpGenTxRequest,
 		wire.ClusterOpAddRootBlockRequest,
@@ -656,6 +659,9 @@ func TestClusterMetadata_Marshal(t *testing.T) {
 
 // TestMasterConn_StubResponsesAreValidBytes verifies that every master handler
 // stub returns a response that can be serialized.
+//
+// Note: CONNECT_TO_SLAVES_REQUEST is a runtime handler registered by SlaveServer,
+// not by MasterConn. It is tested separately.
 func TestMasterConn_StubResponsesAreValidBytes(t *testing.T) {
 	_, server, cleanup := newMasterTestConnPair(t)
 	defer cleanup()
@@ -668,7 +674,7 @@ func TestMasterConn_StubResponsesAreValidBytes(t *testing.T) {
 		resp   any
 	}{
 		{wire.ClusterOpPing, &wire.PingRequest{ID: []byte("m"), FullShardIDList: []uint32{1}}, &wire.PongResponse{}},
-		{wire.ClusterOpConnectToSlavesRequest, &wire.ConnectToSlavesRequest{SlaveInfoList: []wire.SlaveInfo{}}, &wire.ConnectToSlavesResponse{}},
+		// ClusterOpConnectToSlavesRequest: registered by SlaveServer
 		{wire.ClusterOpMineRequest, &wire.MineRequest{}, &wire.MineResponse{}},
 		{wire.ClusterOpGenTxRequest, &wire.GenTxRequest{Tx: emptyRawBytes()}, &wire.GenTxResponse{}},
 		{wire.ClusterOpAddRootBlockRequest, &wire.AddRootBlockRequest{RootBlock: emptyRawBytes()}, &wire.AddRootBlockResponse{}},

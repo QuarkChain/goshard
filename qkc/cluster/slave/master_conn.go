@@ -172,6 +172,10 @@ func (mc *MasterConn) registerOpSerializers() {
 
 // registerHandlers registers all master→slave RPC handlers and marks the
 // fire-and-forget opcodes as non-RPC.
+//
+// NOTE: ClusterOpConnectToSlavesRequest is registered by SlaveServer.runMasterConn
+// via mc.RegisterTypedHandlers, not here. This is deliberate: the handler needs
+// access to SlaveServer.xshardPool which lives in the runtime layer.
 func (mc *MasterConn) registerHandlers() {
 	mc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
 		// ── Permanent connection handlers ──────────────────────────────
@@ -186,8 +190,6 @@ func (mc *MasterConn) registerHandlers() {
 		// These handlers exist only to preserve protocol compatibility.
 		// Real implementations must be added outside the connection layer.
 		// After migration, remove these stub registrations and handlers.
-
-		byte(wire.ClusterOpConnectToSlavesRequest): mc.handleConnectToSlaves,
 
 		byte(wire.ClusterOpMineRequest):                        mc.handleMine,
 		byte(wire.ClusterOpGenTxRequest):                       mc.handleGenTx,
@@ -308,19 +310,6 @@ func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
 }
 
 // ── Migration stubs ─────────────────────────────────────────────
-
-// handleConnectToSlaves accepts a list of slaves to connect to.
-// Python: returns ConnectToSlavesResponse with one empty bytes result per slave.
-func (mc *MasterConn) handleConnectToSlaves(req any) (any, error) {
-	r := req.(*wire.ConnectToSlavesRequest)
-
-	// TODO: delegate to SlaveServer.slave_connection_manager.connect_to_slave.
-	resultList := make([]wire.PrependedSizeBytes4, len(r.SlaveInfoList))
-	for i := range resultList {
-		resultList[i] = wire.PrependedSizeBytes4{}
-	}
-	return &wire.ConnectToSlavesResponse{ResultList: resultList}, nil
-}
 
 // handleMine starts or stops mining.
 // Python: MineResponse(error_code=0).
