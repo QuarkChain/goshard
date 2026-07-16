@@ -105,7 +105,6 @@ func TestTokenBalancesUsesListEncodingUpToThreshold(t *testing.T) {
 	}
 
 	b0 := NewTokenBalancesWithMap(mapping)
-	b0.Commit()
 	data, err := b0.SerializeToBytes()
 	assert.NoError(t, err)
 	assert.Equal(t, tokenBalanceListPrefix, data[0])

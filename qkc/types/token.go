@@ -146,11 +146,6 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	return tokenBalances, nil
 }
 
-func (t *TokenBalances) Commit() {
-	// TokenBalances is map-backed. Commit is kept as a no-op for callers that
-	// share code with older trie-backed implementations.
-}
-
 func (t *TokenBalances) Add(other map[uint64]*uint256.Int) error {
 	for k, v := range other {
 		if v == nil {
