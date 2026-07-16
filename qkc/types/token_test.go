@@ -149,3 +149,17 @@ func TestTokenBalancesQKCSerializePythonGolden(t *testing.T) {
 	assert.Equal(t, testU256(999999), decoded.GetTokenBalance(3567))
 	assert.Equal(t, new(uint256.Int), decoded.GetTokenBalance(0))
 }
+
+func TestTokenBalancesQKCDeserializeDuplicatePythonGolden(t *testing.T) {
+	golden, err := hex.DecodeString("0000000201010101010100")
+	assert.NoError(t, err)
+
+	var decoded TokenBalances
+	assert.NoError(t, serialize.DeserializeFromBytes(golden, &decoded))
+	assert.Equal(t, 0, decoded.Len())
+	assert.Equal(t, new(uint256.Int), decoded.GetTokenBalance(1))
+
+	encoded, err := serialize.SerializeToBytes(&decoded)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{0x00, 0x00, 0x00, 0x00}, encoded)
+}

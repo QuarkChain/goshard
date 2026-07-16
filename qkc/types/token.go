@@ -303,11 +303,12 @@ func (t *TokenBalances) Deserialize(bb *serialize.ByteBuffer) error {
 		if err := serialize.Deserialize(bb, v); err != nil {
 			return err
 		}
-		if v.Cmp(common.Big0) == 0 {
-			continue
-		}
 		if !k.IsUint64() {
 			return fmt.Errorf("token id overflows uint64: %v", k)
+		}
+		if v.Cmp(common.Big0) == 0 {
+			delete(t.balances, k.Uint64())
+			continue
 		}
 		balance, overflow := uint256.FromBig(v)
 		if overflow {
