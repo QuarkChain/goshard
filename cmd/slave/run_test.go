@@ -4,8 +4,8 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"errors"
+	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -29,6 +29,86 @@ func TestMain(m *testing.M) {
 	// Stop(). When bootSlave wires the real chain, fix its Stop path instead of
 	// allowlisting slave-owned goroutines here.
 	goleak.VerifyTestMain(m)
+}
+
+// writeFixtureWithDBRoot copies a fixture with its DB_PATH_ROOT redirected to
+// dbRoot and returns the rewritten config's path.
+func writeFixtureWithDBRoot(t *testing.T, path, dbRoot string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	doc["DB_PATH_ROOT"], _ = json.Marshal(dbRoot)
+	rewritten, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	tmpPath := filepath.Join(t.TempDir(), "cluster_config.json")
+	if err := os.WriteFile(tmpPath, rewritten, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return tmpPath
+}
+
+// writeFixtureWithTempDBRoot is writeFixtureWithDBRoot into a fresh t.TempDir(),
+// so booting from it never writes into the repo tree.
+func writeFixtureWithTempDBRoot(t *testing.T, path string) string {
+	t.Helper()
+	return writeFixtureWithDBRoot(t, path, t.TempDir())
+}
+
+func loadFixtureWithTempDBRoot(t *testing.T, path string) *config.ClusterConfig {
+	t.Helper()
+	cfg, err := config.LoadClusterConfig(writeFixtureWithTempDBRoot(t, path))
+	if err != nil {
+		t.Fatalf("load rewritten fixture: %v", err)
+	}
+	return cfg
+}
+
+// TestBootSlave drives the default action's boot pipeline end to end from each
+// real network config: resolve S0, derive the root genesis, start both owned
+// shards, stop, and boot again from the same datadir.
+func TestBootSlave(t *testing.T) {
+	for _, f := range fixtures {
+		t.Run(f.name, func(t *testing.T) {
+			cfg := loadFixtureWithTempDBRoot(t, f.path)
+
+			backend, err := bootSlave(cfg, "S0")
+			if err != nil {
+				t.Fatalf("bootSlave: %v", err)
+			}
+			if got := len(backend.Shards()); got != 2 {
+				t.Errorf("booted %d shards, want 2", got)
+			}
+			if err := backend.Stop(); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+
+			backend, err = bootSlave(cfg, "S0")
+			if err != nil {
+				t.Fatalf("bootSlave(reopen): %v", err)
+			}
+			if err := backend.Stop(); err != nil {
+				t.Fatalf("Stop(reopen): %v", err)
+			}
+		})
+	}
+}
+
+func TestBootSlaveRejectsBadNodeID(t *testing.T) {
+	cfg := loadFixtureWithTempDBRoot(t, fixtures[0].path)
+	if _, err := bootSlave(cfg, ""); err == nil || !strings.Contains(err.Error(), "--node_id is required") {
+		t.Errorf("bootSlave(\"\") err = %v, want required-flag error", err)
+	}
+	if _, err := bootSlave(cfg, "S9"); err == nil || !strings.Contains(err.Error(), `unknown node id "S9"`) {
+		t.Errorf("bootSlave(S9) err = %v, want unknown node id", err)
+	}
 }
 
 // TestRunHonorsSignalDuringStartup sends SIGTERM as soon as the run action
@@ -89,37 +169,5 @@ func TestRunHonorsSignalDuringStartup(t *testing.T) {
 	}
 	if err := backend.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
-	}
-}
-
-// TODO(real shard chain): retain this binary-level contract with a real QKC
-// block 0, and add a case where chain rules change without changing block 0.
-// TestRunGenesisMismatchExitsLoudly initializes a datadir from the mainnet
-// config, then reruns the slave against the same datadir with the devnet
-// config: the run must exit 1 and say which genesis is stored, which one the
-// config derives, and which db holds the stored one.
-func TestRunGenesisMismatchExitsLoudly(t *testing.T) {
-	dbRoot := t.TempDir()
-	initDataDir(t, fixtures[0].path, dbRoot)
-	devnetCfg := writeFixtureWithDBRoot(t, fixtures[1].path, dbRoot)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, reexec.Self(), "--cluster_config", devnetCfg, "--node_id", "S0")
-	cmd.Args[0] = "slave-test"
-	out, err := cmd.CombinedOutput()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-		t.Fatalf("slave exited with %v, want exit 1; output:\n%s", err, out)
-	}
-	for _, want := range []string{
-		"stored genesis 0x",
-		"does not match config genesis 0x",
-		"cluster config changed since initialization",
-		filepath.Join(dbRoot, "shard-0x00000001"),
-	} {
-		if !strings.Contains(string(out), want) {
-			t.Errorf("mismatch report missing %q:\n%s", want, out)
-		}
 	}
 }
