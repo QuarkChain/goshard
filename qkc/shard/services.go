@@ -12,8 +12,8 @@ import (
 // qkc/core.MinorBlockChain), which is delivered by a separate task. It exposes
 // only what the slave needs and is expected to co-evolve with that task.
 type ShardChain interface {
-	// GenesisHash is the chain's genesis block hash, recorded in the genesis
-	// metadata and compared on reopen.
+	// GenesisHash is the chain's genesis block hash, captured in the genesis
+	// record and compared on reopen.
 	GenesisHash() common.Hash
 	// Head is the current chain head.
 	Head() (height uint64, hash common.Hash)
