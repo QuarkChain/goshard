@@ -146,20 +146,28 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	return tokenBalances, nil
 }
 
-func (t *TokenBalances) Add(other map[uint64]*uint256.Int) error {
-	for k, v := range other {
-		if v == nil {
+func (t *TokenBalances) Add(other map[uint64]*big.Int) error {
+	updates := make(map[uint64]*uint256.Int, len(other))
+	for tokenID, delta := range other {
+		if delta == nil {
 			continue
 		}
-		if data, ok := t.balances[k]; ok {
-			sum, overflow := new(uint256.Int).AddOverflow(data, v)
-			if overflow {
-				return fmt.Errorf("token balance overflow for token %d", k)
-			}
-			t.balances[k] = sum
-		} else {
-			t.balances[k] = new(uint256.Int).Set(v)
+		balance := new(big.Int)
+		if current := t.balances[tokenID]; current != nil {
+			balance.Set(current.ToBig())
 		}
+		balance.Add(balance, delta)
+		if balance.Sign() < 0 {
+			return fmt.Errorf("token balance underflow for token %d", tokenID)
+		}
+		updated, overflow := uint256.FromBig(balance)
+		if overflow {
+			return fmt.Errorf("token balance overflow for token %d", tokenID)
+		}
+		updates[tokenID] = updated
+	}
+	for tokenID, balance := range updates {
+		t.balances[tokenID] = balance
 	}
 	return nil
 }

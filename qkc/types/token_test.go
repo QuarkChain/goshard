@@ -7,6 +7,7 @@ package types
 import (
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"reflect"
 	"testing"
 
@@ -75,14 +76,30 @@ func TestTokenBalances_Add(t *testing.T) {
 	m0 := make(map[uint64]*uint256.Int)
 	m0[3567] = testU256(0)
 	tb := NewTokenBalancesWithMap(m0)
-	m1 := make(map[uint64]*uint256.Int)
-	m1[3234] = testU256(10)
-	tb1 := NewTokenBalancesWithMap(m1)
-	assert.NoError(t, tb.Add(tb1.balances))
+	assert.NoError(t, tb.Add(map[uint64]*big.Int{3234: big.NewInt(10)}))
 	m3 := make(map[uint64]*uint256.Int)
 	m3[3567] = testU256(0)
 	m3[3234] = testU256(10)
 	check("", tb.balances, m3)
+}
+
+func TestTokenBalancesAddSupportsNegativeDelta(t *testing.T) {
+	tb := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		1: testU256(10),
+	})
+
+	assert.NoError(t, tb.Add(map[uint64]*big.Int{1: big.NewInt(-4)}))
+	assert.Equal(t, testU256(6), tb.GetTokenBalance(1))
+}
+
+func TestTokenBalancesAddRejectsUnderflow(t *testing.T) {
+	tb := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		1: testU256(10),
+	})
+
+	err := tb.Add(map[uint64]*big.Int{1: big.NewInt(-11)})
+	assert.ErrorContains(t, err, "underflow")
+	assert.Equal(t, testU256(10), tb.GetTokenBalance(1))
 }
 
 func TestTokenBalancesAddRejectsOverflow(t *testing.T) {
@@ -91,9 +108,7 @@ func TestTokenBalancesAddRejectsOverflow(t *testing.T) {
 		1: max,
 	})
 
-	err := tb.Add(map[uint64]*uint256.Int{
-		1: testU256(1),
-	})
+	err := tb.Add(map[uint64]*big.Int{1: big.NewInt(1)})
 	assert.ErrorContains(t, err, "overflow")
 	assert.Equal(t, max, tb.GetTokenBalance(1))
 }
