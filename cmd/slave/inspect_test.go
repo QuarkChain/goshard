@@ -67,7 +67,7 @@ func TestRunGenesisMismatchExitsLoudly(t *testing.T) {
 }
 
 // TODO(#1): initialize the real QKC shard chain and assert its canonical minor
-// genesis/head once inspectShardDB stops reading the temporary GenesisMeta.
+// genesis/head once inspectShardDB stops reading the temporary GenesisRecord.
 func TestInspectDataDir(t *testing.T) {
 	dbRoot := t.TempDir()
 	initDataDir(t, fixtures[0].path, dbRoot)
@@ -80,7 +80,7 @@ func TestInspectDataDir(t *testing.T) {
 	for _, want := range []string{
 		"shard 0x00000001 (",
 		"shard 0x00040001 (",
-		"meta version:          1",
+		"record version:        1",
 		"chain genesis:         0x",
 		"root genesis:          0x4036783e441eb5057bf2be96bf1fd4585ac49824de15c0d92a4c14a97886ca51",
 		"xshard cursor:         root=0 minor=0 deposit=0",

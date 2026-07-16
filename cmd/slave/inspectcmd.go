@@ -23,14 +23,14 @@ var datadirFlag = &cli.StringFlag{
 
 var inspectCommand = &cli.Command{
 	Name:      "inspect",
-	Usage:     "Print the stored genesis metadata and head of every shard chaindb under a datadir",
+	Usage:     "Print the stored genesis record and head of every shard chaindb under a datadir",
 	ArgsUsage: " ",
 	Flags: []cli.Flag{
 		datadirFlag,
 	},
 	Description: `Read-only and config-free: scans --datadir for shard chaindb directories
 (shard-0x{full_shard_id}/), opens each in read-only mode, and prints the stored
-genesis metadata record and chain head. A shard that cannot be opened or read is
+genesis record and chain head. A shard that cannot be opened or read is
 reported inline without aborting the remaining shards; the exit status is
 non-zero if any shard failed. A running slave holds its chaindb locks, so
 inspect a stopped node.`,
@@ -76,9 +76,9 @@ func inspectDataDir(out io.Writer, datadir string) error {
 }
 
 // inspectShardDB opens one shard chaindb read-only and prints its stored genesis
-// metadata record and chain head. An absent metadata record is not an error: it
-// is the expected state of a chaindb whose bootstrap was interrupted before the
-// record was committed (the next boot re-runs the fresh path).
+// record and chain head. An absent record is not an error: it is the expected
+// state of a chaindb whose bootstrap was interrupted before the record was
+// committed (the next boot re-runs the fresh path).
 // Modest fixed sizing for a short-lived read-only open.
 const (
 	inspectDBCacheMB = 16
@@ -92,32 +92,32 @@ func inspectShardDB(out io.Writer, path string, id uint32) error {
 	}
 	defer kv.Close()
 
-	// TODO(#1): when the real QKC shard chain lands, replace GenesisMeta and
+	// TODO(#1): when the real QKC shard chain lands, replace GenesisRecord and
 	// geth rawdb reads with qkc/core/rawdb's canonical minor genesis and head.
 	// Read branch/prev-root/x-shard fields from the real block and update the
 	// stub-specific output and tests with it.
-	meta, err := shard.ReadGenesisMeta(kv)
+	rec, err := shard.ReadGenesisRecord(kv)
 	if err != nil {
-		return fmt.Errorf("read genesis metadata (db %s): %w", path, err)
+		return fmt.Errorf("read genesis record (db %s): %w", path, err)
 	}
 	fmt.Fprintf(out, "shard 0x%08x (%s):\n", id, path)
-	if meta == nil {
-		fmt.Fprintln(out, "  genesis metadata:      none (bootstrap never completed; next boot re-initializes)")
+	if rec == nil {
+		fmt.Fprintln(out, "  genesis record:        none (bootstrap never completed; next boot re-initializes)")
 	} else {
-		fmt.Fprintf(out, "  meta version:          %d\n", meta.Version)
-		fmt.Fprintf(out, "  chain genesis:         %s\n", meta.ChainGenesisHash)
-		fmt.Fprintf(out, "  root genesis:          %s\n", meta.RootGenesisHash)
-		fmt.Fprintf(out, "  hash_prev_root_block:  %s\n", meta.HashPrevRootBlock)
+		fmt.Fprintf(out, "  record version:        %d\n", rec.Version)
+		fmt.Fprintf(out, "  chain genesis:         %s\n", rec.ChainGenesisHash)
+		fmt.Fprintf(out, "  root genesis:          %s\n", rec.RootGenesisHash)
+		fmt.Fprintf(out, "  hash_prev_root_block:  %s\n", rec.HashPrevRootBlock)
 		fmt.Fprintf(out, "  xshard cursor:         root=%d minor=%d deposit=%d\n",
-			meta.XShardCursor.RootBlockHeight, meta.XShardCursor.MinorBlockIndex, meta.XShardCursor.XShardDepositIndex)
+			rec.XShardCursor.RootBlockHeight, rec.XShardCursor.MinorBlockIndex, rec.XShardCursor.XShardDepositIndex)
 	}
 	if head := rawdb.ReadHeadBlockHash(kv); head != (common.Hash{}) {
 		fmt.Fprintf(out, "  head block:            %s\n", head)
 	} else {
 		fmt.Fprintln(out, "  head block:            none recorded (stub chain persists no head)")
 	}
-	if meta != nil && meta.FullShardID != id {
-		return fmt.Errorf("metadata records shard 0x%08x but the directory name says 0x%08x (db %s) — misplaced chaindb", meta.FullShardID, id, path)
+	if rec != nil && rec.FullShardID != id {
+		return fmt.Errorf("genesis record names shard 0x%08x but the directory name says 0x%08x (db %s) — misplaced chaindb", rec.FullShardID, id, path)
 	}
 	return nil
 }

@@ -42,7 +42,7 @@ push — are deliberately not registered, keeping the process free of network I/
 
 `slave inspect` is read-only and needs no config: it scans `--datadir` for shard
 chaindb directories (`shard-0x{full_shard_id}/`), opens each in read-only mode,
-and prints the stored genesis metadata record and chain head. A shard that
+and prints the stored genesis record and chain head. A shard that
 cannot be opened or read is reported without aborting the others, and the exit
 status is non-zero if any shard failed. A running slave holds its chaindb locks
 (each shard then reports `resource temporarily unavailable`), so inspect a
@@ -54,7 +54,7 @@ stopped node. The report goes to stdout; log lines go to stderr.
 
 ```
 shard 0x00000001 (qkc-data/devnet/shard-0x00000001):
-  meta version:          1
+  record version:        1
   chain genesis:         0xea741742184975635c2eb1ba468e7b7f58156025517eee3d7583f4ca0ad2dbca
   root genesis:          0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
   hash_prev_root_block:  0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
@@ -65,8 +65,8 @@ shard 0x00040001 (qkc-data/devnet/shard-0x00040001):
 2 shard(s) inspected, 0 failed
 ```
 
-A chaindb whose bootstrap was interrupted before the metadata record committed
-prints `genesis metadata: none (bootstrap never completed; next boot
+A chaindb whose bootstrap was interrupted before the genesis record committed
+prints `genesis record: none (bootstrap never completed; next boot
 re-initializes)` — the next `slave` run re-runs the fresh initialization path.
 
 ## Subcommands
@@ -153,7 +153,7 @@ lifecycle around a stub chain. The following replacement points are deliberate:
   `Head`, and `Stop`; `Stop` must wait for every chain-owned goroutine before the
   shard database closes.
 - **Genesis persistence and inspection:** at the same integration point, delete
-  the temporary `GenesisMeta`, descriptor `Fingerprint`, and metadata
+  the temporary `GenesisRecord`, descriptor `Fingerprint`, and record
   reconciliation path rather than migrating them. Re-bootstrap the genesis-only
   databases, make the real chain reject both genesis and chain-rule changes, and
   update `slave inspect` to read the canonical QKC minor genesis/head through
