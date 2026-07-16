@@ -382,14 +382,15 @@ func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 		Payload: destroyPayload,
 	})
 
-	// Give the close goroutines a moment to finish.
-	time.Sleep(50 * time.Millisecond)
-
-	for _, branch := range client.localFullShardIDList {
-		if pc := client.dispatcher.peers[clusterPeerID][branch]; pc != nil && !pc.IsClosed() {
-			t.Fatalf("peer conn for branch 0x%x was not closed after destroy", branch)
+	// Wait for peer connections to be closed (async since handler runs in goroutine).
+	waitForCondition(t, 2*time.Second, func() bool {
+		for _, branch := range client.localFullShardIDList {
+			if pc := client.dispatcher.peers[clusterPeerID][branch]; pc != nil && !pc.IsClosed() {
+				return false
+			}
 		}
-	}
+		return true
+	})
 
 	// MasterConn must still be alive for a follow-up PING.
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{

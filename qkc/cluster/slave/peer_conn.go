@@ -141,10 +141,15 @@ func (pc *PeerConn) registerOpSerializers() {
 	})
 }
 
-// registerHandlers registers the shard-level peer handlers. These are stubs
-// because PR6 does not implement shard runtime / block processing.
+// registerHandlers registers the shard-level peer handlers. These are stubs;
+// real implementations require the shard runtime to be ported.
 func (pc *PeerConn) registerHandlers() {
 	pc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
+		// ── Migration stubs ─────────────────────────────────────────────
+		// These handlers exist only to preserve protocol compatibility.
+		// Real implementations must be added outside the connection layer.
+		// After migration, remove these stub registrations and handlers.
+
 		// Non-RPC commands (fire-and-forget).
 		byte(wire.CommandOpNewMinorBlockHeaderList): pc.handleNewMinorBlockHeaderList,
 		byte(wire.CommandOpNewTransactionList):      pc.handleNewTransactionList,

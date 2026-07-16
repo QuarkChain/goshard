@@ -273,12 +273,14 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 	}, nil
 }
 
-// handleCreateClusterPeerConnection creates virtual peer connections for all
-// shards. Until PR7's Shard Registry is available, localFullShardIDList is used
-// as the shard list.
+// handleCreateClusterPeerConnection creates virtual peer connections for all shards.
 // Python: returns CreateClusterPeerConnectionResponse(error_code=0) on success.
 func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
 	r := req.(*wire.CreateClusterPeerConnectionRequest)
+
+	// TODO: localFullShardIDList is a temporary stand-in for the real shard
+	// registry. Once the shard registry is available, replace with the actual
+	// per-shard branch list from the registry.
 
 	mc.dispatcherMu.RLock()
 	d := mc.dispatcher
