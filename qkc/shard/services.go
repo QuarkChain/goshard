@@ -49,6 +49,8 @@ func (o Options) chainService() ChainService {
 	if o.Chain != nil {
 		return o.Chain
 	}
+	// TODO(real shard chain): production wiring must inject the qkc/core service
+	// once it can commit the real QKC genesis; keep this stub only as a test seam.
 	return StubChainService{}
 }
 

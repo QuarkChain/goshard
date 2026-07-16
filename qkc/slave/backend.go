@@ -33,6 +33,8 @@ type SlaveBackend struct {
 // Eager construction is interim scaffolding: with no master in the cluster yet it
 // is the only way to bring the shards up; the master's PING(root_tip) trigger
 // (#5) replaces it (pyquarkchain slave.py:927).
+// TODO(#5): move shard creation behind PING(root_tip), preserving rollback and
+// blocking shutdown for dynamically created shards.
 //
 // On any shard failure the shards already started are stopped and their databases
 // closed before the error returns, so the datadir stays reopenable.

@@ -10,6 +10,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 )
 
+// TODO(#1): delete these GenesisMeta tests with the temporary record and move
+// reopen/mismatch coverage to the real QKC genesis setup path.
+
 func testMeta() *GenesisMeta {
 	return &GenesisMeta{
 		Version:           genesisMetaVersion,
