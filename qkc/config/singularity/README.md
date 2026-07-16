@@ -27,7 +27,8 @@ byte-identically to pyquarkchain's
 path for devnet):
 
 ```
-# from the root of a pyquarkchain checkout:
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed (bare system python lacks e.g. aiohttp):
 python -c "
 import json
 from quarkchain.cluster.cluster_config import ClusterConfig
