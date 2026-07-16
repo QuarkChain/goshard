@@ -27,7 +27,7 @@ on an invalid config or an unknown node id.`,
 }
 
 func runConfig(ctx *cli.Context) error {
-	cfg, err := config.LoadClusterConfig(ctx.String(clusterConfigFlag.Name))
+	cfg, err := loadClusterConfig(ctx)
 	if err != nil {
 		return err
 	}
