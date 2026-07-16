@@ -18,6 +18,24 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
+// waitForCondition polls f until it returns true or the timeout expires.
+// It calls t.Fatal if the condition is not met within the timeout.
+func waitForCondition(t *testing.T, timeout time.Duration, f func() bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		if f() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("condition not met within %v", timeout)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 // newMasterTestConnPair creates a pair of MasterConns connected over a local TCP
 // socket. The caller is responsible for calling cleanup.
 func newMasterTestConnPair(t *testing.T) (client, server *MasterConn, cleanup func()) {
@@ -323,9 +341,6 @@ func TestMasterConn_NonRPCDispatch(t *testing.T) {
 		Payload: payload,
 	})
 
-	// Give the server a moment to process the command.
-	time.Sleep(50 * time.Millisecond)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -398,11 +413,15 @@ func TestMasterConn_Forwarder(t *testing.T) {
 		Payload: payload,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-
+	// Wait for the forwarded frame to be processed by the forwarder goroutine.
+	waitForCondition(t, 2*time.Second, func() bool {
+		forwardedMu.Lock()
+		count := len(forwarded)
+		forwardedMu.Unlock()
+		return count == 1
+	})
 	forwardedMu.Lock()
 	count := len(forwarded)
-	forwardedMu.Unlock()
 	if count != 1 {
 		t.Fatalf("expected 1 forwarded frame, got %d", count)
 	}
@@ -619,54 +638,9 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 	}
 }
 
-// TestMasterConn_12ByteMetadata verifies that ClusterMetadata is encoded as
-// 4-byte branch followed by 8-byte cluster_peer_id.
-func TestMasterConn_12ByteMetadata(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-
-	var serverConn net.Conn
-	var acceptErr error
-	accepted := make(chan struct{})
-	go func() {
-		defer close(accepted)
-		serverConn, acceptErr = ln.Accept()
-		ln.Close()
-	}()
-
-	clientConn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	<-accepted
-	if acceptErr != nil {
-		t.Fatalf("accept: %v", acceptErr)
-	}
-	defer clientConn.Close()
-	defer serverConn.Close()
-
-	mc := NewMasterConnFromConn(clientConn, 0, []byte("s"), []uint32{1}, log.New())
-	defer mc.Close()
-
-	// Read the raw first frame written by the client to inspect metadata layout.
-	go func() {
-		// Accept but do not respond; we only need the wire bytes.
-		buf := make([]byte, 1024)
-		_, _ = serverConn.Read(buf)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	payload, _ := serialize.SerializeToBytes(&wire.GetEcoInfoListRequest{})
-	// This RPC will time out because the fake server does not reply, but the
-	// request bytes are still written to the wire before the timeout.
-	_, _ = mc.SendRPCMeta(ctx, byte(wire.ClusterOpGetEcoInfoListRequest), payload, wire.ClusterMetadata{Branch: 0x01020304, ClusterPeerID: 0x1122334455667788})
-
-	// Read back what the client wrote from serverConn using a fresh connection
-	// is not straightforward; instead verify the metadata marshal helper.
+// TestClusterMetadata_Marshal verifies that ClusterMetadata is encoded as
+// 4-byte branch followed by 8-byte cluster_peer_id (12 bytes total).
+func TestClusterMetadata_Marshal(t *testing.T) {
 	meta := wire.ClusterMetadata{Branch: 0x01020304, ClusterPeerID: 0x1122334455667788}
 	b := wire.MarshalClusterMetadata(meta)
 	if len(b) != 12 {
