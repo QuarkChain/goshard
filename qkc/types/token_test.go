@@ -98,9 +98,9 @@ func TestTokenBalancesAddRejectsOverflow(t *testing.T) {
 	assert.Equal(t, max, tb.GetTokenBalance(1))
 }
 
-func TestTokenBalancesAlwaysUsesListEncoding(t *testing.T) {
+func TestTokenBalancesUsesListEncodingUpToThreshold(t *testing.T) {
 	mapping := make(map[uint64]*uint256.Int, 0)
-	for index := 0; index < 17; index++ {
+	for index := 0; index < TokenTrieThreshold; index++ {
 		mapping[uint64(index+1)] = testU256(uint64(index*1000 + 42))
 	}
 
@@ -108,7 +108,7 @@ func TestTokenBalancesAlwaysUsesListEncoding(t *testing.T) {
 	b0.Commit()
 	data, err := b0.SerializeToBytes()
 	assert.NoError(t, err)
-	assert.Equal(t, byte(0), data[0])
+	assert.Equal(t, tokenBalanceListPrefix, data[0])
 
 	b1, err := NewTokenBalances(data)
 	assert.NoError(t, err)
@@ -118,9 +118,20 @@ func TestTokenBalancesAlwaysUsesListEncoding(t *testing.T) {
 	}
 }
 
+func TestTokenBalancesRejectsMoreThanThreshold(t *testing.T) {
+	mapping := make(map[uint64]*uint256.Int, 0)
+	for index := 0; index < TokenTrieThreshold+1; index++ {
+		mapping[uint64(index+1)] = testU256(uint64(index*1000 + 42))
+	}
+
+	b0 := NewTokenBalancesWithMap(mapping)
+	_, err := b0.SerializeToBytes()
+	assert.ErrorContains(t, err, "exceed")
+}
+
 func TestTokenBalancesRejectsTrieEncoding(t *testing.T) {
 	data := make([]byte, 33)
-	data[0] = byte(1)
+	data[0] = tokenBalanceTriePrefix
 
 	_, err := NewTokenBalances(data)
 	assert.ErrorContains(t, err, "trie")

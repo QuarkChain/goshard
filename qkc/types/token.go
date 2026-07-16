@@ -21,11 +21,25 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// TokenTrieThreshold is the maximum number of non-zero token balances supported
+// by this list-only implementation.
+const TokenTrieThreshold = 16
+
+const (
+	tokenBalanceListPrefix = byte(0)
+	tokenBalanceTriePrefix = byte(1)
+)
+
 type TokenBalancePair struct {
 	TokenID uint64
 	Balance *uint256.Int
 }
 
+// TokenBalances holds QKC account multi-token balances.
+//
+// Serialization uses list format (0x00 prefix) for up to TokenTrieThreshold
+// non-zero balances. Trie format (>16 non-zero balances) is not supported;
+// SerializeToBytes returns an error instead.
 type TokenBalances struct {
 	balances map[uint64]*uint256.Int
 }
@@ -112,7 +126,7 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	}
 
 	switch data[0] {
-	case byte(0):
+	case tokenBalanceListPrefix:
 		balanceList := make([]*TokenBalancePair, 0)
 		if err := rlp.DecodeBytes(data[1:], &balanceList); err != nil {
 			return nil, err
@@ -123,7 +137,7 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 			}
 			tokenBalances.balances[v.TokenID] = new(uint256.Int).Set(v.Balance)
 		}
-	case byte(1):
+	case tokenBalanceTriePrefix:
 		return nil, errors.New("token balance trie encoding is unsupported")
 	default:
 		return nil, fmt.Errorf("Unknown enum byte in token_balances:%v", data[0])
@@ -208,6 +222,10 @@ func (t *TokenBalances) Copy() *TokenBalances {
 }
 
 func (t *TokenBalances) SerializeToBytes() ([]byte, error) {
+	nonZeroEntries := t.nonZeroEntriesInBalancesCache()
+	if nonZeroEntries > TokenTrieThreshold {
+		return nil, fmt.Errorf("token balances exceed supported list size: %d > %d", nonZeroEntries, TokenTrieThreshold)
+	}
 	if t.Len() == 0 {
 		return nil, nil
 	}
@@ -223,7 +241,7 @@ func (t *TokenBalances) SerializeToBytes() ([]byte, error) {
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].TokenID < (list[j].TokenID) })
 	rlpData := new(bytes.Buffer)
-	rlpData.WriteByte(byte(0))
+	rlpData.WriteByte(tokenBalanceListPrefix)
 	err := rlp.Encode(rlpData, list)
 	if err != nil {
 		return nil, err
