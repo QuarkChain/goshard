@@ -82,8 +82,23 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 	// PING is handled internally by SlaveConnection in Python; register the
 	// built-in handler immediately so it works even if the caller never calls
 	// RegisterHandlers.
+	//
+	// ADD_XSHARD_TX_LIST_REQUEST and BATCH_ADD_XSHARD_TX_LIST_REQUEST are also
+	// registered here with stub handlers so inbound slave-to-slave RPCs are
+	// recognised and dispatched (responses preserve Python's wire format).
 	xc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
+		// ── Permanent connection handler ───────────────────────────────
+		// PING/PONG is the slave-to-slave identity exchange.
+
 		byte(wire.ClusterOpPing): xc.handlePing,
+
+		// ── Migration stubs ─────────────────────────────────────────────
+		// These handlers exist only to preserve protocol compatibility.
+		// Real implementations must be added outside the connection layer.
+		// After migration, remove these stub registrations and handlers.
+
+		byte(wire.ClusterOpAddXshardTxListRequest):      xc.handleAddXshardTxList,
+		byte(wire.ClusterOpBatchAddXshardTxListRequest): xc.handleBatchAddXshardTxList,
 	})
 
 	return xc
@@ -118,6 +133,40 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 		ID:              append([]byte(nil), x.localID...),
 		FullShardIDList: append([]uint32(nil), x.localFullShardIDList...),
 	}, nil
+}
+
+// handleAddXshardTxList is the built-in ADD_XSHARD_TX_LIST_REQUEST stub.
+// It returns error_code=0 so the protocol response is compatible with Python's
+// AddXshardTxListResponse wire format.
+func (x *XshardConn) handleAddXshardTxList(req any) (any, error) {
+	_ = req.(*wire.AddXshardTxListRequest)
+
+	// TODO: implement xshard transaction processing.
+	// Current implementation is a protocol compatibility stub only.
+	x.log.Warn("AddXshardTxList stub invoked — transaction will be discarded", "remote", x.RemoteAddr())
+	return &wire.AddXshardTxListResponse{ErrorCode: 0}, nil
+}
+
+// handleBatchAddXshardTxList is the built-in BATCH_ADD_XSHARD_TX_LIST_REQUEST
+// stub. It returns error_code=0 matching Python's response format.
+func (x *XshardConn) handleBatchAddXshardTxList(req any) (any, error) {
+	_ = req.(*wire.BatchAddXshardTxListRequest)
+
+	// TODO: implement xshard transaction processing.
+	// Current implementation is a protocol compatibility stub only.
+	x.log.Warn("BatchAddXshardTxList stub invoked — transactions will be discarded", "remote", x.RemoteAddr())
+	return &wire.BatchAddXshardTxListResponse{ErrorCode: 0}, nil
+}
+
+// SetRemoteIdentity sets the peer identity for outbound xshard connections that
+// completed PING-based verification without receiving a PING from the peer.
+// This matches Python's SlaveConnection, whose remote id is known at creation
+// time for outbound connections.
+func (x *XshardConn) SetRemoteIdentity(id []byte, shardList []uint32) {
+	x.stateMu.Lock()
+	defer x.stateMu.Unlock()
+	x.remoteID = append([]byte(nil), id...)
+	x.remoteFullShardIDList = append([]uint32(nil), shardList...)
 }
 
 // RegisterHandlers registers user-provided opcode handlers. PING is always

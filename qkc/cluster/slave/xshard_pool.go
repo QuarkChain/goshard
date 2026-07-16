@@ -63,6 +63,14 @@ func (p *XshardPool) Add(fullShardID uint32, conn *XshardConn) {
 	p.log.Info("added xshard connection", "full_shard_id", fullShardID, "remote", conn.RemoteAddr())
 }
 
+// HasSlaveID reports whether the pool already tracks a connection to the given
+// slave ID. This matches Python's slave_ids deduplication check before dialing.
+func (p *XshardPool) HasSlaveID(id []byte) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.slaveIDs[string(id)]
+}
+
 // VerifyAndAdd performs PING-based identity verification on an outbound
 // connection before adding it to the pool. It matches Python's
 // SlaveConnectionManager.connect_to_slave().
@@ -70,6 +78,14 @@ func (p *XshardPool) Add(fullShardID uint32, conn *XshardConn) {
 // The connection must already have been started (Start() called).
 // On verification failure the connection is closed.
 func (p *XshardPool) VerifyAndAdd(ctx context.Context, fullShardID uint32, conn *XshardConn, expectedID []byte, expectedShardList []uint32) error {
+	return p.VerifyAndAddToShards(ctx, conn, expectedID, expectedShardList, []uint32{fullShardID})
+}
+
+// VerifyAndAddToShards verifies an outbound xshard connection and indexes it by
+// every shard in localShards that is also advertised by the remote peer. This
+// mirrors Python's _add_slave_connection(), which indexes a verified slave for
+// each configured shard the slave covers.
+func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn, expectedID []byte, expectedShardList, localShards []uint32) error {
 	id, shardList, err := conn.SendPing(ctx)
 	if err != nil {
 		conn.Close()
@@ -89,7 +105,39 @@ func (p *XshardPool) VerifyAndAdd(ctx context.Context, fullShardID uint32, conn 
 			return fmt.Errorf("shard list mismatch for %s: expected %v, got %v", conn.RemoteAddr(), expectedShardList, shardList)
 		}
 	}
-	p.Add(fullShardID, conn)
+
+	// Outbound connections do not receive a PING from the peer, so the identity
+	// stored on the connection object must be set explicitly for cleanup.
+	conn.SetRemoteIdentity(id, shardList)
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		conn.Close()
+		return fmt.Errorf("xshard pool closed")
+	}
+
+	remoteID := string(id)
+	if remoteID != "" && p.slaveIDs[remoteID] {
+		p.mu.Unlock()
+		conn.Close()
+		return fmt.Errorf("duplicate slave connection rejected: %s", remoteID)
+	}
+	if remoteID != "" {
+		p.slaveIDs[remoteID] = true
+	}
+
+	for _, localShard := range localShards {
+		for _, remoteShard := range shardList {
+			if localShard == remoteShard {
+				p.conns[localShard] = append(p.conns[localShard], conn)
+				break
+			}
+		}
+	}
+	p.mu.Unlock()
+
+	p.log.Info("verified and added xshard connection", "remote_id", remoteID, "remote", conn.RemoteAddr())
 	return nil
 }
 
@@ -232,6 +280,7 @@ func (p *XshardPool) TrackInbound(conn *XshardConn) {
 //
 // Returns false if the connection closes before identity exchange completes.
 // The connection should already be tracked via TrackInbound before calling this.
+// On failure, the caller must close the connection and call RemoveInbound.
 func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 	if !conn.WaitUntilPingReceived() {
 		p.log.Warn("inbound xshard connection closed before ping", "remote", conn.RemoteAddr())
@@ -257,10 +306,33 @@ func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 	for _, shardID := range shardList {
 		p.conns[shardID] = append(p.conns[shardID], conn)
 	}
+
+	// Remove from inbound tracking now that the connection is indexed.
+	// This prevents stale entries in the inbound slice when the connection
+	// is later closed or reconnected.
+	for i, c := range p.inbound {
+		if c == conn {
+			p.inbound = append(p.inbound[:i], p.inbound[i+1:]...)
+			break
+		}
+	}
 	p.mu.Unlock()
 
 	p.log.Info("indexed inbound xshard connection", "remote_id", string(remoteID), "shards", shardList)
 	return true
+}
+
+// RemoveInbound removes a connection from the inbound tracking slice.
+// This is used when WatchAndIndex fails and the connection was never indexed.
+func (p *XshardPool) RemoveInbound(conn *XshardConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, c := range p.inbound {
+		if c == conn {
+			p.inbound = append(p.inbound[:i], p.inbound[i+1:]...)
+			return
+		}
+	}
 }
 
 // Close closes all connections in the pool and prevents new additions.
