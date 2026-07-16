@@ -14,7 +14,7 @@ make slave
 This installs the binary to `./build/bin/slave` (the same convention as `geth`).
 The commands below are run from the repo root so the relative config paths resolve.
 
-## Running a slave (milestone M3)
+## Running a slave
 
 The default action boots every shard assigned to `--node_id` and runs until
 interrupted — a drop-in for how pyquarkchain's `cluster.py` starts a slave:
@@ -38,7 +38,7 @@ Only geth's logging and file-based profiling debug flags are exposed. The debug
 flags that would open a socket — the `--pprof` HTTP server and `--pyroscope.*`
 push — are deliberately not registered, keeping the process free of network I/O.
 
-## Subcommands (milestone M1)
+## Subcommands
 
 ### `slave config`
 
@@ -95,11 +95,29 @@ The running devnet config works the same way:
 
 prints `hash: 0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d`.
 
+## Fixtures and pyquarkchain cross-validation
+
 Both real (singularity) cluster configs are checked in under
 [`qkc/config/singularity/`](../../qkc/config/singularity/) — `mainnet.json` and
-`devnet.json` (provenance/regeneration in that directory's README).
+`devnet.json`. They are copied verbatim from pyquarkchain; provenance and the
+regeneration steps live in [that directory's README](../../qkc/config/singularity/README.md).
 
-## Not yet implemented
+To cross-validate a `slave genesis` run against pyquarkchain, derive the same
+header there (swap the path for devnet) and compare with the `hash:` line:
 
-The `inspect` subcommand (read-only per-shard state dump from a datadir, no
-config needed) lands in milestone M4.
+```
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed (bare system python lacks e.g. aiohttp):
+python -c "
+import json
+from quarkchain.cluster.cluster_config import ClusterConfig
+from quarkchain.genesis import GenesisManager
+raw = json.load(open('mainnet/singularity/cluster_config_template.json'))
+h = GenesisManager(ClusterConfig.from_dict(raw).QUARKCHAIN).create_root_block().header
+print('hash', h.get_hash().hex())
+"
+```
+
+The shard-level `chain genesis` printed by `slave inspect` is the config
+descriptor's fingerprint, not a pyquarkchain minor-block hash; it becomes the
+real shard genesis block hash when the QKC block format (#1) lands.
