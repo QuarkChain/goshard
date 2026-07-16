@@ -216,9 +216,6 @@ func (t *TokenBalances) SerializeToBytes() ([]byte, error) {
 			Balance: v,
 		})
 	}
-	if len(list) == 0 {
-		return nil, nil
-	}
 	sort.Slice(list, func(i, j int) bool { return list[i].TokenID < (list[j].TokenID) })
 	rlpData := new(bytes.Buffer)
 	rlpData.WriteByte(byte(0))

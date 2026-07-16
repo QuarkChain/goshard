@@ -129,6 +129,26 @@ func TestTokenBalancesRLPRoundTripWithoutDB(t *testing.T) {
 	assert.Equal(t, new(uint256.Int), decoded.GetTokenBalance(2))
 }
 
+func TestTokenBalancesZeroOnlyStateEncodingPythonGolden(t *testing.T) {
+	empty := NewEmptyTokenBalances()
+	emptyInner, err := empty.SerializeToBytes()
+	assert.NoError(t, err)
+	assert.Empty(t, emptyInner)
+	emptyOuter, err := rlp.EncodeToBytes(empty)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{0x80}, emptyOuter)
+
+	zeroOnly := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		1: testU256(0),
+	})
+	zeroOnlyInner, err := zeroOnly.SerializeToBytes()
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{0x00, 0xc0}, zeroOnlyInner)
+	zeroOnlyOuter, err := rlp.EncodeToBytes(zeroOnly)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{0x82, 0x00, 0xc0}, zeroOnlyOuter)
+}
+
 func TestTokenBalancesQKCSerializePythonGolden(t *testing.T) {
 	golden, err := hex.DecodeString("00000002020ca0016d020def030f423f")
 	assert.NoError(t, err)
