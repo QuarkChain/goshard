@@ -79,20 +79,9 @@ Both real (singularity) cluster configs are checked in under
 regeneration steps live in [that directory's README](../../qkc/config/singularity/README.md).
 
 To cross-validate a `slave genesis` run against pyquarkchain, derive the same
-header there (swap the path for devnet) and compare with the `hash:` line:
-
-```
-# from the root of a pyquarkchain checkout, inside a virtualenv with its
-# requirements installed (bare system python lacks e.g. aiohttp):
-python -c "
-import json
-from quarkchain.cluster.cluster_config import ClusterConfig
-from quarkchain.genesis import GenesisManager
-raw = json.load(open('mainnet/singularity/cluster_config_template.json'))
-h = GenesisManager(ClusterConfig.from_dict(raw).QUARKCHAIN).create_root_block().header
-print('hash', h.get_hash().hex())
-"
-```
+header there with the command in that README's
+[Pinned root-genesis values](../../qkc/config/singularity/README.md#pinned-root-genesis-values)
+section and compare its `hash` output with the `hash:` line printed here.
 
 The shard-level `chain genesis` printed by `slave inspect` is the config
 descriptor's fingerprint, not a pyquarkchain minor-block hash; it becomes the
