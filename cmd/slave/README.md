@@ -31,7 +31,7 @@ an ephemeral in-memory database and nothing is written to disk. `^C` (or SIGTERM
 shuts every shard down cleanly and exits 0; a second signal force-quits. The
 handler is installed before any resource opens, so a signal that lands mid-boot
 is honored as soon as boot settles. Rerunning against the same datadir validates
-the stored genesis metadata against the config (`existing genesis validated`)
+the stored genesis record against the config (`existing genesis validated`)
 and refuses to start if the config changed since initialization.
 
 Only geth's logging and file-based profiling debug flags are exposed. The debug
