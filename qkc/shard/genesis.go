@@ -80,7 +80,7 @@ func petersburgChainConfig(ethChainID uint64) *params.ChainConfig {
 // TODO(#1): remove this surrogate when the real chain commits the QKC minor
 // genesis; preserve its chain-rule compatibility check in the native setup path.
 // Fingerprint returns a deterministic identity hash of the descriptor. It is what
-// the stub chain reports as its genesis hash and what the genesis metadata records
+// the stub chain reports as its genesis hash and what the genesis record captures
 // as ChainGenesisHash, so a config change is caught on reopen. It is not
 // pyquarkchain's minor-block genesis hash — reproducing that requires the QKC
 // block format and state materialization, both owned by the shard-chain task.

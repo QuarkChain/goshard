@@ -35,7 +35,7 @@ func bootEnv(t *testing.T, path string) (*config.SlaveContext, *types.RootBlockH
 	return ctx, root
 }
 
-// TODO(#1): replace the stub fingerprint and GenesisMeta assertions with the
+// TODO(#1): replace the stub fingerprint and GenesisRecord assertions with the
 // real QKC minor genesis/head and native reopen compatibility checks.
 // TestShardNewAndReopen constructs a single shard from each real network config,
 // stops it, and verifies that the same database reopens cleanly.
@@ -70,17 +70,17 @@ func TestShardNewAndReopen(t *testing.T) {
 				t.Errorf("head/genesis hash = %s/%s, want %s", head, s.Chain().GenesisHash(), want)
 			}
 
-			// The metadata record links the shard to the root genesis.
-			meta, err := ReadGenesisMeta(s.DB())
-			if err != nil || meta == nil {
-				t.Fatalf("ReadGenesisMeta = %v, %v", meta, err)
+			// The genesis record links the shard to the root genesis.
+			rec, err := ReadGenesisRecord(s.DB())
+			if err != nil || rec == nil {
+				t.Fatalf("ReadGenesisRecord = %v, %v", rec, err)
 			}
 			rootHash := root.Hash()
-			if meta.FullShardID != firstShardID || meta.RootGenesisHash != rootHash ||
-				meta.HashPrevRootBlock != rootHash ||
-				meta.XShardCursor != (XShardCursor{RootBlockHeight: uint64(root.Number)}) ||
-				meta.ChainGenesisHash != descriptor.Fingerprint() {
-				t.Errorf("stored metadata %+v inconsistent with config derivation", meta)
+			if rec.FullShardID != firstShardID || rec.RootGenesisHash != rootHash ||
+				rec.HashPrevRootBlock != rootHash ||
+				rec.XShardCursor != (XShardCursor{RootBlockHeight: uint64(root.Number)}) ||
+				rec.ChainGenesisHash != descriptor.Fingerprint() {
+				t.Errorf("stored record %+v inconsistent with config derivation", rec)
 			}
 
 			if err := s.Stop(); err != nil {
@@ -117,8 +117,8 @@ func TestShardMemDB(t *testing.T) {
 	if height, head := s.Chain().Head(); height != 0 || head != s.Chain().GenesisHash() {
 		t.Errorf("head = %d/%s, want 0 at the genesis hash", height, head)
 	}
-	if meta, err := ReadGenesisMeta(s.DB()); err != nil || meta == nil {
-		t.Fatalf("ReadGenesisMeta = %v, %v", meta, err)
+	if rec, err := ReadGenesisRecord(s.DB()); err != nil || rec == nil {
+		t.Fatalf("ReadGenesisRecord = %v, %v", rec, err)
 	}
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -171,7 +171,7 @@ func TestShardReopenRootGenesisMismatch(t *testing.T) {
 	}
 	_, err = New(ctx, branch, root2, datadir, Options{})
 	if err == nil || !strings.Contains(err.Error(), "cluster config changed since initialization") {
-		t.Fatalf("reopen err = %v, want loud metadata mismatch", err)
+		t.Fatalf("reopen err = %v, want loud record mismatch", err)
 	}
 }
 
@@ -191,10 +191,10 @@ func (failingChainService) New(ethdb.Database, *Genesis) (ShardChain, error) {
 	return nil, errors.New("injected chain failure")
 }
 
-// TestShardFailedFirstBootLeavesNoMetadata: a boot that fails at chain
-// construction commits no genesis metadata, so the retry takes the fresh path
+// TestShardFailedFirstBootLeavesNoRecord: a boot that fails at chain
+// construction commits no genesis record, so the retry takes the fresh path
 // instead of reporting a never-validated record as existing.
-func TestShardFailedFirstBootLeavesNoMetadata(t *testing.T) {
+func TestShardFailedFirstBootLeavesNoRecord(t *testing.T) {
 	ctx, root := bootEnv(t, fixtureMainnet)
 	datadir := t.TempDir()
 	branch := account.NewBranch(firstShardID)
@@ -210,10 +210,10 @@ func TestShardFailedFirstBootLeavesNoMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen chaindb: %v", err)
 	}
-	meta, err := ReadGenesisMeta(rawdb.NewDatabase(kv))
+	rec, err := ReadGenesisRecord(rawdb.NewDatabase(kv))
 	kv.Close()
-	if err != nil || meta != nil {
-		t.Fatalf("metadata after failed boot = %+v, %v, want none", meta, err)
+	if err != nil || rec != nil {
+		t.Fatalf("record after failed boot = %+v, %v, want none", rec, err)
 	}
 
 	// The retry succeeds and commits the record.
@@ -221,8 +221,8 @@ func TestShardFailedFirstBootLeavesNoMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("shard.New(retry): %v", err)
 	}
-	if meta, err := ReadGenesisMeta(s.DB()); err != nil || meta == nil {
-		t.Fatalf("ReadGenesisMeta after retry = %v, %v", meta, err)
+	if rec, err := ReadGenesisRecord(s.DB()); err != nil || rec == nil {
+		t.Fatalf("ReadGenesisRecord after retry = %v, %v", rec, err)
 	}
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)

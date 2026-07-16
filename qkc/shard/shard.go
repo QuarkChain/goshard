@@ -2,7 +2,7 @@
 
 // Package shard hosts one QuarkChain shard inside the slave process: an isolated
 // per-shard chaindb, the genesis descriptor derived from config, the temporary
-// genesis metadata record, and the chain behind the ShardChain seam. It performs
+// genesis record, and the chain behind the ShardChain seam. It performs
 // no network I/O.
 package shard
 
@@ -63,7 +63,7 @@ type Shard struct {
 // New constructs one shard: it opens an isolated pebble chaindb under
 // {datadir}/shard-0x{full_shard_id}/ — or an ephemeral in-memory database when
 // datadir is empty, pyquarkchain's mem-db mode (use_mem_db, cluster_config.py:247)
-// — writes or reconciles the genesis metadata, and constructs the chain through
+// — writes or reconciles the genesis record, and constructs the chain through
 // the ShardChain seam. On any failure the database is closed before returning,
 // so the datadir stays reopenable.
 func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.RootBlockHeader, datadir string, opts Options) (*Shard, error) {
@@ -93,10 +93,10 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 	}
 
 	rootHash := rootGenesis.Hash()
-	// TODO(#1): delete this metadata reconciliation/write path when the real
+	// TODO(#1): delete this record reconciliation/write path when the real
 	// chain owns canonical QKC genesis and chain-config compatibility checks.
-	expected := &GenesisMeta{
-		Version:           genesisMetaVersion,
+	expected := &GenesisRecord{
+		Version:           genesisRecordVersion,
 		FullShardID:       fullShardID,
 		RootGenesisHash:   rootHash,
 		HashPrevRootBlock: rootHash,
@@ -105,7 +105,7 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		XShardCursor:     XShardCursor{RootBlockHeight: uint64(rootGenesis.Number)},
 		ChainGenesisHash: genesis.Fingerprint(),
 	}
-	existed, err := ReconcileGenesisMeta(db, expected, dbPath)
+	existed, err := ReconcileGenesisRecord(db, expected, dbPath)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -116,9 +116,9 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		db.Close()
 		return nil, fmt.Errorf("shard 0x%08x: construct chain: %w", fullShardID, err)
 	}
-	// The seam's genesis must be the one the metadata records. The stub derives
+	// The seam's genesis must be the one the record captures. The stub derives
 	// both from the descriptor, so this only fires when a chain implementation
-	// disagrees with the record — the moment the metadata scaffold must go.
+	// disagrees with the record — the moment the record scaffold must go.
 	if got := chain.GenesisHash(); got != expected.ChainGenesisHash {
 		chain.Stop()
 		db.Close()
@@ -132,12 +132,12 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		// Committed only after the chain stands at this genesis: a boot that
 		// failed earlier left no record, so the retry re-runs the fresh path
 		// instead of reporting a never-validated record as existing.
-		if err := WriteGenesisMeta(db, expected); err != nil {
+		if err := WriteGenesisRecord(db, expected); err != nil {
 			chain.Stop()
 			db.Close()
-			return nil, fmt.Errorf("shard 0x%08x: write genesis metadata (db %s): %w", fullShardID, dbPath, err)
+			return nil, fmt.Errorf("shard 0x%08x: write genesis record (db %s): %w", fullShardID, dbPath, err)
 		}
-		log.Info("genesis metadata written", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
+		log.Info("genesis record written", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", expected.ChainGenesisHash)
 	}
 
 	return &Shard{Branch: branch, cfg: shardCfg, db: db, chain: chain}, nil
