@@ -109,6 +109,8 @@ func TestNewGenesisEthChainIDNoOverflow(t *testing.T) {
 	}
 }
 
+// TODO(#1): replace this surrogate-identity coverage with the real minor genesis
+// hash plus a separate native chain-rule compatibility test.
 // TestGenesisFingerprint: the fingerprint is deterministic and sensitive to every
 // descriptor field Reconcile must catch a change in.
 func TestGenesisFingerprint(t *testing.T) {

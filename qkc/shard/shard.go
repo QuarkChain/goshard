@@ -9,6 +9,8 @@ package shard
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -26,6 +28,25 @@ const (
 	dbCacheMB = 16
 	dbHandles = 16
 )
+
+// DBDirName returns the chaindb directory name one shard uses under the datadir.
+func DBDirName(fullShardID uint32) string {
+	return fmt.Sprintf("shard-0x%08x", fullShardID)
+}
+
+// ParseDBDirName reports the full shard id a chaindb directory name encodes, or
+// ok=false when the name is not a canonical shard chaindb directory name.
+func ParseDBDirName(name string) (fullShardID uint32, ok bool) {
+	hexPart, found := strings.CutPrefix(name, "shard-0x")
+	if !found || len(hexPart) != 8 {
+		return 0, false
+	}
+	id, err := strconv.ParseUint(hexPart, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(id), true
+}
 
 // Shard is one shard chain hosted by the slave: its Branch (the registry key), its
 // resolved config, an isolated chaindb, and the chain behind the ShardChain seam.
@@ -63,7 +84,7 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 	} else {
 		// A directory per shard (not pyquarkchain's shard-{id}.db file): the
 		// directory form is what geth's rawdb expects.
-		dbPath = filepath.Join(datadir, fmt.Sprintf("shard-0x%08x", fullShardID))
+		dbPath = filepath.Join(datadir, DBDirName(fullShardID))
 		kv, err := pebble.New(dbPath, dbCacheMB, dbHandles, fmt.Sprintf("qkc/shard/0x%08x/", fullShardID), false)
 		if err != nil {
 			return nil, fmt.Errorf("shard 0x%08x: open chaindb %s: %w", fullShardID, dbPath, err)
@@ -72,6 +93,8 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 	}
 
 	rootHash := rootGenesis.Hash()
+	// TODO(#1): delete this metadata reconciliation/write path when the real
+	// chain owns canonical QKC genesis and chain-config compatibility checks.
 	expected := &GenesisMeta{
 		Version:           genesisMetaVersion,
 		FullShardID:       fullShardID,
