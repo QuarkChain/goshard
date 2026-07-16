@@ -155,8 +155,7 @@ type rpcResult struct {
 type rpcConn struct {
 	frameTransport
 
-	// conn is the underlying net.Conn for TCP-based connections. It is kept
-	// as a separate field so existing code/tests can access it directly.
+	// conn is the underlying net.Conn for TCP-based connections.
 	// It is nil for virtual transports (PeerConn).
 	conn net.Conn
 
@@ -233,9 +232,14 @@ func newRPCConnFromConn(
 }
 
 // Start transitions the connection to ACTIVE and launches the read loop.
+// If the connection is already closed, Start is a no-op.
 func (c *rpcConn) Start() {
 	c.startOnce.Do(func() {
 		c.stateMu.Lock()
+		if c.state == ConnectionStateClosed {
+			c.stateMu.Unlock()
+			return
+		}
 		c.state = ConnectionStateActive
 		close(c.activeChan)
 		c.stateMu.Unlock()
@@ -447,14 +451,11 @@ func (c *rpcConn) readLoop() {
 					continue
 				}
 				c.pendingMu.Unlock()
-				// INTENTIONAL DEVIATION FROM PYTHON: Python closes connection on
-				// unexpected RPC response (rpc_id not in rpc_future_map). Go keeps
-				// connection open and logs error. This is more robust for distributed
-				// systems where late/duplicate responses are normal after timeout.
-				// If strict Python compatibility is needed, change to: return
+				// Match Python's behavior: close on unexpected RPC response
+				// (rpc_id not in rpc_future_map).
 				c.log.Error("unexpected rpc response (rpc_id not in pending map)",
 					"rpcid", frame.RPCID, "opcode", frame.Opcode)
-				continue
+				return
 			}
 			c.log.Warn("unsupported opcode", "opcode", frame.Opcode)
 			return
