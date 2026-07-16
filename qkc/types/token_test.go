@@ -78,11 +78,24 @@ func TestTokenBalances_Add(t *testing.T) {
 	m1 := make(map[uint64]*uint256.Int)
 	m1[3234] = testU256(10)
 	tb1 := NewTokenBalancesWithMap(m1)
-	tb.Add(tb1.balances)
+	assert.NoError(t, tb.Add(tb1.balances))
 	m3 := make(map[uint64]*uint256.Int)
 	m3[3567] = testU256(0)
 	m3[3234] = testU256(10)
 	check("", tb.balances, m3)
+}
+
+func TestTokenBalancesAddRejectsOverflow(t *testing.T) {
+	max := new(uint256.Int).SetAllOne()
+	tb := NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		1: max,
+	})
+
+	err := tb.Add(map[uint64]*uint256.Int{
+		1: testU256(1),
+	})
+	assert.ErrorContains(t, err, "overflow")
+	assert.Equal(t, max, tb.GetTokenBalance(1))
 }
 
 func TestTokenBalancesAlwaysUsesListEncoding(t *testing.T) {

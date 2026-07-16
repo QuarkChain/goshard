@@ -137,17 +137,22 @@ func (t *TokenBalances) Commit() {
 	// share code with older trie-backed implementations.
 }
 
-func (t *TokenBalances) Add(other map[uint64]*uint256.Int) {
+func (t *TokenBalances) Add(other map[uint64]*uint256.Int) error {
 	for k, v := range other {
 		if v == nil {
 			continue
 		}
 		if data, ok := t.balances[k]; ok {
-			t.balances[k] = new(uint256.Int).Add(v, data)
+			sum, overflow := new(uint256.Int).AddOverflow(data, v)
+			if overflow {
+				return fmt.Errorf("token balance overflow for token %d", k)
+			}
+			t.balances[k] = sum
 		} else {
 			t.balances[k] = new(uint256.Int).Set(v)
 		}
 	}
+	return nil
 }
 
 func (t *TokenBalances) SetValue(amount *uint256.Int, tokenID uint64) {
