@@ -217,11 +217,6 @@ func TestXshardConn_RejectEmptyShardList(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error due to connection close, got nil")
 	}
-	// The error should be connection closed (readLoop returns after handler error).
-	if err != ErrConnectionClosed {
-		t.Logf("got error: %v (expected ErrConnectionClosed or timeout)", err)
-	}
-
 	// Python: id is recorded BEFORE close_with_error is called.
 	// The wrapper records the id first, then checks shard list.
 	if string(server.RemoteID()) != "bad-slave" {
@@ -245,10 +240,6 @@ func TestXshardConn_UnsupportedOpcodeClosesConnection(t *testing.T) {
 	_, err := client.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), []byte("payload"))
 	if err == nil {
 		t.Fatal("expected error due to connection close, got nil")
-	}
-	// Connection should be closed by server due to unsupported opcode.
-	if err != ErrConnectionClosed {
-		t.Logf("got error: %v (expected ErrConnectionClosed or timeout)", err)
 	}
 }
 
