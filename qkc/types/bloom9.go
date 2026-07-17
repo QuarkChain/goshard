@@ -18,7 +18,7 @@ func CreateBloom(receipts Receipts) Bloom {
 			if log == nil {
 				continue
 			}
-			bloom.Add(log.Recipient.Bytes())
+			bloom.Add(log.Address.Bytes())
 			for _, topic := range log.Topics {
 				bloom.Add(topic.Bytes())
 			}

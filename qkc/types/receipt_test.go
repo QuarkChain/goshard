@@ -6,6 +6,7 @@ package types
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -13,8 +14,52 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
+const (
+	receiptPostStateHex = "df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28"
+	receiptRecipientHex = "d3f86deb4a2bbf85048b3e790460c40dbab1f621"
+	receiptTopic0Hex    = "a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97"
+	receiptTopic1Hex    = "297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba495"
+	receiptBlockHashHex = "1111111111111111111111111111111111111111111111111111111111111111"
+	receiptTxHashHex    = "2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+var (
+	receiptBloomHex = strings.Repeat("00", 254) + "03ff"
+
+	receiptClusterLogHex = receiptRecipientHex +
+		"02" + receiptTopic0Hex + receiptTopic1Hex +
+		"00000003" + "010203" +
+		"000000000000000a" +
+		receiptBlockHashHex +
+		"00000064" +
+		receiptTxHashHex +
+		"000000c8"
+
+	receiptClusterReceiptHex = "20" + receiptPostStateHex +
+		"00000000000003e8" +
+		"0000000000000384" +
+		receiptBloomHex +
+		receiptRecipientHex + "0000000a" +
+		"00000001" + receiptClusterLogHex
+
+	receiptRlpHex = "f901a2" +
+		"a0" + receiptPostStateHex +
+		"8203e8" +
+		"b90100" + receiptBloomHex +
+		"f85f" +
+		"f85d94" + receiptRecipientHex +
+		"f842a0" + receiptTopic0Hex +
+		"a0" + receiptTopic1Hex +
+		"83010203" +
+		"94" + receiptRecipientHex +
+		"840000000a"
+)
+
 func TestReceiptSerializing(t *testing.T) {
-	receiptEnc := common.FromHex("497a6ffb5f4a236c2aece4e41ea52f703b255b55b16e439ed44f358017a29eeb20df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a2800000000000003e80000000000000384000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003ffd3f86deb4a2bbf85048b3e790460c40dbab1f6210000000a00000001d3f86deb4a2bbf85048b3e790460c40dbab1f62102a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba49500000003010203000000000000000adf227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a2800000064df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28000000c8")
+	// Generated from pyquarkchain's quarkchain.core.TransactionReceipt field order:
+	// success, gas_used, prev_gas_used, bloom, contract_address, logs. There is no
+	// leading tx_hash field. The nested log uses different block_hash and tx_hash.
+	receiptEnc := common.FromHex(receiptClusterReceiptHex)
 	var receipt Receipt
 	bb := serialize.NewByteBuffer(receiptEnc)
 	if err := serialize.Deserialize(bb, &receipt); err != nil {
@@ -31,32 +76,27 @@ func TestReceiptSerializing(t *testing.T) {
 			t.Errorf("%s mismatch: got %v, want %v", f, got, want)
 		}
 	}
-	check("TxHash", common.Bytes2Hex(receipt.TxHash.Bytes()), "497a6ffb5f4a236c2aece4e41ea52f703b255b55b16e439ed44f358017a29eeb")
-	check("PostState", common.Bytes2Hex(receipt.PostState), "df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28")
+	check("PostState", common.Bytes2Hex(receipt.PostState), receiptPostStateHex)
 	check("Status", receipt.Status, uint64(0))
 	check("CumulativeGasUsed", receipt.CumulativeGasUsed, uint64(1000))
-	check("Bloom", common.Bytes2Hex(receipt.Bloom.Bytes()), "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003ff")
+	check("Bloom", common.Bytes2Hex(receipt.Bloom.Bytes()), receiptBloomHex)
 	check("Len(Logs)", len(receipt.Logs), 1)
-	check("Logs[0]Recipient", common.Bytes2Hex(receipt.Logs[0].Recipient.Bytes()), "d3f86deb4a2bbf85048b3e790460c40dbab1f621")
+	check("Logs[0]Address", common.Bytes2Hex(receipt.Logs[0].Address.Bytes()), receiptRecipientHex)
 	check("Logs[0]Topics", len(receipt.Logs[0].Topics), 2)
-	check("Logs[0]Topics[0]", common.Bytes2Hex(receipt.Logs[0].Topics[0].Bytes()), "a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97")
-	check("Logs[0]Topics[1]", common.Bytes2Hex(receipt.Logs[0].Topics[1].Bytes()), "297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba495")
+	check("Logs[0]Topics[0]", common.Bytes2Hex(receipt.Logs[0].Topics[0].Bytes()), receiptTopic0Hex)
+	check("Logs[0]Topics[1]", common.Bytes2Hex(receipt.Logs[0].Topics[1].Bytes()), receiptTopic1Hex)
 	check("Logs[0]data", common.Bytes2Hex(receipt.Logs[0].Data), "010203")
 	check("Logs[0]BlockNumber", receipt.Logs[0].BlockNumber, uint64(10))
-	check("Logs[0]TxHash", common.Bytes2Hex(receipt.Logs[0].TxHash.Bytes()), "df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28")
-	check("Logs[0]TxIndex", receipt.Logs[0].TxIndex, uint32(100))
-	check("Logs[0]BlockHash", common.Bytes2Hex(receipt.Logs[0].BlockHash.Bytes()), "df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28")
-	check("Logs[0]Index", receipt.Logs[0].Index, uint32(200))
-	check("ContractAddress", common.Bytes2Hex(receipt.ContractAddress.Bytes()), "d3f86deb4a2bbf85048b3e790460c40dbab1f621")
+	check("Logs[0]BlockHash", common.Bytes2Hex(receipt.Logs[0].BlockHash.Bytes()), receiptBlockHashHex)
+	check("Logs[0]TxIndex", receipt.Logs[0].TxIndex, uint(100))
+	check("Logs[0]TxHash", common.Bytes2Hex(receipt.Logs[0].TxHash.Bytes()), receiptTxHashHex)
+	check("Logs[0]Index", receipt.Logs[0].Index, uint(200))
+	check("ContractAddress", common.Bytes2Hex(receipt.ContractAddress.Bytes()), receiptRecipientHex)
 	check("ContractFullShardKey", receipt.ContractFullShardKey, uint32(10))
 	check("GasUsed", receipt.GasUsed, uint64(100))
 	check("serialize", common.Bytes2Hex(bytes), common.Bytes2Hex(receiptEnc))
 
-	receiptRlpEnc := common.FromHex("f901a2a0df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a288203e8b90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003fff85ff85d94d3f86deb4a2bbf85048b3e790460c40dbab1f621f842a0a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97a0297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba4958301020394d3f86deb4a2bbf85048b3e790460c40dbab1f621840000000a")
-	if err != nil {
-		t.Fatal("Serialize error: ", err)
-	}
-
+	receiptRlpEnc := common.FromHex(receiptRlpHex)
 	var receiptRlp Receipt
 	if err := rlp.DecodeBytes(receiptRlpEnc, &receiptRlp); err != nil {
 		t.Fatal("DecodeBytes error: ", err)
@@ -67,18 +107,17 @@ func TestReceiptSerializing(t *testing.T) {
 		t.Fatal("Serialize error: ", err)
 	}
 
-	check("PostState", common.Bytes2Hex(receiptRlp.PostState), "df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28")
+	check("PostState", common.Bytes2Hex(receiptRlp.PostState), receiptPostStateHex)
 	check("Status", receiptRlp.Status, uint64(0))
 	check("CumulativeGasUsed", receiptRlp.CumulativeGasUsed, uint64(1000))
-	check("Bloom", common.Bytes2Hex(receiptRlp.Bloom.Bytes()), "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003ff")
+	check("Bloom", common.Bytes2Hex(receiptRlp.Bloom.Bytes()), receiptBloomHex)
 	check("Len(Logs)", len(receiptRlp.Logs), 1)
-	check("Logs[0]Recipient", common.Bytes2Hex(receiptRlp.Logs[0].Recipient.Bytes()), "d3f86deb4a2bbf85048b3e790460c40dbab1f621")
+	check("Logs[0]Address", common.Bytes2Hex(receiptRlp.Logs[0].Address.Bytes()), receiptRecipientHex)
 	check("Logs[0]Topics", len(receiptRlp.Logs[0].Topics), 2)
-	check("Logs[0]Topics[0]", common.Bytes2Hex(receiptRlp.Logs[0].Topics[0].Bytes()), "a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97")
-	check("Logs[0]Topics[1]", common.Bytes2Hex(receiptRlp.Logs[0].Topics[1].Bytes()), "297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba495")
+	check("Logs[0]Topics[0]", common.Bytes2Hex(receiptRlp.Logs[0].Topics[0].Bytes()), receiptTopic0Hex)
+	check("Logs[0]Topics[1]", common.Bytes2Hex(receiptRlp.Logs[0].Topics[1].Bytes()), receiptTopic1Hex)
 	check("Logs[0]data", common.Bytes2Hex(receiptRlp.Logs[0].Data), "010203")
-	check("rlpContractAddress", common.Bytes2Hex(receiptRlp.ContractAddress.Bytes()), "d3f86deb4a2bbf85048b3e790460c40dbab1f621")
+	check("rlpContractAddress", common.Bytes2Hex(receiptRlp.ContractAddress.Bytes()), receiptRecipientHex)
 	check("ContractFullShardKey", receiptRlp.ContractFullShardKey, uint32(10))
 	check("rlpserialize", common.Bytes2Hex(bytes), common.Bytes2Hex(receiptRlpEnc))
-
 }

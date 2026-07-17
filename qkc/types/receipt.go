@@ -9,10 +9,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -36,11 +38,11 @@ const (
 // Receipt represents the results of a transaction.
 type Receipt struct {
 	// Consensus fields
-	PostState         []byte `json:"root"`
-	Status            uint64 `json:"status"`
-	CumulativeGasUsed uint64 `json:"cumulativeGasUsed" gencodec:"required"`
-	Bloom             Bloom  `json:"logsBloom"         gencodec:"required"`
-	Logs              []*Log `json:"logs"              gencodec:"required"`
+	PostState         []byte           `json:"root"`
+	Status            uint64           `json:"status"`
+	CumulativeGasUsed uint64           `json:"cumulativeGasUsed" gencodec:"required"`
+	Bloom             Bloom            `json:"logsBloom"         gencodec:"required"`
+	Logs              []*coretypes.Log `json:"logs"              gencodec:"required"`
 
 	// Implementation fields (don't reorder!)
 	TxHash               common.Hash       `json:"transactionHash" gencodec:"required"`
@@ -56,23 +58,12 @@ type receiptMarshaling struct {
 	GasUsed           hexutil.Uint64
 }
 
-// receiptSer is the serialize .
-type receiptSer struct {
-	TxHash            common.Hash
-	PostStateOrStatus []byte
-	CumulativeGasUsed uint64
-	PrevGasUsed       uint64
-	Bloom             Bloom
-	ContractAddress   account.Address
-	Logs              []*Log `bytesizeofslicelen:"4"`
-}
-
 // receiptRLP is the consensus encoding of a receipt.
 type receiptRLP struct {
 	PostStateOrStatus    []byte
 	CumulativeGasUsed    uint64
 	Bloom                Bloom
-	Logs                 []*Log
+	Logs                 []*coretypes.Log
 	ContractAddress      []byte
 	ContractFullShardKey *Uint32
 }
@@ -84,8 +75,19 @@ type receiptStorageRLP struct {
 	TxHash               common.Hash
 	ContractAddress      account.Recipient
 	ContractFullShardKey uint32
-	Logs                 []*LogForStorage
+	Logs                 []*receiptStorageLog
 	GasUsed              uint64
+}
+
+type receiptStorageLog struct {
+	Recipient   account.Recipient
+	Topics      []common.Hash
+	Data        []byte
+	BlockNumber uint64
+	TxHash      common.Hash
+	TxIndex     uint32
+	BlockHash   common.Hash
+	Index       uint32
 }
 
 // NewReceipt creates a barebone transaction receipt, copying the init fields.
@@ -101,35 +103,44 @@ func NewReceipt(root []byte, failed bool, cumulativeGasUsed uint64) *Receipt {
 
 // Deserialize deserialize the QKC minor block
 func (r *Receipt) Deserialize(bb *serialize.ByteBuffer) error {
-	var rs receiptSer
+	var rs ClusterTransactionReceipt
 	if err := serialize.Deserialize(bb, &rs); err != nil {
 		return err
 	}
-	if err := r.setStatus(rs.PostStateOrStatus); err != nil {
+	if err := r.setStatus(rs.Success); err != nil {
 		return err
 	}
-
-	r.TxHash, r.CumulativeGasUsed, r.Bloom, r.Logs, r.GasUsed, r.ContractAddress, r.ContractFullShardKey = rs.TxHash,
-		rs.CumulativeGasUsed, rs.Bloom, rs.Logs, rs.CumulativeGasUsed-rs.PrevGasUsed, rs.ContractAddress.Recipient,
-		rs.ContractAddress.FullShardKey
+	if rs.PrevGasUsed > rs.GasUsed {
+		return fmt.Errorf("prev gas used %d exceeds cumulative gas used %d", rs.PrevGasUsed, rs.GasUsed)
+	}
+	r.CumulativeGasUsed, r.Bloom, r.GasUsed, r.ContractAddress, r.ContractFullShardKey = rs.GasUsed, rs.Bloom,
+		rs.GasUsed-rs.PrevGasUsed, rs.ContractAddress.Recipient, rs.ContractAddress.FullShardKey
+	r.Logs = make([]*coretypes.Log, len(rs.Logs))
+	for i, log := range rs.Logs {
+		r.Logs[i] = log.toCoreLog()
+	}
 	return nil
 }
 
 // Serialize serialize the QKC minor block.
 func (r *Receipt) Serialize(w *[]byte) error {
-	return serialize.Serialize(w, receiptSer{
-		r.TxHash,
-		r.statusEncoding(),
-		r.CumulativeGasUsed,
-		r.GetPrevGasUsed(),
-		r.Bloom,
-		account.Address{Recipient: r.ContractAddress, FullShardKey: r.ContractFullShardKey},
-		r.Logs,
-	})
+	receipt, err := newClusterTransactionReceipt(r)
+	if err != nil {
+		return err
+	}
+	return receipt.Serialize(w)
 }
 
 func (r *Receipt) GetPrevGasUsed() uint64 {
-	return r.CumulativeGasUsed - r.GasUsed
+	prev, _ := r.prevGasUsed()
+	return prev
+}
+
+func (r *Receipt) prevGasUsed() (uint64, error) {
+	if r.GasUsed > r.CumulativeGasUsed {
+		return 0, fmt.Errorf("gas used %d exceeds cumulative gas used %d", r.GasUsed, r.CumulativeGasUsed)
+	}
+	return r.CumulativeGasUsed - r.GasUsed, nil
 }
 
 // EncodeRLP implements rlp.Encoder, and flattens the consensus fields of a receipt
@@ -194,7 +205,7 @@ func (r *Receipt) statusEncoding() []byte {
 func (r *Receipt) Size() common.StorageSize {
 	size := common.StorageSize(unsafe.Sizeof(*r)) + common.StorageSize(len(r.PostState))
 
-	size += common.StorageSize(len(r.Logs)) * common.StorageSize(unsafe.Sizeof(Log{}))
+	size += common.StorageSize(len(r.Logs)) * common.StorageSize(unsafe.Sizeof(coretypes.Log{}))
 	for _, log := range r.Logs {
 		size += common.StorageSize(len(log.Topics)*common.HashLength + len(log.Data))
 	}
@@ -215,11 +226,15 @@ func (r *ReceiptForStorage) EncodeRLP(w io.Writer) error {
 		TxHash:               r.TxHash,
 		ContractAddress:      r.ContractAddress,
 		ContractFullShardKey: r.ContractFullShardKey,
-		Logs:                 make([]*LogForStorage, len(r.Logs)),
+		Logs:                 make([]*receiptStorageLog, len(r.Logs)),
 		GasUsed:              r.GasUsed,
 	}
 	for i, log := range r.Logs {
-		enc.Logs[i] = (*LogForStorage)(log)
+		storageLog, err := logForStorage(log)
+		if err != nil {
+			return fmt.Errorf("log %d: %w", i, err)
+		}
+		enc.Logs[i] = storageLog
 	}
 	return rlp.Encode(w, enc)
 }
@@ -236,14 +251,52 @@ func (r *ReceiptForStorage) DecodeRLP(s *rlp.Stream) error {
 	}
 	// Assign the consensus fields
 	r.CumulativeGasUsed, r.Bloom = dec.CumulativeGasUsed, dec.Bloom
-	r.Logs = make([]*Log, len(dec.Logs))
+	r.Logs = make([]*coretypes.Log, len(dec.Logs))
 	for i, log := range dec.Logs {
-		r.Logs[i] = (*Log)(log)
+		r.Logs[i] = log.toCoreLog()
 	}
 	// Assign the implementation fields
 	r.TxHash, r.ContractAddress, r.ContractFullShardKey, r.GasUsed = dec.TxHash, dec.ContractAddress,
 		dec.ContractFullShardKey, dec.GasUsed
 	return nil
+}
+
+func logForStorage(log *coretypes.Log) (*receiptStorageLog, error) {
+	if log == nil {
+		return nil, nil
+	}
+	if log.TxIndex > math.MaxUint32 {
+		return nil, fmt.Errorf("log tx index %d exceeds uint32", log.TxIndex)
+	}
+	if log.Index > math.MaxUint32 {
+		return nil, fmt.Errorf("log index %d exceeds uint32", log.Index)
+	}
+	return &receiptStorageLog{
+		Recipient:   log.Address,
+		Topics:      copyHashSlice(log.Topics),
+		Data:        common.CopyBytes(log.Data),
+		BlockNumber: log.BlockNumber,
+		TxHash:      log.TxHash,
+		TxIndex:     uint32(log.TxIndex),
+		BlockHash:   log.BlockHash,
+		Index:       uint32(log.Index),
+	}, nil
+}
+
+func (l *receiptStorageLog) toCoreLog() *coretypes.Log {
+	if l == nil {
+		return nil
+	}
+	return &coretypes.Log{
+		Address:     l.Recipient,
+		Topics:      copyHashSlice(l.Topics),
+		Data:        common.CopyBytes(l.Data),
+		BlockNumber: l.BlockNumber,
+		TxHash:      l.TxHash,
+		TxIndex:     uint(l.TxIndex),
+		BlockHash:   l.BlockHash,
+		Index:       uint(l.Index),
+	}
 }
 
 // Receipts is a wrapper around a Receipt array to implement DerivableList.
