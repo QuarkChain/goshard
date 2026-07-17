@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
@@ -82,8 +83,22 @@ func newFlatDB(nodeStore map[string]string) (*flatDB, error) {
 // ─── trie root recomputation ──────────────────────────────────────────────────
 
 func recomputeRoot(nodeStore map[string]string, stateRootHex string) (common.Hash, error) {
-	// Build an in-memory ethdb that holds all the dumped nodes.
+	stateRootHex = strings.TrimPrefix(stateRootHex, "0x")
+	rootBytes, err := hex.DecodeString(stateRootHex)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("bad state root: %w", err)
+	}
+	stateRoot := common.BytesToHash(rootBytes)
+
+	// Build an in-memory ethdb that holds all the dumped nodes. While loading,
+	// verify each node's identity: keccak256(blob) must equal its key, since a
+	// trie node is addressed by the hash of its content. This is what actually
+	// validates the dump — trie.New + Hash() below cannot, because a freshly
+	// opened root returns its cached open-at hash without re-hashing, making
+	// root == stateRoot a tautology.
 	mem := memorydb.New()
+	mismatch := 0
+	rootSeen := stateRoot == types.EmptyRootHash
 	for hashHex, bytesHex := range nodeStore {
 		hashHex = strings.TrimPrefix(hashHex, "0x")
 		bytesHex = strings.TrimPrefix(bytesHex, "0x")
@@ -96,9 +111,24 @@ func recomputeRoot(nodeStore map[string]string, stateRootHex string) (common.Has
 		if err != nil {
 			return common.Hash{}, fmt.Errorf("bad bytes %q: %w", bytesHex, err)
 		}
+		key := common.BytesToHash(h)
+		if got := crypto.Keccak256Hash(b); got != key {
+			fmt.Printf("  HASH MISMATCH key=%s  keccak256(blob)=%s\n", key.Hex(), got.Hex())
+			mismatch++
+		}
+		if key == stateRoot {
+			rootSeen = true
+		}
 		if err := mem.Put(h, b); err != nil {
 			return common.Hash{}, fmt.Errorf("memdb put: %w", err)
 		}
+	}
+	fmt.Printf("  Nodes hashed: %d  mismatches: %d\n", len(nodeStore), mismatch)
+	if mismatch > 0 {
+		return common.Hash{}, fmt.Errorf("%d node(s) do not hash to their key", mismatch)
+	}
+	if !rootSeen {
+		return common.Hash{}, fmt.Errorf("state root %s not present in node store", stateRoot.Hex())
 	}
 
 	// Wrap in a triedb backed by hashdb (which reads from the memdb).
@@ -107,17 +137,31 @@ func recomputeRoot(nodeStore map[string]string, stateRootHex string) (common.Has
 		HashDB: hashdb.Defaults,
 	})
 
-	stateRootHex = strings.TrimPrefix(stateRootHex, "0x")
-	rootBytes, err := hex.DecodeString(stateRootHex)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("bad state root: %w", err)
-	}
-	stateRoot := common.BytesToHash(rootBytes)
-
 	// Open the trie at the expected root.
 	tr, err := trie.New(trie.TrieID(stateRoot), trieDB)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("trie.New: %w", err)
+	}
+
+	// Traverse the whole tree and confirm every hashed node is reachable from
+	// the root: a missing node surfaces as an iterator error, and the reachable
+	// count must equal the store size or the dump carries orphan nodes.
+	it, err := tr.NodeIterator(nil)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("NodeIterator: %w", err)
+	}
+	reached := make(map[common.Hash]struct{}, len(nodeStore))
+	for it.Next(true) {
+		if h := it.Hash(); h != (common.Hash{}) {
+			reached[h] = struct{}{}
+		}
+	}
+	if err := it.Error(); err != nil {
+		return common.Hash{}, fmt.Errorf("traversal error (missing node?): %w", err)
+	}
+	fmt.Printf("  Nodes reachable from root: %d  (store: %d)\n", len(reached), len(nodeStore))
+	if len(reached) != len(nodeStore) {
+		return common.Hash{}, fmt.Errorf("reachable node count %d != store size %d", len(reached), len(nodeStore))
 	}
 
 	// Compute root hash (Hash() re-hashes in-memory without writing).
