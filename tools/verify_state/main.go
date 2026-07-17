@@ -1,3 +1,4 @@
+// Copyright 2026-2027, QuarkChain.
 // verify_state loads a trie node store exported by dump_state/dump_qkc_state_trie.py
 // and recomputes the trie root hash, confirming goshard produces the same
 // result as the original goquarkchain chain.

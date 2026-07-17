@@ -19,6 +19,7 @@ package state
 import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 	"github.com/ethereum/go-ethereum/triedb"
 )
@@ -130,6 +131,22 @@ func (db *UBTDatabase) Commit(update *StateUpdate) error {
 	}
 	// Encode the state mutations in the UBT format
 	accounts, accountOrigin, storages, storageOrigin := update.EncodeUBTState()
+
+	// QKC fork: re-encode accountOrigin from slim-RLP to QKC full-account RLP,
+	// mirroring database_mpt.go. EncodeUBTState produces slim-RLP, but pathdb's
+	// history recovery (triedb/pathdb/execute.go:updateAccount) decodes
+	// AccountsOrigin as a full types.StateAccount. Keeping the two commit paths
+	// consistent means a UBT state set fed through history recovery decodes
+	// correctly instead of mis-parsing slim bytes as a QKC account.
+	for addr, prev := range update.AccountsOrigin {
+		if prev != nil {
+			data, err := rlp.EncodeToBytes(prev)
+			if err != nil {
+				return err
+			}
+			accountOrigin[addr] = data
+		}
+	}
 
 	return db.triedb.Update(update.Root, update.OriginRoot, update.BlockNumber, update.Nodes, &triedb.StateSet{
 		Accounts:       accounts,
