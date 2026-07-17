@@ -61,6 +61,21 @@ func TestMntRejectsQKCTokenID(t *testing.T) {
 	assert.True(t, s.GetBalance(addr).IsZero()) // QKC balance unchanged
 }
 
+func TestMntRejectsTokenAboveListLimit(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x5679")
+	s.CreateAccount(addr)
+
+	for tokenID := uint64(1); tokenID <= qkccommon.TokenTrieThreshold; tokenID++ {
+		s.SetMntBalance(addr, uint256.NewInt(tokenID), tokenID)
+	}
+	s.SetMntBalance(addr, uint256.NewInt(17), qkccommon.TokenTrieThreshold+1)
+
+	assert.True(t, s.GetMntBalance(addr, qkccommon.TokenTrieThreshold+1).IsZero())
+	_, err := s.Commit(0, false, false)
+	require.NoError(t, err)
+}
+
 func TestMntJournalRevert(t *testing.T) {
 	s := newMntTestStateDB(t)
 	addr := common.HexToAddress("0xABCD")
