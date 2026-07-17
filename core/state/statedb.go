@@ -650,8 +650,12 @@ func (s *StateDB) getOrNewStateObject(addr common.Address) *stateObject {
 	return obj
 }
 
-// createObject creates a new state object. The assumption is held there is no
-// existing account with the given address, otherwise it will be silently overwritten.
+// createObject creates a new state object, replacing any object currently live
+// at the address. The prior object's storage/balance/nonce are dropped (the
+// caller is responsible for having deleted them where required), but its
+// QuarkChain FullShardKey is preserved: the shard key is assigned on first
+// creation and must remain stable across a resurrection, so it is carried over
+// from the existing account rather than reset to the current transaction's key.
 func (s *StateDB) createObject(addr common.Address) *stateObject {
 	// Check for an existing account so we can preserve its FullShardKey.
 	prev := s.getStateObject(addr)

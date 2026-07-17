@@ -142,3 +142,37 @@ func TestCopyDoesNotAliasMntBalances(t *testing.T) {
 	assert.Equal(t, uint256.NewInt(1001), s.GetMntBalance(addr, tokenID), "original reflects its own mutation")
 	assert.Equal(t, uint256.NewInt(1500), cp.GetMntBalance(addr, tokenID), "copy must not see original's later mutation")
 }
+
+// TestLoadedObjectDoesNotAliasOriginMnt verifies that when a state object is
+// loaded from an existing account (newObject with a non-nil origin holding MNT
+// balances), mutating the MNT balance does not corrupt s.origin. Without the
+// deep-copy in newObject, SetValue mutates the map shared by data and origin,
+// so commit() would record the post-mutation balance as the rollback baseline.
+func TestLoadedObjectDoesNotAliasOriginMnt(t *testing.T) {
+	db := triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil)
+	sdb := NewDatabase(db, nil)
+	s, err := New(common.Hash{}, sdb)
+	require.NoError(t, err)
+
+	addr := common.HexToAddress("0xB0B")
+	const tokenID = uint64(888)
+	s.CreateAccount(addr)
+	s.AddMntBalance(addr, uint256.NewInt(1000), tokenID)
+	root, err := s.Commit(0, false, false)
+	require.NoError(t, err)
+
+	// Reload from the committed state so the object is built via newObject with
+	// a non-nil origin carrying MntBalances.
+	s2, err := New(root, sdb)
+	require.NoError(t, err)
+
+	obj := s2.getStateObject(addr)
+	require.NotNil(t, obj)
+	require.NotNil(t, obj.origin)
+
+	s2.AddMntBalance(addr, uint256.NewInt(500), tokenID)
+
+	// The mutation must land on data, not on origin.
+	assert.Equal(t, uint256.NewInt(1500), obj.GetMntBalance(tokenID), "live data reflects the mutation")
+	assert.Equal(t, uint256.NewInt(1000), obj.origin.MntBalances.GetTokenBalance(tokenID), "origin must retain the pre-mutation balance")
+}
