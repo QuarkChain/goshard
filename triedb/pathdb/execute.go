@@ -93,6 +93,16 @@ func updateAccount(ctx *context, db database.NodeDatabase, addr common.Address) 
 	// The account was present in prev-state, decode it from QKC 6-element
 	// format. In production this data comes from database_mpt.go which
 	// re-encodes the slim-RLP accountOrigin to QKC before writing to pathdb.
+	//
+	// INVARIANT: ctx.accounts[addr] must be full QKC-account RLP, matching the
+	// MPT trie leaf format so the rebuilt root can be verified against prevRoot.
+	// Only the MPT commit path (database_mpt.go:Commit) performs this re-encode.
+	// The UBT commit path (database_ubt.go:Commit -> EncodeUBTState) writes
+	// slim-RLP origins and uses a binary trie whose root/nodes are incompatible
+	// with the trie.New below, so UBT state sets must never reach this MPT-only
+	// revert path. If UBT is ever wired into pathdb history recovery, its
+	// accountOrigin must first be re-encoded to full QKC RLP (or this decode
+	// switched to handle the slim format), otherwise decoding will corrupt.
 	addrHash := crypto.Keccak256Hash(addr.Bytes())
 	var prev types.StateAccount
 	if err := rlp.DecodeBytes(ctx.accounts[addr], &prev); err != nil {

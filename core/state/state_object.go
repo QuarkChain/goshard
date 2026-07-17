@@ -104,7 +104,7 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 	if acct == nil {
 		acct = types.NewEmptyStateAccount()
 	}
-	return &stateObject{
+	obj := &stateObject{
 		db:                 db,
 		address:            address,
 		origin:             origin,
@@ -114,6 +114,16 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 		pendingStorage:     make(Storage),
 		uncommittedStorage: make(Storage),
 	}
+	// data is a shallow value copy of *acct, so data.MntBalances aliases the
+	// same map as origin.MntBalances. SetMntBalance mutates that map in place
+	// (TokenBalances.SetValue), so without this copy an MNT mutation would also
+	// rewrite s.origin, and commit() would record the post-mutation balance as
+	// the "origin" — corrupting the pathdb rollback baseline. Deep-copy so data
+	// and origin own independent maps. Mirrors the deepCopy() guard below.
+	if origin != nil && origin.MntBalances != nil {
+		obj.data.MntBalances = origin.MntBalances.Copy()
+	}
+	return obj
 }
 
 func (s *stateObject) addrHash() common.Hash {
