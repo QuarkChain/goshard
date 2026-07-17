@@ -90,19 +90,13 @@ func apply(db database.NodeDatabase, prevRoot common.Hash, postRoot common.Hash,
 // existent in post-state. Apply the reverse diff and verify if the storage
 // root matches the one in prev-state account.
 func updateAccount(ctx *context, db database.NodeDatabase, addr common.Address) error {
-	// The account was present in prev-state, decode it from QKC 6-element
-	// format. In production this data comes from database_mpt.go which
-	// re-encodes the slim-RLP accountOrigin to QKC before writing to pathdb.
+	// The account was present in prev-state, decode it as a full QKC StateAccount.
 	//
-	// INVARIANT: ctx.accounts[addr] must be full QKC-account RLP, matching the
-	// MPT trie leaf format so the rebuilt root can be verified against prevRoot.
-	// Only the MPT commit path (database_mpt.go:Commit) performs this re-encode.
-	// The UBT commit path (database_ubt.go:Commit -> EncodeUBTState) writes
-	// slim-RLP origins and uses a binary trie whose root/nodes are incompatible
-	// with the trie.New below, so UBT state sets must never reach this MPT-only
-	// revert path. If UBT is ever wired into pathdb history recovery, its
-	// accountOrigin must first be re-encoded to full QKC RLP (or this decode
-	// switched to handle the slim format), otherwise decoding will corrupt.
+	// INVARIANT: ctx.accounts[addr] (AccountsOrigin) must be full QKC-account RLP,
+	// matching the trie leaf format so the rebuilt root verifies against prevRoot.
+	// Both commit paths satisfy this by re-encoding their slim-RLP origins to full
+	// QKC RLP before writing to pathdb (database_mpt.go:Commit and
+	// database_ubt.go:Commit). Do not feed slim-RLP AccountsOrigin here.
 	addrHash := crypto.Keccak256Hash(addr.Bytes())
 	var prev types.StateAccount
 	if err := rlp.DecodeBytes(ctx.accounts[addr], &prev); err != nil {

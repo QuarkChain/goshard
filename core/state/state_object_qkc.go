@@ -1,4 +1,4 @@
-// Copyright 2024 The go-ethereum Authors
+// Copyright 2026-2027, QuarkChain.
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -27,10 +27,21 @@ func (s *stateObject) SetMntBalance(amount *uint256.Int, tokenID uint64) {
 		log.Error("SetMntBalance called with QKC tokenID; use SetBalance", "addr", s.address)
 		return
 	}
+	if amount != nil && !amount.IsZero() && s.GetMntBalance(tokenID).IsZero() && s.mntBalanceCount() >= qkccommon.TokenTrieThreshold {
+		log.Error("SetMntBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
+		return
+	}
 	if s.data.MntBalances == nil {
 		s.data.MntBalances = qkccommon.NewEmptyTokenBalances()
 	}
 	s.data.MntBalances.SetValue(amount, tokenID)
+}
+
+func (s *stateObject) mntBalanceCount() int {
+	if s.data.MntBalances == nil {
+		return 0
+	}
+	return s.data.MntBalances.Len()
 }
 
 func (s *stateObject) AddMntBalance(amount *uint256.Int, tokenID uint64) {
