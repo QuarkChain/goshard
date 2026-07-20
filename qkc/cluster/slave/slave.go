@@ -264,7 +264,7 @@ func (s *SlaveServer) handleConnectToSlaves(req any) (any, error) {
 		}
 		xc.Start()
 
-		if err := s.xshardPool.VerifyAndAddToShards(s.ctx, xc, info.ID, info.FullShardIDList, s.cfg.FullShardIDList); err != nil {
+		if err := s.xshardPool.VerifyAndAddToShards(s.ctx, xc, info.ID, info.FullShardIDList); err != nil {
 			resultList[i] = wire.PrependedSizeBytes4([]byte(err.Error()))
 			continue
 		}
