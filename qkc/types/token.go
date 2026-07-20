@@ -146,23 +146,41 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	return tokenBalances, nil
 }
 
-func (t *TokenBalances) Add(other map[uint64]*big.Int) error {
+func (t *TokenBalances) Add(other map[uint64]*uint256.Int) error {
 	updates := make(map[uint64]*uint256.Int, len(other))
-	for tokenID, delta := range other {
-		if delta == nil {
+	for tokenID, amount := range other {
+		if amount == nil {
 			continue
 		}
-		balance := new(big.Int)
-		if current := t.balances[tokenID]; current != nil {
-			balance.Set(current.ToBig())
+		balance := t.balances[tokenID]
+		if balance == nil {
+			balance = new(uint256.Int)
 		}
-		balance.Add(balance, delta)
-		if balance.Sign() < 0 {
-			return fmt.Errorf("token balance underflow for token %d", tokenID)
-		}
-		updated, overflow := uint256.FromBig(balance)
+		updated, overflow := new(uint256.Int).AddOverflow(balance, amount)
 		if overflow {
 			return fmt.Errorf("token balance overflow for token %d", tokenID)
+		}
+		updates[tokenID] = updated
+	}
+	for tokenID, balance := range updates {
+		t.balances[tokenID] = balance
+	}
+	return nil
+}
+
+func (t *TokenBalances) Sub(other map[uint64]*uint256.Int) error {
+	updates := make(map[uint64]*uint256.Int, len(other))
+	for tokenID, amount := range other {
+		if amount == nil {
+			continue
+		}
+		balance := t.balances[tokenID]
+		if balance == nil {
+			balance = new(uint256.Int)
+		}
+		updated, underflow := new(uint256.Int).SubOverflow(balance, amount)
+		if underflow {
+			return fmt.Errorf("token balance underflow for token %d", tokenID)
 		}
 		updates[tokenID] = updated
 	}
