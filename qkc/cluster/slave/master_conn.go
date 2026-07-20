@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -266,8 +267,11 @@ func (mc *MasterConn) LocalFullShardIDList() []uint32 {
 // handlePing responds to the master's PING with this slave's identity.
 // Python: MasterConnection.handle_ping -> Pong(self.slave_server.id, ...).
 func (mc *MasterConn) handlePing(req any) (any, error) {
-	// TODO: when core.RootBlock is ported, use ping.root_tip to drive shard creation.
-	_ = req.(*wire.PingRequest)
+	ping := req.(*wire.PingRequest)
+
+	if ping.RootTip != nil {
+		// TODO: create/update shard runtime from root tip. when core.RootBlock is ported, use ping.root_tip to drive shard creation.
+	}
 
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), mc.localID...),
@@ -579,12 +583,32 @@ func (mc *MasterConn) ForwardFrame(f *wire.Frame) error {
 }
 
 // SetDispatcher wires the dispatcher that routes peer traffic. It also installs
-// the dispatcher as the raw-frame forwarder on this MasterConn.
+// a forwarder that validates the branch before routing.
+// Python: MasterConnection.get_connection_to_forward() closes the connection if
+// the branch is not in the configured full_shard_id_list.
 func (mc *MasterConn) SetDispatcher(d *Dispatcher) {
 	mc.dispatcherMu.Lock()
 	mc.dispatcher = d
 	mc.dispatcherMu.Unlock()
-	mc.SetForwarder(d.RouteFrame)
+
+	// Create a wrapper forwarder that validates branch before routing.
+	// Python: MasterConnection.get_connection_to_forward() only validates
+	// branch when cluster_peer_id != 0 (i.e., on the forwarding path).
+	// Master-local RPCs (cluster_peer_id == 0) use branch=0 and must not
+	// be validated.
+	mc.SetForwarder(func(frame *wire.Frame) bool {
+		if frame.Meta.ClusterPeerID != 0 && !mc.isValidBranch(frame.Meta.Branch) {
+			mc.log.Error("incorrect forwarding branch", "branch", frame.Meta.Branch)
+			mc.Close()
+			return true
+		}
+		return d.RouteFrame(frame)
+	})
+}
+
+// isValidBranch checks if the given branch is in the local full shard ID list.
+func (mc *MasterConn) isValidBranch(branch uint32) bool {
+	return slices.Contains(mc.localFullShardIDList, branch)
 }
 
 // Close closes the master connection and all associated peer connections.

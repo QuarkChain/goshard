@@ -42,7 +42,7 @@ type XshardConn struct {
 }
 
 // NewXshardConn dials another slave and returns an XshardConn.
-// Call RegisterHandlers then Start before using the connection.
+// Call Start before using the connection.
 // maxPayloadSize controls frame payload size limit; 0 disables the limit.
 // localID and localFullShardIDList identify this slave and are used in PONG responses.
 func NewXshardConn(addr string, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) (*XshardConn, error) {
@@ -79,13 +79,9 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 		byte(wire.ClusterOpBatchAddXshardTxListRequest): OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](),
 	})
 
-	// PING is handled internally by SlaveConnection in Python; register the
-	// built-in handler immediately so it works even if the caller never calls
-	// RegisterHandlers.
-	//
-	// ADD_XSHARD_TX_LIST_REQUEST and BATCH_ADD_XSHARD_TX_LIST_REQUEST are also
-	// registered here with stub handlers so inbound slave-to-slave RPCs are
-	// recognised and dispatched (responses preserve Python's wire format).
+	// Register handlers for all slave-to-slave RPCs.
+	// PING/PONG is the slave-to-slave identity exchange.
+	// ADD_XSHARD_TX_LIST and BATCH_ADD_XSHARD_TX_LIST are stubs for protocol compatibility.
 	xc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
 		// ── Permanent connection handler ───────────────────────────────
 		// PING/PONG is the slave-to-slave identity exchange.
@@ -167,49 +163,6 @@ func (x *XshardConn) SetRemoteIdentity(id []byte, shardList []uint32) {
 	defer x.stateMu.Unlock()
 	x.remoteID = append([]byte(nil), id...)
 	x.remoteFullShardIDList = append([]uint32(nil), shardList...)
-}
-
-// RegisterHandlers registers user-provided opcode handlers. PING is always
-// handled internally (see handlePing). If the user registers a PING handler,
-// it is wrapped so that peer identity recording and empty-shard-list validation
-// still happen first; the user's returned response object is then sent as the
-// PONG body.
-func (x *XshardConn) RegisterHandlers(handlers map[byte]TypedHandler) {
-	wrapped := make(map[byte]TypedHandler, len(handlers))
-	for opcode, handler := range handlers {
-		if opcode != byte(wire.ClusterOpPing) {
-			wrapped[opcode] = handler
-		}
-	}
-
-	if userPingHandler, ok := handlers[byte(wire.ClusterOpPing)]; ok {
-		wrapped[byte(wire.ClusterOpPing)] = func(req any) (any, error) {
-			ping := req.(*wire.PingRequest)
-
-			// Record peer identity (only on first ping)
-			x.stateMu.Lock()
-			if len(x.remoteID) == 0 {
-				x.remoteID = append([]byte(nil), ping.ID...)
-				x.remoteFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
-			}
-			// Check stored shard list
-			storedShardList := x.remoteFullShardIDList
-			x.stateMu.Unlock()
-
-			if len(storedShardList) == 0 {
-				return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
-			}
-
-			// Signal ping received AFTER check passes
-			if !x.rpcConn.Closed() {
-				x.pingOnce.Do(func() { close(x.pingReceived) })
-			}
-
-			return userPingHandler(req)
-		}
-	}
-
-	x.rpcConn.RegisterTypedHandlers(wrapped)
 }
 
 // RemoteID returns the peer's slave ID, populated after the first PING.
