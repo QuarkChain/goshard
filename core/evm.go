@@ -92,6 +92,7 @@ func NewEVMTxContext(msg *Message) vm.TxContext {
 		BlobHashes:      msg.BlobHashes,
 		GasTokenID:      msg.GasTokenID,
 		TransferTokenID: msg.TransferTokenID,
+		FullShardKey:    msg.FullShardKey,
 	}
 	return ctx
 }
@@ -138,7 +139,7 @@ func GetHashFn(ref *types.Header, chain ChainContext) func(n uint64) common.Hash
 // CanTransfer checks whether there are enough funds in the address' account to make a transfer.
 // This does not take the necessary gas in to account to make the transfer valid.
 func CanTransfer(db vm.StateDB, addr common.Address, amount *uint256.Int, tokenID uint64) bool {
-	if tokenID == 0 || tokenID == qkccommon.DefaultTokenID {
+	if tokenID == qkccommon.DefaultTokenID {
 		return db.GetBalance(addr).Cmp(amount) >= 0
 	}
 	return db.GetMntBalance(addr, tokenID).Cmp(amount) >= 0
@@ -146,7 +147,7 @@ func CanTransfer(db vm.StateDB, addr common.Address, amount *uint256.Int, tokenI
 
 // Transfer subtracts amount from sender and adds amount to recipient using the given Db
 func Transfer(db vm.StateDB, sender, recipient common.Address, amount *uint256.Int, rules *params.Rules, tokenID uint64) {
-	if tokenID == 0 || tokenID == qkccommon.DefaultTokenID {
+	if tokenID == qkccommon.DefaultTokenID {
 		db.SubBalance(sender, amount, tracing.BalanceChangeTransfer)
 		db.AddBalance(recipient, amount, tracing.BalanceChangeTransfer)
 		// QKC fork: Transfer() does not emit EthTransferLog (Ethereum-specific

@@ -32,7 +32,6 @@ import (
 	"github.com/holiman/uint256"
 )
 
-
 type (
 	// CanTransferFunc is the signature of a transfer guard function
 	CanTransferFunc func(StateDB, common.Address, *uint256.Int, uint64) bool
@@ -81,6 +80,7 @@ type TxContext struct {
 	AccessEvents    *state.AccessEvents // Capture all state accesses for this tx
 	GasTokenID      uint64              // token used to pay gas (default: 35760 = QKC)
 	TransferTokenID uint64              // token used for value transfer (default: 35760 = QKC)
+	FullShardKey    uint32              // destination full shard key; upper 16 bits are the QuarkChain chain ID
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
@@ -149,7 +149,7 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		jumpDests:   newMapJumpDests(),
 		arena:       newArena(),
 	}
-	evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	evm.precompiles = activePrecompiledContractsQKC(evm.chainRules, blockCtx.Time, config.QKCConfig)
 
 	switch {
 	case evm.chainRules.IsAmsterdam:
@@ -321,7 +321,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			// QKC: if transferring a non-default MNT token, recipient must have acknowledged
 			// the token via currentMntID precompile, else revert (mirrors goquarkchain behavior).
 			if err == nil && len(contract.Code) != 0 && !contract.TokenIDQueried &&
-				evm.TxContext.TransferTokenID != 0 && evm.TxContext.TransferTokenID != qkccommon.DefaultTokenID &&
+				evm.TxContext.TransferTokenID != qkccommon.DefaultTokenID &&
 				!value.IsZero() {
 				err = ErrExecutionReverted
 			}
@@ -640,6 +640,10 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
 	return evm.create(caller, code, gas, value, contractAddr, CREATE)
+}
+
+func (evm *EVM) createAt(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
+	return evm.create(caller, code, gas, value, address, CREATE)
 }
 
 // Create2 creates a new contract using code as deployment code.

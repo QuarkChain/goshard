@@ -236,8 +236,9 @@ type Message struct {
 	// - GasLimit is not checked against the protocol defined tx gaslimit
 	SkipTransactionChecks bool
 
-	GasTokenID      uint64 // token used for gas (0 = default QKC, 35760)
-	TransferTokenID uint64 // token used for value transfer (0 = default QKC, 35760)
+	GasTokenID      uint64 // token used for gas; QKC is 35760 and token 0 is an MNT
+	TransferTokenID uint64 // token used for value transfer; QKC is 35760 and token 0 is an MNT
+	FullShardKey    uint32 // destination full shard key; upper 16 bits are the QuarkChain chain ID
 }
 
 // TransactionToMessage converts a transaction into a Message.
@@ -288,6 +289,8 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		SkipTransactionChecks: false,
 		BlobHashes:            tx.BlobHashes(),
 		BlobGasFeeCap:         blobGasFeeCap,
+		GasTokenID:            qkccommon.DefaultTokenID,
+		TransferTokenID:       qkccommon.DefaultTokenID,
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
@@ -316,6 +319,9 @@ func ApplyMessage(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, err
 		gp = NewGasPool(msg.GasLimit)
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
+	if stateDB, ok := evm.StateDB.(interface{ SetFullShardKey(uint32) }); ok {
+		stateDB.SetFullShardKey(msg.FullShardKey)
+	}
 	return newStateTransition(evm, msg, gp).execute()
 }
 
@@ -381,7 +387,7 @@ func (st *stateTransition) buyGas() error {
 			return fmt.Errorf("%w: address %v required balance exceeds 256 bits", ErrInsufficientFunds, st.msg.From.Hex())
 		}
 	}
-	if st.msg.Value != nil {
+	if st.msg.Value != nil && st.msg.GasTokenID == st.msg.TransferTokenID {
 		if _, overflow := balanceCheck.AddOverflow(balanceCheck, st.msg.Value); overflow {
 			return fmt.Errorf("%w: address %v required balance exceeds 256 bits", ErrInsufficientFunds, st.msg.From.Hex())
 		}
@@ -418,10 +424,7 @@ func (st *stateTransition) buyGas() error {
 		}
 	}
 	gasTokenID := st.msg.GasTokenID
-	// Both 0 and DefaultTokenID (35760) denote the default QKC gas token, matching
-	// core/evm.go CanTransfer/Transfer routing. Treating 0 as a non-QKC MNT token
-	// here would debit GetMntBalance(from, 0) and diverge from the rest of the system.
-	if gasTokenID == 0 || gasTokenID == qkccommon.DefaultTokenID {
+	if gasTokenID == qkccommon.DefaultTokenID {
 		// QKC gas: check native balance
 		if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
 			return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
@@ -443,7 +446,7 @@ func (st *stateTransition) buyGas() error {
 	st.gasRemaining = vm.NewGasBudget(st.msg.GasLimit)
 	st.initialBudget = st.gasRemaining.Copy()
 
-	if gasTokenID == 0 || gasTokenID == qkccommon.DefaultTokenID {
+	if gasTokenID == qkccommon.DefaultTokenID {
 		st.state.SubBalance(st.msg.From, mgval, tracing.BalanceDecreaseGasBuy)
 	} else {
 		st.state.SubMntBalance(st.msg.From, mgval, gasTokenID)
