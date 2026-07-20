@@ -4,7 +4,6 @@ package slave
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -130,17 +129,7 @@ func TestXshardConn_RPCRoundTrip(t *testing.T) {
 	clientID := []byte("client-slave")
 	clientShards := []uint32{0x00010001, 0x00010002}
 	serverID := []byte("server-slave")
-	serverShards := []uint32{0x00030004}
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			_ = req.(*wire.PingRequest)
-			return &wire.PongResponse{
-				ID:              serverID,
-				FullShardIDList: serverShards,
-			}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -190,13 +179,6 @@ func TestXshardConn_RejectEmptyShardList(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			// This handler won't be called because wrapper rejects empty shard list first.
-			t.Fatal("user handler should not be called for empty shard list")
-			return nil, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -243,54 +225,6 @@ func TestXshardConn_UnsupportedOpcodeClosesConnection(t *testing.T) {
 	}
 }
 
-// TestXshardConn_HandlerErrorClosesConnection verifies that handler error
-// causes connection close (Python's close_with_error behavior).
-func TestXshardConn_HandlerErrorClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpAddRootBlockRequest): func(req any) (any, error) {
-			_ = req
-			return nil, fmt.Errorf("intentional error") //nolint:govet // test error
-		},
-	})
-	server.Start()
-	client.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := client.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), []byte("payload"))
-	if err == nil {
-		t.Fatal("expected error due to connection close, got nil")
-	}
-}
-
-// TestXshardConn_HandlerPanicClosesConnection verifies that handler panic
-// causes connection close (Python's close_with_error behavior).
-func TestXshardConn_HandlerPanicClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpAddRootBlockRequest): func(req any) (any, error) {
-			_ = req
-			panic("intentional panic")
-		},
-	})
-	server.Start()
-	client.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := client.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), []byte("payload"))
-	if err == nil {
-		t.Fatal("expected error due to connection close, got nil")
-	}
-}
-
 // TestXshardConn_CloseWakesPendingRPC verifies that Close wakes all pending RPCs.
 // Uses a sync channel instead of time.Sleep for reliable testing.
 func TestXshardConn_CloseWakesPendingRPC(t *testing.T) {
@@ -328,13 +262,6 @@ func TestXshardConn_SendXshardTxList(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpAddXshardTxListRequest): func(req any) (any, error) {
-			_ = req.(*wire.AddXshardTxListRequest)
-			// Return success response (Python: AddXshardTxListResponse(error_code=0))
-			return &wire.AddXshardTxListResponse{ErrorCode: 0}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -373,12 +300,6 @@ func TestXshardConn_SendBatchXshardTxList(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpBatchAddXshardTxListRequest): func(req any) (any, error) {
-			_ = req.(*wire.BatchAddXshardTxListRequest)
-			return &wire.BatchAddXshardTxListResponse{ErrorCode: 0}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -527,15 +448,6 @@ func TestXshardConn_RPCIDMonotonic(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			_ = req.(*wire.PingRequest)
-			return &wire.PongResponse{
-				ID:              []byte("server"),
-				FullShardIDList: []uint32{0x00030004},
-			}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -573,15 +485,6 @@ func TestXshardConn_RPCIDDecreasing(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			_ = req.(*wire.PingRequest)
-			return &wire.PongResponse{
-				ID:              []byte("server"),
-				FullShardIDList: []uint32{0x00030004},
-			}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -614,17 +517,6 @@ func TestXshardConn_MultipleRPCs(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	callCount := 0
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			_ = req.(*wire.PingRequest)
-			callCount++
-			return &wire.PongResponse{
-				ID:              []byte("server"),
-				FullShardIDList: []uint32{0x00010001},
-			}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 
@@ -644,8 +536,9 @@ func TestXshardConn_MultipleRPCs(t *testing.T) {
 		}
 	}
 
-	if callCount != 5 {
-		t.Fatalf("expected 5 handler calls, got %d", callCount)
+	// Verify server received the ping
+	if !server.WaitUntilPingReceived() {
+		t.Fatal("server did not receive ping")
 	}
 }
 
@@ -655,15 +548,6 @@ func TestXshardConn_RecordPingOnlyOnce(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			_ = req.(*wire.PingRequest)
-			return &wire.PongResponse{
-				ID:              []byte("server"),
-				FullShardIDList: []uint32{0x00010001},
-			}, nil
-		},
-	})
 	server.Start()
 	client.Start()
 

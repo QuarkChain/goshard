@@ -399,7 +399,7 @@ func TestPythonCompat_PoolReconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := pool.VerifyAndAdd(ctx, 1, xc1, []byte("py"), []uint32{1}); err != nil {
+	if err := pool.VerifyAndAdd(ctx, xc1, []byte("py"), []uint32{1}); err != nil {
 		t.Fatalf("first VerifyAndAdd: %v", err)
 	}
 	if pool.OutboundSize() != 1 {
@@ -422,7 +422,7 @@ func TestPythonCompat_PoolReconnect(t *testing.T) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 
-	if err := pool.VerifyAndAdd(ctx2, 1, xc2, []byte("py"), []uint32{1}); err != nil {
+	if err := pool.VerifyAndAdd(ctx2, xc2, []byte("py"), []uint32{1}); err != nil {
 		t.Fatalf("second VerifyAndAdd (reconnect) failed: %v", err)
 	}
 	if pool.OutboundSize() != 1 {

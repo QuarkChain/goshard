@@ -77,15 +77,15 @@ func (p *XshardPool) HasSlaveID(id []byte) bool {
 //
 // The connection must already have been started (Start() called).
 // On verification failure the connection is closed.
-func (p *XshardPool) VerifyAndAdd(ctx context.Context, fullShardID uint32, conn *XshardConn, expectedID []byte, expectedShardList []uint32) error {
-	return p.VerifyAndAddToShards(ctx, conn, expectedID, expectedShardList, []uint32{fullShardID})
+func (p *XshardPool) VerifyAndAdd(ctx context.Context, conn *XshardConn, expectedID []byte, expectedShardList []uint32) error {
+	return p.VerifyAndAddToShards(ctx, conn, expectedID, expectedShardList)
 }
 
 // VerifyAndAddToShards verifies an outbound xshard connection and indexes it by
-// every shard in localShards that is also advertised by the remote peer. This
-// mirrors Python's _add_slave_connection(), which indexes a verified slave for
-// each configured shard the slave covers.
-func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn, expectedID []byte, expectedShardList, localShards []uint32) error {
+// every shard advertised by the remote peer. This mirrors Python's
+// _add_slave_connection(), which indexes a verified slave for each
+// full_shard_id in the remote slave's shard list.
+func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn, expectedID []byte, expectedShardList []uint32) error {
 	id, shardList, err := conn.SendPing(ctx)
 	if err != nil {
 		conn.Close()
@@ -127,13 +127,9 @@ func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn,
 		p.slaveIDs[remoteID] = true
 	}
 
-	for _, localShard := range localShards {
-		for _, remoteShard := range shardList {
-			if localShard == remoteShard {
-				p.conns[localShard] = append(p.conns[localShard], conn)
-				break
-			}
-		}
+	// Index by all remote shard IDs for routing
+	for _, shardID := range shardList {
+		p.conns[shardID] = append(p.conns[shardID], conn)
 	}
 	p.mu.Unlock()
 
@@ -312,7 +308,9 @@ func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 	// is later closed or reconnected.
 	for i, c := range p.inbound {
 		if c == conn {
-			p.inbound = append(p.inbound[:i], p.inbound[i+1:]...)
+			copy(p.inbound[i:], p.inbound[i+1:])
+			p.inbound[len(p.inbound)-1] = nil // clear reference to prevent memory leak
+			p.inbound = p.inbound[:len(p.inbound)-1]
 			break
 		}
 	}
@@ -329,7 +327,9 @@ func (p *XshardPool) RemoveInbound(conn *XshardConn) {
 	defer p.mu.Unlock()
 	for i, c := range p.inbound {
 		if c == conn {
-			p.inbound = append(p.inbound[:i], p.inbound[i+1:]...)
+			copy(p.inbound[i:], p.inbound[i+1:])
+			p.inbound[len(p.inbound)-1] = nil // clear reference to prevent memory leak
+			p.inbound = p.inbound[:len(p.inbound)-1]
 			return
 		}
 	}
