@@ -12,14 +12,11 @@ import (
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 )
-
-//go:generate gencodec -type Receipt -field-override receiptMarshaling -out gen_receipt_json.go
 
 var (
 	receiptStatusFailedRLP     = []byte{}
@@ -38,21 +35,15 @@ const (
 type Receipt struct {
 	// Consensus fields
 	Status               uint64            `json:"status"`
-	CumulativeGasUsed    uint64            `json:"cumulativeGasUsed" gencodec:"required"`
-	Bloom                Bloom             `json:"logsBloom"         gencodec:"required"`
-	Logs                 []*coretypes.Log  `json:"logs"              gencodec:"required"`
+	CumulativeGasUsed    uint64            `json:"cumulativeGasUsed"`
+	Bloom                Bloom             `json:"logsBloom"`
+	Logs                 []*coretypes.Log  `json:"logs"`
 	ContractAddress      account.Recipient `json:"contractAddress"`
 	ContractFullShardKey uint32            `json:"contractFullShardKey"`
 
 	// Implementation fields (don't reorder!)
-	TxHash  common.Hash `json:"transactionHash" gencodec:"required"`
-	GasUsed uint64      `json:"gasUsed" gencodec:"required"`
-}
-
-type receiptMarshaling struct {
-	Status            hexutil.Uint64
-	CumulativeGasUsed hexutil.Uint64
-	GasUsed           hexutil.Uint64
+	TxHash  common.Hash `json:"transactionHash"`
+	GasUsed uint64      `json:"gasUsed"`
 }
 
 // receiptRLP is the consensus encoding of a receipt.
