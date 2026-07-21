@@ -37,16 +37,16 @@ const (
 // Receipt represents the results of a transaction.
 type Receipt struct {
 	// Consensus fields
-	Status            uint64           `json:"status"`
-	CumulativeGasUsed uint64           `json:"cumulativeGasUsed" gencodec:"required"`
-	Bloom             Bloom            `json:"logsBloom"         gencodec:"required"`
-	Logs              []*coretypes.Log `json:"logs"              gencodec:"required"`
-
-	// Implementation fields (don't reorder!)
-	TxHash               common.Hash       `json:"transactionHash" gencodec:"required"`
+	Status               uint64            `json:"status"`
+	CumulativeGasUsed    uint64            `json:"cumulativeGasUsed" gencodec:"required"`
+	Bloom                Bloom             `json:"logsBloom"         gencodec:"required"`
+	Logs                 []*coretypes.Log  `json:"logs"              gencodec:"required"`
 	ContractAddress      account.Recipient `json:"contractAddress"`
 	ContractFullShardKey uint32            `json:"contractFullShardKey"`
-	GasUsed              uint64            `json:"gasUsed" gencodec:"required"`
+
+	// Implementation fields (don't reorder!)
+	TxHash  common.Hash `json:"transactionHash" gencodec:"required"`
+	GasUsed uint64      `json:"gasUsed" gencodec:"required"`
 }
 
 type receiptMarshaling struct {
