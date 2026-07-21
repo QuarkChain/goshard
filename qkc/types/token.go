@@ -137,6 +137,9 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 			}
 			tokenBalances.balances[v.TokenID] = new(uint256.Int).Set(v.Balance)
 		}
+		if nonZeroEntries := tokenBalances.nonZeroEntriesInBalancesCache(); nonZeroEntries > TokenTrieThreshold {
+			return nil, fmt.Errorf("token balances exceed supported list size: %d > %d", nonZeroEntries, TokenTrieThreshold)
+		}
 	case tokenBalanceTriePrefix:
 		return nil, errors.New("token balance trie encoding is unsupported")
 	default:

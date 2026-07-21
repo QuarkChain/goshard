@@ -147,6 +147,25 @@ func TestTokenBalancesRejectsMoreThanThreshold(t *testing.T) {
 	assert.ErrorContains(t, err, "exceed")
 }
 
+func TestTokenBalancesDecodeRLPRejectsMoreThanThreshold(t *testing.T) {
+	pairs := make([]*TokenBalancePair, 0, TokenTrieThreshold+1)
+	for index := 0; index < TokenTrieThreshold+1; index++ {
+		pairs = append(pairs, &TokenBalancePair{
+			TokenID: uint64(index + 1),
+			Balance: testU256(uint64(index + 1)),
+		})
+	}
+	list, err := rlp.EncodeToBytes(pairs)
+	assert.NoError(t, err)
+	stateData := append([]byte{tokenBalanceListPrefix}, list...)
+	encoded, err := rlp.EncodeToBytes(stateData)
+	assert.NoError(t, err)
+
+	var decoded TokenBalances
+	err = rlp.DecodeBytes(encoded, &decoded)
+	assert.ErrorContains(t, err, "exceed")
+}
+
 func TestTokenBalancesRejectsTrieEncoding(t *testing.T) {
 	data := make([]byte, 33)
 	data[0] = tokenBalanceTriePrefix
