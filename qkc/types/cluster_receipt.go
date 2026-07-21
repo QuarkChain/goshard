@@ -140,8 +140,12 @@ func newClusterTransactionReceipt(r *Receipt) (*ClusterTransactionReceipt, error
 			return nil, fmt.Errorf("log %d: %w", i, err)
 		}
 	}
+	status, err := r.statusEncoding()
+	if err != nil {
+		return nil, err
+	}
 	return &ClusterTransactionReceipt{
-		Success:         r.statusEncoding(),
+		Success:         status,
 		GasUsed:         r.CumulativeGasUsed,
 		PrevGasUsed:     prevGasUsed,
 		Bloom:           r.Bloom,
