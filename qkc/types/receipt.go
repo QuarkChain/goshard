@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Receipt uses pyquarkchain-compatible QKC wire and storage encoding.
+// Receipt provides QKC consensus receipt encoding.
 // Modified from go-ethereum under GNU Lesser General Public License
 
 package types
@@ -13,7 +13,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
-	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -64,36 +63,6 @@ func NewReceipt(failed bool, cumulativeGasUsed uint64) *Receipt {
 		r.Status = ReceiptStatusSuccessful
 	}
 	return r
-}
-
-// Deserialize deserialize the QKC minor block
-func (r *Receipt) Deserialize(bb *serialize.ByteBuffer) error {
-	var rs ClusterTransactionReceipt
-	if err := serialize.Deserialize(bb, &rs); err != nil {
-		return err
-	}
-	if err := r.setStatus(rs.Success); err != nil {
-		return err
-	}
-	if rs.PrevGasUsed > rs.GasUsed {
-		return fmt.Errorf("prev gas used %d exceeds cumulative gas used %d", rs.PrevGasUsed, rs.GasUsed)
-	}
-	r.CumulativeGasUsed, r.Bloom, r.GasUsed, r.ContractAddress, r.ContractFullShardKey = rs.GasUsed, rs.Bloom,
-		rs.GasUsed-rs.PrevGasUsed, rs.ContractAddress.Recipient, rs.ContractAddress.FullShardKey
-	r.Logs = make([]*coretypes.Log, len(rs.Logs))
-	for i, log := range rs.Logs {
-		r.Logs[i] = log.toCoreLog()
-	}
-	return nil
-}
-
-// Serialize serialize the QKC minor block.
-func (r *Receipt) Serialize(w *[]byte) error {
-	receipt, err := newClusterTransactionReceipt(r)
-	if err != nil {
-		return err
-	}
-	return receipt.Serialize(w)
 }
 
 func (r *Receipt) GetPrevGasUsed() uint64 {

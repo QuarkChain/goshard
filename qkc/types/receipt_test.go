@@ -87,15 +87,23 @@ func TestReceiptQKCSerialization(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			receiptEnc := common.FromHex(test.encoded)
-			var receipt Receipt
+			var clusterReceipt ClusterTransactionReceipt
 			bb := serialize.NewByteBuffer(receiptEnc)
-			if err := serialize.Deserialize(bb, &receipt); err != nil {
+			if err := serialize.Deserialize(bb, &clusterReceipt); err != nil {
 				t.Fatal("Deserialize error: ", err)
 			}
+			receipt, err := clusterReceipt.ToReceipt()
+			if err != nil {
+				t.Fatal("ToReceipt error: ", err)
+			}
 
-			checkReceipt(t, &receipt, test.status, true)
+			checkReceipt(t, receipt, test.status, true)
 
-			encoded, err := serialize.SerializeToBytes(&receipt)
+			encodedClusterReceipt, err := NewClusterTransactionReceipt(receipt)
+			if err != nil {
+				t.Fatal("NewClusterTransactionReceipt error: ", err)
+			}
+			encoded, err := serialize.SerializeToBytes(encodedClusterReceipt)
 			if err != nil {
 				t.Fatal("Serialize error: ", err)
 			}
@@ -131,8 +139,11 @@ func TestReceiptRejectsLegacyPostStateRLP(t *testing.T) {
 }
 
 func TestReceiptRejectsLegacyPostStateQKCWire(t *testing.T) {
-	var receipt Receipt
-	if err := serialize.Deserialize(serialize.NewByteBuffer(common.FromHex(receiptLegacyClusterReceiptHex)), &receipt); err == nil {
+	var clusterReceipt ClusterTransactionReceipt
+	if err := serialize.Deserialize(serialize.NewByteBuffer(common.FromHex(receiptLegacyClusterReceiptHex)), &clusterReceipt); err != nil {
+		t.Fatal("Deserialize error: ", err)
+	}
+	if _, err := clusterReceipt.ToReceipt(); err == nil {
 		t.Fatal("legacy post-state receipt was accepted")
 	}
 }

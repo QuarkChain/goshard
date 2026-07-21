@@ -125,7 +125,9 @@ type ClusterTransactionReceipt struct {
 	Logs            []*ClusterLog
 }
 
-func newClusterTransactionReceipt(r *Receipt) (*ClusterTransactionReceipt, error) {
+// NewClusterTransactionReceipt converts an internal receipt to the Python
+// master/slave wire representation.
+func NewClusterTransactionReceipt(r *Receipt) (*ClusterTransactionReceipt, error) {
 	if r == nil {
 		return nil, fmt.Errorf("nil receipt")
 	}
@@ -152,6 +154,28 @@ func newClusterTransactionReceipt(r *Receipt) (*ClusterTransactionReceipt, error
 		ContractAddress: account.Address{Recipient: r.ContractAddress, FullShardKey: r.ContractFullShardKey},
 		Logs:            logs,
 	}, nil
+}
+
+// ToReceipt converts the Python master/slave wire representation to an internal
+// receipt.
+func (r *ClusterTransactionReceipt) ToReceipt() (*Receipt, error) {
+	if r == nil {
+		return nil, fmt.Errorf("nil cluster transaction receipt")
+	}
+	if r.PrevGasUsed > r.GasUsed {
+		return nil, fmt.Errorf("prev gas used %d exceeds cumulative gas used %d", r.PrevGasUsed, r.GasUsed)
+	}
+	receipt := &Receipt{}
+	if err := receipt.setStatus(r.Success); err != nil {
+		return nil, err
+	}
+	receipt.CumulativeGasUsed, receipt.Bloom, receipt.GasUsed = r.GasUsed, r.Bloom, r.GasUsed-r.PrevGasUsed
+	receipt.ContractAddress, receipt.ContractFullShardKey = r.ContractAddress.Recipient, r.ContractAddress.FullShardKey
+	receipt.Logs = make([]*coretypes.Log, len(r.Logs))
+	for i, log := range r.Logs {
+		receipt.Logs[i] = log.toCoreLog()
+	}
+	return receipt, nil
 }
 
 // Serialize writes pyquarkchain TransactionReceipt.FIELDS order explicitly:
