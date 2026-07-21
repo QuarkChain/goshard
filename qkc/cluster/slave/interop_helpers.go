@@ -44,16 +44,6 @@ func requirePython3(t *testing.T) {
 	}
 }
 
-// helperScript returns the absolute path to the Python master helper script.
-func helperScript(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot determine source file location")
-	}
-	return filepath.Join(filepath.Dir(thisFile), "testdata", "py_master_helper.py")
-}
-
 // safeBuffer is a goroutine-safe bytes.Buffer.
 type safeBuffer struct {
 	mu  sync.Mutex
@@ -72,51 +62,6 @@ func (b *safeBuffer) String() string {
 	return b.buf.String()
 }
 
-// startPythonHelper launches the Python helper asynchronously and returns the
-// command handle, a thread-safe output buffer, and a cancel function. The
-// caller must call cancel and wait for the process to exit.
-func startPythonHelper(t *testing.T, args ...string) (*exec.Cmd, *safeBuffer, context.CancelFunc) {
-	t.Helper()
-
-	requirePython3(t)
-	pyRoot := requirePyquarkchain(t)
-
-	script := helperScript(t)
-	if _, err := os.Stat(script); err != nil {
-		t.Skipf("python helper script not found: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	cmd := exec.CommandContext(ctx, "python3", append([]string{script}, args...)...)
-	cmd.Env = append(os.Environ(), "PYQUARKCHAIN="+pyRoot)
-	var out safeBuffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	// Let CommandContext handle process termination via os.Kill on timeout.
-	// Do not override cmd.Cancel to avoid test hangs if Python ignores SIGINT.
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("python helper start: %v", err)
-	}
-	return cmd, &out, cancel
-}
-
-// runPythonHelper executes the helper with the given arguments and returns its
-// combined output. It fails the test if Python is unavailable or the helper
-// exits non-zero.
-func runPythonHelper(t *testing.T, args ...string) []byte {
-	t.Helper()
-
-	cmd, out, cancel := startPythonHelper(t, args...)
-	defer cancel()
-
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("python helper failed: %v\noutput:\n%s", err, out.String())
-	}
-	return []byte(out.String())
-}
-
 // freePort returns an unused TCP port on 127.0.0.1.
 func freePort(t *testing.T) int {
 	t.Helper()
@@ -129,8 +74,8 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// startTestSlave starts a SlaveServer configured with the given identity.
-func startTestSlave(t *testing.T, id string, shards []uint32) (*SlaveServer, int) {
+// startTestSlave starts a SlaveComm configured with the given identity.
+func startTestSlave(t *testing.T, id string, shards []uint32) (*SlaveComm, int) {
 	t.Helper()
 	port := freePort(t)
 	cfg := SlaveConfig{
@@ -140,7 +85,7 @@ func startTestSlave(t *testing.T, id string, shards []uint32) (*SlaveServer, int
 		MaxPayloadSize:  0,
 	}
 	logger := testlog.Logger(t, log.LvlInfo)
-	srv, err := NewSlaveServer(cfg, logger)
+	srv, err := NewSlaveComm(cfg, logger)
 	if err != nil {
 		t.Fatalf("new slave server: %v", err)
 	}
@@ -158,4 +103,43 @@ func shardStr(shards []uint32) string {
 		parts[i] = strconv.Itoa(int(s))
 	}
 	return strings.Join(parts, ",")
+}
+
+// runPythonScript executes a Python script (relative to testdata/) with the
+// given arguments and returns its stdout. Stderr is logged via t.Log.
+func runPythonScript(t *testing.T, scriptName string, args ...string) []byte {
+	t.Helper()
+
+	requirePython3(t)
+	pyRoot := requirePyquarkchain(t)
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot determine source file location")
+	}
+	script := filepath.Join(filepath.Dir(thisFile), "testdata", scriptName)
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("script not found: %s", script)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "python3", append([]string{script}, args...)...)
+	cmd.Env = append(os.Environ(), "PYQUARKCHAIN="+pyRoot)
+	var stdout, stderr safeBuffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("python script %s start: %v", scriptName, err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("python script %s failed: %v\nstderr:\n%s\nstdout:\n%s",
+			scriptName, err, stderr.String(), stdout.String())
+	}
+	if s := stderr.String(); s != "" {
+		t.Logf("python script %s stderr:\n%s", scriptName, s)
+	}
+	return []byte(stdout.String())
 }

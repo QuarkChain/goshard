@@ -14,7 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
 
-// SlaveConfig holds the runtime configuration for a SlaveServer.
+// SlaveConfig holds the runtime configuration for a SlaveComm.
 type SlaveConfig struct {
 	// ID is this slave's unique identifier (e.g., []byte("S0")).
 	ID []byte
@@ -40,10 +40,10 @@ func (cfg *SlaveConfig) Validate() error {
 	return nil
 }
 
-// SlaveServer is the runtime orchestration layer for the Go slave. It wires
+// SlaveComm is the runtime orchestration layer for the Go slave. It wires
 // together the listener, MasterConn, XshardPool, Dispatcher and PeerConns,
-// matching Python's quarkchain.cluster.slave.SlaveServer.
-type SlaveServer struct {
+// matching Python's quarkchain.cluster.slave.SlaveComm.
+type SlaveComm struct {
 	cfg SlaveConfig
 
 	master        *MasterConn
@@ -66,8 +66,8 @@ type SlaveServer struct {
 	logger log.Logger
 }
 
-// NewSlaveServer creates an unstarted SlaveServer.
-func NewSlaveServer(cfg SlaveConfig, logger log.Logger) (*SlaveServer, error) {
+// NewSlaveComm creates an unstarted SlaveComm.
+func NewSlaveComm(cfg SlaveConfig, logger log.Logger) (*SlaveComm, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid slave config: %w", err)
 	}
@@ -75,7 +75,7 @@ func NewSlaveServer(cfg SlaveConfig, logger log.Logger) (*SlaveServer, error) {
 		logger = log.Root()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &SlaveServer{
+	return &SlaveComm{
 		cfg:     cfg,
 		stopped: make(chan struct{}),
 		ctx:     ctx,
@@ -87,7 +87,7 @@ func NewSlaveServer(cfg SlaveConfig, logger log.Logger) (*SlaveServer, error) {
 // Start begins listening for cluster connections. The first inbound connection
 // becomes the MasterConn; all subsequent inbound connections are treated as
 // xshard slave connections.
-func (s *SlaveServer) Start() error {
+func (s *SlaveComm) Start() error {
 	s.listenerMu.Lock()
 	defer s.listenerMu.Unlock()
 
@@ -114,7 +114,7 @@ func (s *SlaveServer) Start() error {
 
 // Stop closes the listener and all managed connections, then waits for
 // background goroutines to exit.
-func (s *SlaveServer) Stop() {
+func (s *SlaveComm) Stop() {
 	s.stopOnce.Do(func() {
 		s.logger.Info("slave server stopping")
 		s.cancel()
@@ -147,19 +147,19 @@ func (s *SlaveServer) Stop() {
 }
 
 // WaitStopped blocks until Stop has completed.
-func (s *SlaveServer) WaitStopped() <-chan struct{} {
+func (s *SlaveComm) WaitStopped() <-chan struct{} {
 	return s.stopped
 }
 
 // MasterConn returns the current master connection, if any.
-func (s *SlaveServer) MasterConn() *MasterConn {
+func (s *SlaveComm) MasterConn() *MasterConn {
 	s.masterMu.RLock()
 	defer s.masterMu.RUnlock()
 	return s.master
 }
 
 // acceptLoop accepts incoming TCP connections and dispatches them.
-func (s *SlaveServer) acceptLoop() {
+func (s *SlaveComm) acceptLoop() {
 	defer s.wg.Done()
 	for {
 		conn, err := s.listener.Accept()
@@ -190,13 +190,13 @@ func (s *SlaveServer) acceptLoop() {
 
 // runMasterConn sets up the first inbound connection as the MasterConn and
 // shuts down the server when the master connection closes.
-func (s *SlaveServer) runMasterConn(conn net.Conn) {
+func (s *SlaveComm) runMasterConn(conn net.Conn) {
 	defer s.wg.Done()
 
 	mc := NewMasterConnFromConn(conn, s.cfg.MaxPayloadSize, s.cfg.ID, s.cfg.FullShardIDList, s.logger)
 	mc.SetDispatcher(s.dispatcher)
 
-	// Register handlers owned by SlaveServer runtime.
+	// Register handlers owned by SlaveComm runtime.
 	// Connection-level handlers remain registered by MasterConn.
 	mc.RegisterTypedHandlers(map[byte]TypedHandler{
 		byte(wire.ClusterOpConnectToSlavesRequest): s.handleConnectToSlaves,
@@ -218,7 +218,7 @@ func (s *SlaveServer) runMasterConn(conn net.Conn) {
 
 // runXshardConn accepts a subsequent inbound connection as a slave-to-slave
 // xshard connection, tracks it in the pool and cleans it up on close.
-func (s *SlaveServer) runXshardConn(conn net.Conn) {
+func (s *SlaveComm) runXshardConn(conn net.Conn) {
 	defer s.wg.Done()
 
 	s.logger.Info("accepted xshard connection", "remote", conn.RemoteAddr())
@@ -244,7 +244,7 @@ func (s *SlaveServer) runXshardConn(conn net.Conn) {
 // handleConnectToSlaves is the Master handler for CONNECT_TO_SLAVES_REQUEST.
 // It dials every slave in the request (except itself and already-connected
 // slaves), verifies identity via PING/PONG and indexes the connection.
-func (s *SlaveServer) handleConnectToSlaves(req any) (any, error) {
+func (s *SlaveComm) handleConnectToSlaves(req any) (any, error) {
 	r := req.(*wire.ConnectToSlavesRequest)
 	resultList := make([]wire.PrependedSizeBytes4, len(r.SlaveInfoList))
 
@@ -268,6 +268,17 @@ func (s *SlaveServer) handleConnectToSlaves(req any) (any, error) {
 			resultList[i] = wire.PrependedSizeBytes4([]byte(err.Error()))
 			continue
 		}
+
+		// Monitor the outbound connection and clean up from the pool on close.
+		// Mirrors the inbound cleanup path in runXshardConn.
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			<-xc.WaitUntilClosed()
+			for _, shardID := range xc.RemoteFullShardIDList() {
+				s.xshardPool.Remove(shardID, xc)
+			}
+		}()
 	}
 
 	return &wire.ConnectToSlavesResponse{ResultList: resultList}, nil

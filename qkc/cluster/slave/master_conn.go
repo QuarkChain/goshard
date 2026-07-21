@@ -173,9 +173,9 @@ func (mc *MasterConn) registerOpSerializers() {
 // registerHandlers registers all master→slave RPC handlers and marks the
 // fire-and-forget opcodes as non-RPC.
 //
-// NOTE: ClusterOpConnectToSlavesRequest is registered by SlaveServer.runMasterConn
+// NOTE: ClusterOpConnectToSlavesRequest is registered by SlaveComm.runMasterConn
 // via mc.RegisterTypedHandlers, not here. This is deliberate: the handler needs
-// access to SlaveServer.xshardPool which lives in the runtime layer.
+// access to SlaveComm.xshardPool which lives in the runtime layer.
 func (mc *MasterConn) registerHandlers() {
 	mc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
 		// ── Permanent connection handlers ──────────────────────────────
