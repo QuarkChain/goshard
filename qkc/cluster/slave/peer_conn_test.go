@@ -356,18 +356,22 @@ func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 		t.Fatalf("expected error_code 0, got %d", createResp.ErrorCode)
 	}
 
-	// The dispatcher should now hold one PeerConn per local shard.
+	// Capture PeerConn pointers before destroy to avoid racing with dispatcher's
+	// internal map mutation during DestroyPeerConns.
 	branchMap := client.dispatcher.peers[clusterPeerID]
 	if len(branchMap) != len(client.localFullShardIDList) {
 		t.Fatalf("expected %d peer conns, got %d", len(client.localFullShardIDList), len(branchMap))
 	}
+	peerConns := make([]*PeerConn, 0, len(client.localFullShardIDList))
 	for _, branch := range client.localFullShardIDList {
-		if branchMap[branch] == nil {
+		pc := branchMap[branch]
+		if pc == nil {
 			t.Fatalf("missing peer conn for branch 0x%x", branch)
 		}
-		if branchMap[branch].IsClosed() {
+		if pc.IsClosed() {
 			t.Fatalf("peer conn for branch 0x%x is already closed", branch)
 		}
+		peerConns = append(peerConns, pc)
 	}
 
 	// Destroy the peer connections.
@@ -383,9 +387,10 @@ func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 	})
 
 	// Wait for peer connections to be closed (async since handler runs in goroutine).
+	// Check captured pointers instead of reading dispatcher.peers to avoid data race.
 	waitForCondition(t, 2*time.Second, func() bool {
-		for _, branch := range client.localFullShardIDList {
-			if pc := client.dispatcher.peers[clusterPeerID][branch]; pc != nil && !pc.IsClosed() {
+		for _, pc := range peerConns {
+			if !pc.IsClosed() {
 				return false
 			}
 		}

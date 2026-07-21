@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"slices"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
@@ -33,16 +32,16 @@ type MasterConn struct {
 	localFullShardIDList []uint32
 
 	// dispatcher routes peer traffic (cluster_peer_id != 0) to virtual PeerConns.
-	// It is nil until wired by SetDispatcher.
-	dispatcher   *Dispatcher
-	dispatcherMu sync.RWMutex
+	// It is nil until wired by SetDispatcher. Once Start() is called, it is
+	// immutable — handlers and Close() read it without synchronization.
+	dispatcher *Dispatcher
 
 	// peerRPCIDs tracks the most recent inbound RPC ID per cluster_peer_id.
 	// cluster_peer_id == 0 is the master itself; each non-zero peer has its
 	// own independent monotonic sequence so PeerConns sharing this MasterConn
 	// do not collide on rpc_id.
-	peerRPCIDs   map[uint64]int64
-	peerRPCIDsMu sync.Mutex
+	// Only accessed by readLoop; no lock needed.
+	peerRPCIDs map[uint64]int64
 }
 
 // NewMasterConn dials the master at addr and returns a MasterConn.
@@ -73,7 +72,7 @@ func newMasterConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 		peerRPCIDs:           make(map[uint64]int64),
 	}
 
-	mc.rpcConn.validateRPCID = mc.validatePeerRPCID
+	mc.baseConn.validateRPCID = mc.validatePeerRPCID
 
 	mc.registerOpSerializers()
 	mc.registerHandlers()
@@ -238,9 +237,6 @@ func emptyRawBytes() *wire.RawBytes {
 // cluster_peer_id. This lets multiple PeerConns share one MasterConn without
 // colliding on rpc_id.
 func (mc *MasterConn) validatePeerRPCID(clusterPeerID uint64, rpcID uint64) bool {
-	mc.peerRPCIDsMu.Lock()
-	defer mc.peerRPCIDsMu.Unlock()
-
 	last, ok := mc.peerRPCIDs[clusterPeerID]
 	if !ok {
 		last = -1
@@ -286,11 +282,9 @@ func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
 	// registry. Once the shard registry is available, replace with the actual
 	// per-shard branch list from the registry.
 
-	mc.dispatcherMu.RLock()
 	d := mc.dispatcher
-	mc.dispatcherMu.RUnlock()
 	if d != nil {
-		d.CreatePeerConns(r.ClusterPeerID, mc.localFullShardIDList, mc, mc.rpcConn.log)
+		d.CreatePeerConns(r.ClusterPeerID, mc.localFullShardIDList, mc, mc.baseConn.log)
 	}
 
 	return &wire.CreateClusterPeerConnectionResponse{ErrorCode: 0}, nil
@@ -301,9 +295,7 @@ func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
 func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
 	r := req.(*wire.DestroyClusterPeerConnectionCommand)
 
-	mc.dispatcherMu.RLock()
 	d := mc.dispatcher
-	mc.dispatcherMu.RUnlock()
 	if d != nil {
 		d.DestroyPeerConns(r.ClusterPeerID)
 	}
@@ -595,12 +587,13 @@ func (mc *MasterConn) ForwardFrame(f *wire.Frame) error {
 
 // SetDispatcher wires the dispatcher that routes peer traffic. It also installs
 // a forwarder that validates the branch before routing.
+//
+// Must be called before Start(). dispatcher and forwarder are immutable after Start().
+//
 // Python: MasterConnection.get_connection_to_forward() closes the connection if
 // the branch is not in the configured full_shard_id_list.
 func (mc *MasterConn) SetDispatcher(d *Dispatcher) {
-	mc.dispatcherMu.Lock()
 	mc.dispatcher = d
-	mc.dispatcherMu.Unlock()
 
 	// Create a wrapper forwarder that validates branch before routing.
 	// Python: MasterConnection.get_connection_to_forward() only validates
@@ -624,13 +617,11 @@ func (mc *MasterConn) isValidBranch(branch uint32) bool {
 
 // Close closes the master connection and all associated peer connections.
 func (mc *MasterConn) Close() error {
-	mc.dispatcherMu.RLock()
 	d := mc.dispatcher
-	mc.dispatcherMu.RUnlock()
 	if d != nil {
 		d.Close()
 	}
-	return mc.rpcConn.Close()
+	return mc.baseConn.Close()
 }
 
 // SendRPCMeta sends a request with ClusterMetadata and waits for the response.
