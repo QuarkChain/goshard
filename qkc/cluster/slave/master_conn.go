@@ -19,13 +19,13 @@ import (
 //
 // Architecture:
 //
-//	MasterConn embeds *rpcConn
+//	MasterConn embeds *baseConn
 //
 // All master→slave ClusterOp handlers are registered during construction.
 // Business handlers that depend on unported components (Shard, StateDB, etc.)
 // are implemented as protocol-compatible stubs that return valid responses.
 type MasterConn struct {
-	*rpcConn
+	*baseConn
 
 	localID              []byte
 	localFullShardIDList []uint32
@@ -53,7 +53,7 @@ func newMasterConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 		return wire.ReadFrame(r, maxPayloadSize)
 	}
 	mc := &MasterConn{
-		rpcConn:              newRPCConnFromConn(conn, readFrame, wire.WriteFrame, logger),
+		baseConn:             newBaseConnFromConn(conn, readFrame, wire.WriteFrame, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 	}
@@ -68,7 +68,7 @@ func newMasterConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 // CLUSTER_OP_SERIALIZER_MAP. This covers master→slave, slave→master and
 // slave→slave opcodes so outbound RPC responses can be deserialized if needed.
 func (mc *MasterConn) registerOpSerializers() {
-	mc.rpcConn.RegisterOpSerializers(map[byte]*OpSerializer{
+	mc.baseConn.RegisterOpSerializers(map[byte]*OpSerializer{
 		// §1 Cluster initialisation
 		byte(wire.ClusterOpPing):                          OpSerializerFor[wire.PingRequest, wire.PongResponse](),
 		byte(wire.ClusterOpPong):                          OpSerializerFor[wire.PongResponse, wire.PingRequest](),
@@ -157,7 +157,7 @@ func (mc *MasterConn) registerOpSerializers() {
 // registerHandlers registers all master→slave RPC handlers and marks the
 // fire-and-forget opcodes as non-RPC.
 func (mc *MasterConn) registerHandlers() {
-	mc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
+	mc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
 		// ── Permanent connection handlers ──────────────────────────────
 		// These handlers manage connection lifecycle and peer routing.
 		// They belong to MasterConn permanently.
@@ -201,7 +201,7 @@ func (mc *MasterConn) registerHandlers() {
 		byte(wire.ClusterOpGetTotalBalanceRequest):             mc.handleGetTotalBalance,
 	})
 
-	mc.rpcConn.RegisterNonRPCOps([]byte{
+	mc.baseConn.RegisterNonRPCOps([]byte{
 		byte(wire.ClusterOpDestroyClusterPeerConnectionCommand),
 	})
 }
@@ -230,8 +230,11 @@ func (mc *MasterConn) LocalFullShardIDList() []uint32 {
 // handlePing responds to the master's PING with this slave's identity.
 // Python: MasterConnection.handle_ping -> Pong(self.slave_server.id, ...).
 func (mc *MasterConn) handlePing(req any) (any, error) {
-	// TODO: when core.RootBlock is ported, use ping.root_tip to drive shard creation.
-	_ = req.(*wire.PingRequest)
+	ping := req.(*wire.PingRequest)
+
+	if ping.RootTip != nil {
+		// TODO: create/update shard runtime from root tip. when core.RootBlock is ported, use ping.root_tip to drive shard creation.
+	}
 
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), mc.localID...),
@@ -274,7 +277,7 @@ func (mc *MasterConn) handleConnectToSlaves(req any) (any, error) {
 // Python: MineResponse(error_code=0).
 func (mc *MasterConn) handleMine(req any) (any, error) {
 	_ = req.(*wire.MineRequest)
-	// TODO: delegate to SlaveServer.start_mining / stop_mining.
+	// TODO: delegate to SlaveComm.start_mining / stop_mining.
 	mc.log.Warn("Mine stub invoked — mining command will be discarded", "remote", mc.RemoteAddr())
 	return &wire.MineResponse{ErrorCode: 0}, nil
 }
@@ -283,7 +286,7 @@ func (mc *MasterConn) handleMine(req any) (any, error) {
 // Python: GenTxResponse(error_code=0).
 func (mc *MasterConn) handleGenTx(req any) (any, error) {
 	_ = req.(*wire.GenTxRequest)
-	// TODO: delegate to SlaveServer.create_transactions.
+	// TODO: delegate to SlaveComm.create_transactions.
 	mc.log.Warn("GenTx stub invoked — transaction generation will be discarded", "remote", mc.RemoteAddr())
 	return &wire.GenTxResponse{ErrorCode: 0}, nil
 }
@@ -292,7 +295,7 @@ func (mc *MasterConn) handleGenTx(req any) (any, error) {
 // Python: returns AddRootBlockResponse(error_code=0, switched=False) on success.
 func (mc *MasterConn) handleAddRootBlock(req any) (any, error) {
 	_ = req.(*wire.AddRootBlockRequest)
-	// TODO: delegate to shard.add_root_block and SlaveServer.create_shards.
+	// TODO: delegate to shard.add_root_block and SlaveComm.create_shards.
 	mc.log.Warn("AddRootBlock stub invoked — root block will be discarded", "remote", mc.RemoteAddr())
 	return &wire.AddRootBlockResponse{ErrorCode: 0, Switched: false}, nil
 }
@@ -336,7 +339,7 @@ func (mc *MasterConn) handleGetUnconfirmedHeaders(req any) (any, error) {
 // Python: returns empty list when there are no shards for the address.
 func (mc *MasterConn) handleGetAccountData(req any) (any, error) {
 	_ = req.(*wire.GetAccountDataRequest)
-	// TODO: delegate to SlaveServer.get_account_data.
+	// TODO: delegate to SlaveComm.get_account_data.
 	mc.log.Warn("GetAccountData stub invoked — returning empty list", "remote", mc.RemoteAddr())
 	return &wire.GetAccountDataResponse{ErrorCode: 0, AccountBranchDataList: []wire.AccountBranchData{}}, nil
 }
@@ -345,7 +348,7 @@ func (mc *MasterConn) handleGetAccountData(req any) (any, error) {
 // Python: returns AddTransactionResponse(error_code=0) on success.
 func (mc *MasterConn) handleAddTransaction(req any) (any, error) {
 	_ = req.(*wire.AddTransactionRequest)
-	// TODO: delegate to SlaveServer.add_tx.
+	// TODO: delegate to SlaveComm.add_tx.
 	mc.log.Warn("AddTransaction stub invoked — transaction will be discarded", "remote", mc.RemoteAddr())
 	return &wire.AddTransactionResponse{ErrorCode: 0}, nil
 }
@@ -354,7 +357,7 @@ func (mc *MasterConn) handleAddTransaction(req any) (any, error) {
 // Python returns error_code=1 with an empty block when not found.
 func (mc *MasterConn) handleGetMinorBlock(req any) (any, error) {
 	_ = req.(*wire.GetMinorBlockRequest)
-	// TODO: delegate to SlaveServer.get_minor_block_by_hash / by_height.
+	// TODO: delegate to SlaveComm.get_minor_block_by_hash / by_height.
 	return &wire.GetMinorBlockResponse{
 		ErrorCode:  1,
 		MinorBlock: emptyRawBytes(),
@@ -366,7 +369,7 @@ func (mc *MasterConn) handleGetMinorBlock(req any) (any, error) {
 // Python returns error_code=1 with an empty block when not found.
 func (mc *MasterConn) handleGetTransaction(req any) (any, error) {
 	_ = req.(*wire.GetTransactionRequest)
-	// TODO: delegate to SlaveServer.get_transaction_by_hash.
+	// TODO: delegate to SlaveComm.get_transaction_by_hash.
 	return &wire.GetTransactionResponse{
 		ErrorCode:  1,
 		MinorBlock: emptyRawBytes(),
@@ -379,7 +382,7 @@ func (mc *MasterConn) handleGetTransaction(req any) (any, error) {
 func (mc *MasterConn) handleSyncMinorBlockList(req any) (any, error) {
 	r := req.(*wire.SyncMinorBlockListRequest)
 	_ = r
-	// TODO: delegate to SlaveServer.add_block_list_for_sync.
+	// TODO: delegate to SlaveComm.add_block_list_for_sync.
 	mc.log.Warn("SyncMinorBlockList stub invoked — block list will be discarded", "remote", mc.RemoteAddr())
 	return &wire.SyncMinorBlockListResponse{
 		ErrorCode:        0,
@@ -392,7 +395,7 @@ func (mc *MasterConn) handleSyncMinorBlockList(req any) (any, error) {
 // Python returns error_code=1 when execution fails (e.g. shard missing).
 func (mc *MasterConn) handleExecuteTransaction(req any) (any, error) {
 	_ = req.(*wire.ExecuteTransactionRequest)
-	// TODO: delegate to SlaveServer.execute_tx.
+	// TODO: delegate to SlaveComm.execute_tx.
 	return &wire.ExecuteTransactionResponse{ErrorCode: 1, Result: []byte{}}, nil
 }
 
@@ -400,7 +403,7 @@ func (mc *MasterConn) handleExecuteTransaction(req any) (any, error) {
 // Python returns error_code=1 with empty block/receipt when not found.
 func (mc *MasterConn) handleGetTransactionReceipt(req any) (any, error) {
 	_ = req.(*wire.GetTransactionReceiptRequest)
-	// TODO: delegate to SlaveServer.get_transaction_receipt.
+	// TODO: delegate to SlaveComm.get_transaction_receipt.
 	return &wire.GetTransactionReceiptResponse{
 		ErrorCode:  1,
 		MinorBlock: emptyRawBytes(),
@@ -413,7 +416,7 @@ func (mc *MasterConn) handleGetTransactionReceipt(req any) (any, error) {
 // Python returns error_code=1 with empty lists when the shard is missing.
 func (mc *MasterConn) handleGetTransactionListByAddress(req any) (any, error) {
 	_ = req.(*wire.GetTransactionListByAddressRequest)
-	// TODO: delegate to SlaveServer.get_transaction_list_by_address.
+	// TODO: delegate to SlaveComm.get_transaction_list_by_address.
 	return &wire.GetTransactionListByAddressResponse{
 		ErrorCode: 1,
 		TxList:    []wire.TransactionDetail{},
@@ -425,7 +428,7 @@ func (mc *MasterConn) handleGetTransactionListByAddress(req any) (any, error) {
 // Python returns error_code=1 with empty logs when the shard is missing.
 func (mc *MasterConn) handleGetLogs(req any) (any, error) {
 	_ = req.(*wire.GetLogRequest)
-	// TODO: delegate to SlaveServer.get_logs.
+	// TODO: delegate to SlaveComm.get_logs.
 	return &wire.GetLogResponse{ErrorCode: 1, Logs: []*wire.RawBytes{}}, nil
 }
 
@@ -433,7 +436,7 @@ func (mc *MasterConn) handleGetLogs(req any) (any, error) {
 // Python returns error_code=1 when estimation fails (e.g. shard missing).
 func (mc *MasterConn) handleEstimateGas(req any) (any, error) {
 	_ = req.(*wire.EstimateGasRequest)
-	// TODO: delegate to SlaveServer.estimate_gas.
+	// TODO: delegate to SlaveComm.estimate_gas.
 	return &wire.EstimateGasResponse{ErrorCode: 1, Result: 0}, nil
 }
 
@@ -441,7 +444,7 @@ func (mc *MasterConn) handleEstimateGas(req any) (any, error) {
 // Python returns error_code=1 with a zero result when the shard is missing.
 func (mc *MasterConn) handleGetStorageAt(req any) (any, error) {
 	_ = req.(*wire.GetStorageRequest)
-	// TODO: delegate to SlaveServer.get_storage_at.
+	// TODO: delegate to SlaveComm.get_storage_at.
 	return &wire.GetStorageResponse{ErrorCode: 1, Result: [wire.HashLength]byte{}}, nil
 }
 
@@ -449,7 +452,7 @@ func (mc *MasterConn) handleGetStorageAt(req any) (any, error) {
 // Python returns error_code=1 with empty bytes when the shard is missing.
 func (mc *MasterConn) handleGetCode(req any) (any, error) {
 	_ = req.(*wire.GetCodeRequest)
-	// TODO: delegate to SlaveServer.get_code.
+	// TODO: delegate to SlaveComm.get_code.
 	return &wire.GetCodeResponse{ErrorCode: 1, Result: []byte{}}, nil
 }
 
@@ -457,7 +460,7 @@ func (mc *MasterConn) handleGetCode(req any) (any, error) {
 // Python returns error_code=1 with result 0 when the shard is missing.
 func (mc *MasterConn) handleGasPrice(req any) (any, error) {
 	_ = req.(*wire.GasPriceRequest)
-	// TODO: delegate to SlaveServer.gas_price.
+	// TODO: delegate to SlaveComm.gas_price.
 	return &wire.GasPriceResponse{ErrorCode: 1, Result: 0}, nil
 }
 
@@ -465,7 +468,7 @@ func (mc *MasterConn) handleGasPrice(req any) (any, error) {
 // Python returns error_code=1 when work cannot be produced.
 func (mc *MasterConn) handleGetWork(req any) (any, error) {
 	_ = req.(*wire.GetWorkRequest)
-	// TODO: delegate to SlaveServer.get_work.
+	// TODO: delegate to SlaveComm.get_work.
 	return &wire.GetWorkResponse{ErrorCode: 1}, nil
 }
 
@@ -473,7 +476,7 @@ func (mc *MasterConn) handleGetWork(req any) (any, error) {
 // Python returns error_code=1, success=False when submission fails.
 func (mc *MasterConn) handleSubmitWork(req any) (any, error) {
 	_ = req.(*wire.SubmitWorkRequest)
-	// TODO: delegate to SlaveServer.submit_work.
+	// TODO: delegate to SlaveComm.submit_work.
 	return &wire.SubmitWorkResponse{ErrorCode: 1, Success: false}, nil
 }
 
@@ -491,7 +494,7 @@ func (mc *MasterConn) handleCheckMinorBlock(req any) (any, error) {
 // Python returns error_code=1 with empty lists when the shard is missing.
 func (mc *MasterConn) handleGetAllTransactions(req any) (any, error) {
 	_ = req.(*wire.GetAllTransactionsRequest)
-	// TODO: delegate to SlaveServer.get_all_transactions.
+	// TODO: delegate to SlaveComm.get_all_transactions.
 	return &wire.GetAllTransactionsResponse{
 		ErrorCode: 1,
 		TxList:    []wire.TransactionDetail{},
@@ -503,7 +506,7 @@ func (mc *MasterConn) handleGetAllTransactions(req any) (any, error) {
 // Python returns GetRootChainStakesResponse(0, stakes, signer).
 func (mc *MasterConn) handleGetRootChainStakes(req any) (any, error) {
 	_ = req.(*wire.GetRootChainStakesRequest)
-	// TODO: delegate to SlaveServer.get_root_chain_stakes.
+	// TODO: delegate to SlaveComm.get_root_chain_stakes.
 	mc.log.Warn("GetRootChainStakes stub invoked — returning zero values", "remote", mc.RemoteAddr())
 	return &wire.GetRootChainStakesResponse{
 		ErrorCode: 0,
@@ -516,7 +519,7 @@ func (mc *MasterConn) handleGetRootChainStakes(req any) (any, error) {
 // Python catches exceptions and returns GetTotalBalanceResponse(1, 0, b"").
 func (mc *MasterConn) handleGetTotalBalance(req any) (any, error) {
 	_ = req.(*wire.GetTotalBalanceRequest)
-	// TODO: delegate to SlaveServer.get_total_balance.
+	// TODO: delegate to SlaveComm.get_total_balance.
 	return &wire.GetTotalBalanceResponse{
 		ErrorCode:    1,
 		TotalBalance: serialize.BigUint{},
@@ -528,18 +531,18 @@ func (mc *MasterConn) handleGetTotalBalance(req any) (any, error) {
 // (cluster_peer_id != 0). The Dispatcher uses this to route frames to
 // virtual PeerConns.
 func (mc *MasterConn) SetForwarder(f func(*wire.Frame) bool) {
-	mc.rpcConn.SetForwarder(f)
+	mc.baseConn.SetForwarder(f)
 }
 
 // ForwardFrame writes a raw frame to the underlying TCP transport. It is used
 // by virtual PeerConns to send responses back to the master.
 func (mc *MasterConn) ForwardFrame(f *wire.Frame) error {
-	return mc.rpcConn.writeFrame(f)
+	return mc.baseConn.writeFrame(f)
 }
 
 // SendRPCMeta sends a request with ClusterMetadata and waits for the response.
 func (mc *MasterConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, meta wire.ClusterMetadata) (*wire.Frame, error) {
-	return mc.rpcConn.SendRPCMeta(ctx, opcode, payload, meta)
+	return mc.baseConn.SendRPCMeta(ctx, opcode, payload, meta)
 }
 
 // SendAddMinorBlockHeader sends AddMinorBlockHeaderRequest to the master and
