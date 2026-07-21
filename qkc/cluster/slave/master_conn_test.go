@@ -98,7 +98,7 @@ func writeRawMasterFrame(t *testing.T, conn net.Conn, frame *wire.Frame) {
 
 // hasHandler reports whether the connection has a typed handler for opcode.
 func hasHandler(c *MasterConn, opcode byte) bool {
-	rv := reflect.ValueOf(c.rpcConn).Elem()
+	rv := reflect.ValueOf(c.baseConn).Elem()
 	handlers := rv.FieldByName("typedHandlers").MapKeys()
 	for _, k := range handlers {
 		if k.Uint() == uint64(opcode) {
@@ -110,7 +110,7 @@ func hasHandler(c *MasterConn, opcode byte) bool {
 
 // hasSerializer reports whether the connection has an OpSerializer for opcode.
 func hasSerializer(c *MasterConn, opcode byte) bool {
-	rv := reflect.ValueOf(c.rpcConn).Elem()
+	rv := reflect.ValueOf(c.baseConn).Elem()
 	serializers := rv.FieldByName("serializers").MapKeys()
 	for _, k := range serializers {
 		if k.Uint() == uint64(opcode) {
@@ -175,7 +175,7 @@ func TestMasterConn_AllMasterHandlersRegistered(t *testing.T) {
 
 // isNonRPC reports whether opcode is registered as fire-and-forget.
 func isNonRPC(c *MasterConn, opcode byte) bool {
-	rv := reflect.ValueOf(c.rpcConn).Elem()
+	rv := reflect.ValueOf(c.baseConn).Elem()
 	nonRPCOps := rv.FieldByName("nonRPCOps").MapKeys()
 	for _, k := range nonRPCOps {
 		if k.Uint() == uint64(opcode) {

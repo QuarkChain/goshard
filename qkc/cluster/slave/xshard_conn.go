@@ -22,18 +22,18 @@ const defaultDialTimeout = 10 * time.Second
 //
 // Architecture:
 //
-//	XshardConn  embeds  *rpcConn  embeds  *transport
+//	XshardConn  embeds  *baseConn  embeds  *transport
 //
 // No forwarder — all frames are dispatched locally. RPC ID validation is
-// global monotonic (the default in rpcConn).
+// global monotonic (the default in baseConn).
 type XshardConn struct {
-	*rpcConn
+	*baseConn
 
 	// local identity of this slave, used in PONG responses.
 	localID              []byte
 	localFullShardIDList []uint32
 
-	// peer identity state, protected by its own mutex (not rpcConn.closeMu).
+	// peer identity state, protected by its own mutex (not baseConn.closeMu).
 	stateMu               sync.Mutex
 	remoteID              []byte
 	remoteFullShardIDList []uint32
@@ -65,7 +65,7 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 		return wire.ReadFrameNoMeta(r, maxPayloadSize)
 	}
 	xc := &XshardConn{
-		rpcConn:              newRPCConnFromConn(conn, readFrame, wire.WriteFrameNoMeta, logger),
+		baseConn:             newBaseConnFromConn(conn, readFrame, wire.WriteFrameNoMeta, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 		pingReceived:         make(chan struct{}),
@@ -73,7 +73,7 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 
 	// Register serializers for all opcodes that SlaveConnection understands.
 	// This matches Python's SLAVE_OP_SERIALIZER_MAP.
-	xc.rpcConn.RegisterOpSerializers(map[byte]*OpSerializer{
+	xc.baseConn.RegisterOpSerializers(map[byte]*OpSerializer{
 		byte(wire.ClusterOpPing):                        OpSerializerFor[wire.PingRequest, wire.PongResponse](),
 		byte(wire.ClusterOpAddXshardTxListRequest):      OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](),
 		byte(wire.ClusterOpBatchAddXshardTxListRequest): OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](),
@@ -82,7 +82,7 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 	// Register handlers for all slave-to-slave RPCs.
 	// PING/PONG is the slave-to-slave identity exchange.
 	// ADD_XSHARD_TX_LIST and BATCH_ADD_XSHARD_TX_LIST are stubs for protocol compatibility.
-	xc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
+	xc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
 		// ── Permanent connection handler ───────────────────────────────
 		// PING/PONG is the slave-to-slave identity exchange.
 
@@ -116,12 +116,12 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 	x.stateMu.Unlock()
 
 	if len(storedShardList) == 0 {
-		// Returning error causes rpcConn to close connection (Python's close_with_error)
+		// Returning error causes baseConn to close connection (Python's close_with_error)
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
 
 	// Signal ping received AFTER check passes (matches Python's ping_received_event.set())
-	if !x.rpcConn.Closed() {
+	if !x.baseConn.Closed() {
 		x.pingOnce.Do(func() { close(x.pingReceived) })
 	}
 
@@ -185,8 +185,8 @@ func (x *XshardConn) RemoteFullShardIDList() []uint32 {
 func (x *XshardConn) WaitUntilPingReceived() bool {
 	select {
 	case <-x.pingReceived:
-		return !x.rpcConn.Closed()
-	case <-x.rpcConn.Error():
+		return !x.baseConn.Closed()
+	case <-x.baseConn.Error():
 		return false
 	}
 }
@@ -206,7 +206,7 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 		return nil, nil, fmt.Errorf("serialize ping: %w", err)
 	}
 
-	frame, err := x.rpcConn.SendRPC(ctx, byte(wire.ClusterOpPing), payload)
+	frame, err := x.baseConn.SendRPC(ctx, byte(wire.ClusterOpPing), payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("send ping: %w", err)
 	}
@@ -222,11 +222,11 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 // SendXshardTxList sends an AddXshardTxListRequest via RPC and returns the response.
 // Python's ADD_XSHARD_TX_LIST_REQUEST is an RPC (in SLAVE_OP_RPC_MAP), not fire-and-forget.
 func (x *XshardConn) SendXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
-	return x.rpcConn.SendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), payload)
+	return x.baseConn.SendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), payload)
 }
 
 // SendBatchXshardTxList sends a BatchAddXshardTxListRequest via RPC and returns the response.
 // Python's BATCH_ADD_XSHARD_TX_LIST_REQUEST is an RPC (in SLAVE_OP_RPC_MAP).
 func (x *XshardConn) SendBatchXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
-	return x.rpcConn.SendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), payload)
+	return x.baseConn.SendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), payload)
 }

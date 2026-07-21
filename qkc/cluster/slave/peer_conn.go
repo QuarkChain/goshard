@@ -82,7 +82,7 @@ func (vt *virtualTransport) receive(frame *wire.Frame) bool {
 // responsibilities: independent RPC ID namespace, CommandOp handler dispatch,
 // and lifecycle tied to master commands.
 type PeerConn struct {
-	*rpcConn
+	*baseConn
 
 	clusterPeerID uint64
 	branch        uint32
@@ -94,7 +94,7 @@ type PeerConn struct {
 func NewPeerConn(clusterPeerID uint64, branch uint32, masterConn *MasterConn, logger log.Logger) *PeerConn {
 	vt := newVirtualTransport(clusterPeerID, branch, masterConn)
 	pc := &PeerConn{
-		rpcConn:       newRPCConn(vt, logger),
+		baseConn:      newBaseConn(vt, logger),
 		clusterPeerID: clusterPeerID,
 		branch:        branch,
 		vt:            vt,
@@ -111,7 +111,7 @@ const ReservedClusterPeerID = 0
 // registerOpSerializers registers serializers for every CommandOp so that both
 // inbound requests and outbound responses can be (de)serialized.
 func (pc *PeerConn) registerOpSerializers() {
-	pc.rpcConn.RegisterOpSerializers(map[byte]*OpSerializer{
+	pc.baseConn.RegisterOpSerializers(map[byte]*OpSerializer{
 		// §1 Hello / master-only
 		byte(wire.CommandOpHello):                          OpSerializerFor[wire.HelloCommand, wire.HelloCommand](),
 		byte(wire.CommandOpNewMinorBlockHeaderList):        OpSerializerFor[wire.NewMinorBlockHeaderListCommand, wire.NewMinorBlockHeaderListCommand](),
@@ -144,7 +144,7 @@ func (pc *PeerConn) registerOpSerializers() {
 // registerHandlers registers the shard-level peer handlers. These are stubs;
 // real implementations require the shard runtime to be ported.
 func (pc *PeerConn) registerHandlers() {
-	pc.rpcConn.RegisterTypedHandlers(map[byte]TypedHandler{
+	pc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
 		// ── Migration stubs ─────────────────────────────────────────────
 		// These handlers exist only to preserve protocol compatibility.
 		// Real implementations must be added outside the connection layer.
@@ -161,7 +161,7 @@ func (pc *PeerConn) registerHandlers() {
 		byte(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest): pc.handleGetMinorBlockHeaderListWithSkipRequest,
 	})
 
-	pc.rpcConn.RegisterNonRPCOps([]byte{
+	pc.baseConn.RegisterNonRPCOps([]byte{
 		byte(wire.CommandOpNewMinorBlockHeaderList),
 		byte(wire.CommandOpNewTransactionList),
 		byte(wire.CommandOpNewBlockMinor),

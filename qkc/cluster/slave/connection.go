@@ -63,8 +63,8 @@ const (
 
 // ── transport abstraction ────────────────────────────────────────────────────
 
-// frameTransport is the minimal transport contract required by rpcConn.
-// It lets rpcConn run over both a real TCP socket (transport) and a
+// frameTransport is the minimal transport contract required by baseConn.
+// It lets baseConn run over both a real TCP socket (transport) and a
 // virtual in-memory channel (virtualTransport used by PeerConn).
 type frameTransport interface {
 	readFrame() (*wire.Frame, error)
@@ -131,7 +131,7 @@ func (t *transport) RemoteAddr() string {
 	return t.remoteAddr
 }
 
-// ── rpcConn: RPC protocol engine ─────────────────────────────────────────────
+// ── baseConn: RPC protocol engine ─────────────────────────────────────────────
 
 // rpcResult is the value delivered over a pending RPC response channel.
 type rpcResult struct {
@@ -139,7 +139,7 @@ type rpcResult struct {
 	err   error
 }
 
-// rpcConn is the shared RPC engine used by XshardConn (and later MasterConn).
+// baseConn is the shared RPC engine used by XshardConn (and later MasterConn).
 // It handles lifecycle, handler/serializer registration, readLoop dispatch,
 // RPC request/response matching, and monotonic RPC ID validation.
 //
@@ -152,7 +152,7 @@ type rpcResult struct {
 // closeMu → stateMu       (Close)
 //
 // pendingMu and stateMu are never held together; readLoop only holds pendingMu.
-type rpcConn struct {
+type baseConn struct {
 	frameTransport
 
 	// conn is the underlying net.Conn for TCP-based connections.
@@ -167,13 +167,14 @@ type rpcConn struct {
 	errChan   chan error
 	startOnce sync.Once
 
-	handlersMu    sync.RWMutex
+	// typedHandlers and nonRPCOps are immutable configuration populated before Start().
+	// readLoop reads them without synchronization.
 	typedHandlers map[byte]TypedHandler
+	nonRPCOps     map[byte]struct{}
 
-	serializersMu sync.RWMutex
-	serializers   map[byte]*OpSerializer
-
-	nonRPCOps map[byte]struct{}
+	// serializers is immutable configuration populated before Start().
+	// readLoop reads it without synchronization.
+	serializers map[byte]*OpSerializer
 
 	pendingMu sync.Mutex
 	pending   map[uint64]chan rpcResult
@@ -182,16 +183,18 @@ type rpcConn struct {
 
 	// peerRPCID tracks the most recent inbound RPC ID for monotonic validation.
 	// Initialized to -1 (like Python) so the first valid rpc_id must be >= 1.
-	peerRPCID   int64
-	peerRPCIDMu sync.Mutex
+	// Only accessed by the owning connection's readLoop goroutine; no lock needed.
+	peerRPCID int64
 
 	// validateRPCID is called by readLoop for every RPC request frame.
 	// Default: simple global monotonic validation.
 	// MasterConn replaces with per-peer tracking.
 	validateRPCID func(clusterPeerID uint64, rpcID uint64) bool
 
-	forwarder   func(*wire.Frame) bool
-	forwarderMu sync.RWMutex
+	// forwarder is an immutable configuration set before Start().
+	// Once the readLoop begins, it is never modified.
+	// It is nil for XshardConn; MasterConn sets it via SetDispatcher.
+	forwarder func(*wire.Frame) bool
 
 	closeMu sync.Mutex
 	closed  bool
@@ -199,11 +202,11 @@ type rpcConn struct {
 	log log.Logger
 }
 
-func newRPCConn(tr frameTransport, logger log.Logger) *rpcConn {
+func newBaseConn(tr frameTransport, logger log.Logger) *baseConn {
 	if logger == nil {
 		logger = log.Root()
 	}
-	rc := &rpcConn{
+	rc := &baseConn{
 		frameTransport: tr,
 		typedHandlers:  make(map[byte]TypedHandler),
 		serializers:    make(map[byte]*OpSerializer),
@@ -220,20 +223,20 @@ func newRPCConn(tr frameTransport, logger log.Logger) *rpcConn {
 	return rc
 }
 
-func newRPCConnFromConn(
+func newBaseConnFromConn(
 	conn net.Conn,
 	readFrame func(io.Reader) (*wire.Frame, error),
 	writeFrame func(io.Writer, *wire.Frame) error,
 	logger log.Logger,
-) *rpcConn {
-	rc := newRPCConn(newTransport(conn, readFrame, writeFrame), logger)
+) *baseConn {
+	rc := newBaseConn(newTransport(conn, readFrame, writeFrame), logger)
 	rc.conn = conn
 	return rc
 }
 
 // Start transitions the connection to ACTIVE and launches the read loop.
 // If the connection is already closed, Start is a no-op.
-func (c *rpcConn) Start() {
+func (c *baseConn) Start() {
 	c.startOnce.Do(func() {
 		c.stateMu.Lock()
 		if c.state == ConnectionStateClosed {
@@ -248,7 +251,7 @@ func (c *rpcConn) Start() {
 }
 
 // Close closes the connection and wakes all pending RPCs.
-func (c *rpcConn) Close() error {
+func (c *baseConn) Close() error {
 	c.closeMu.Lock()
 	if c.closed {
 		c.closeMu.Unlock()
@@ -285,9 +288,7 @@ func (c *rpcConn) Close() error {
 	return c.close()
 }
 
-func (c *rpcConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool {
-	c.peerRPCIDMu.Lock()
-	defer c.peerRPCIDMu.Unlock()
+func (c *baseConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool {
 	if int64(rpcID) <= c.peerRPCID {
 		return false
 	}
@@ -296,9 +297,8 @@ func (c *rpcConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool 
 }
 
 // RegisterTypedHandlers registers opcode handlers. Nil handlers panic.
-func (c *rpcConn) RegisterTypedHandlers(handlers map[byte]TypedHandler) {
-	c.handlersMu.Lock()
-	defer c.handlersMu.Unlock()
+// Must be called before Start(). Handlers are immutable after Start().
+func (c *baseConn) RegisterTypedHandlers(handlers map[byte]TypedHandler) {
 	for opcode, handler := range handlers {
 		if handler == nil {
 			panic("handler must not be nil")
@@ -308,9 +308,8 @@ func (c *rpcConn) RegisterTypedHandlers(handlers map[byte]TypedHandler) {
 }
 
 // RegisterOpSerializers registers opcode serializers.
-func (c *rpcConn) RegisterOpSerializers(serializers map[byte]*OpSerializer) {
-	c.serializersMu.Lock()
-	defer c.serializersMu.Unlock()
+// Must be called before Start(). Serializers are immutable after Start().
+func (c *baseConn) RegisterOpSerializers(serializers map[byte]*OpSerializer) {
 	for opcode, ser := range serializers {
 		if ser == nil {
 			panic("serializer must not be nil")
@@ -321,9 +320,8 @@ func (c *rpcConn) RegisterOpSerializers(serializers map[byte]*OpSerializer) {
 
 // RegisterNonRPCOps marks opcodes as non-RPC (fire-and-forget), meaning they
 // must have rpc_id == 0.
-func (c *rpcConn) RegisterNonRPCOps(ops []byte) {
-	c.handlersMu.Lock()
-	defer c.handlersMu.Unlock()
+// Must be called before Start(). NonRPC ops are immutable after Start().
+func (c *baseConn) RegisterNonRPCOps(ops []byte) {
 	for _, op := range ops {
 		c.nonRPCOps[op] = struct{}{}
 	}
@@ -331,23 +329,23 @@ func (c *rpcConn) RegisterNonRPCOps(ops []byte) {
 
 // SetForwarder installs a raw-frame forwarder hook. If it returns true the
 // frame is consumed and readLoop continues without dispatching it.
-func (c *rpcConn) SetForwarder(f func(*wire.Frame) bool) {
-	c.forwarderMu.Lock()
-	defer c.forwarderMu.Unlock()
+//
+// Must be called before Start(). The forwarder is immutable after Start().
+func (c *baseConn) SetForwarder(f func(*wire.Frame) bool) {
 	c.forwarder = f
 }
 
 // SendRPC sends a request with zero metadata and waits for the response.
 // For connections that need metadata (e.g. MasterConn with 12-byte
 // ClusterMetadata), use SendRPCMeta directly.
-func (c *rpcConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*wire.Frame, error) {
+func (c *baseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*wire.Frame, error) {
 	return c.SendRPCMeta(ctx, opcode, payload, wire.ClusterMetadata{})
 }
 
 // SendRPCMeta sends a request with the given metadata and waits for the response.
 // XshardConn uses zero metadata (0-byte wire format).
 // MasterConn uses ClusterMetadata{Branch, ClusterPeerID} (12-byte wire format).
-func (c *rpcConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, meta wire.ClusterMetadata) (*wire.Frame, error) {
+func (c *baseConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, meta wire.ClusterMetadata) (*wire.Frame, error) {
 	c.stateMu.Lock()
 	state := c.state
 	c.stateMu.Unlock()
@@ -406,7 +404,7 @@ func (c *rpcConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, 
 
 // readLoop reads frames until a fatal error, then closes the connection.
 // Follows Python's protocol validation rules strictly.
-func (c *rpcConn) readLoop() {
+func (c *baseConn) readLoop() {
 	defer c.Close()
 
 	for {
@@ -420,21 +418,16 @@ func (c *rpcConn) readLoop() {
 		}
 
 		// Forwarder hook (extension point for MasterConn).
-		c.forwarderMu.RLock()
+		// forwarder is immutable after Start(); no lock needed.
 		fwd := c.forwarder
-		c.forwarderMu.RUnlock()
 		if fwd != nil && fwd(frame) {
 			continue
 		}
 
-		c.handlersMu.RLock()
+		// typedHandlers, nonRPCOps, and serializers are immutable after Start().
 		handler, isRequest := c.typedHandlers[frame.Opcode]
 		_, isNonRPC := c.nonRPCOps[frame.Opcode]
-		c.handlersMu.RUnlock()
-
-		c.serializersMu.RLock()
 		ser := c.serializers[frame.Opcode]
-		c.serializersMu.RUnlock()
 
 		// No handler: could be a pending RPC response or unsupported opcode.
 		if !isRequest {
@@ -482,7 +475,7 @@ func (c *rpcConn) readLoop() {
 	}
 }
 
-func (c *rpcConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSerializer) {
+func (c *baseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSerializer) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.log.Error("handler panic", "opcode", frame.Opcode, "panic", r)
@@ -538,30 +531,30 @@ func (c *rpcConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeria
 
 // ── Query helpers ─────────────────────────────────────────────────────────────
 
-func (c *rpcConn) Error() <-chan error              { return c.errChan }
-func (c *rpcConn) RemoteAddr() string               { return c.frameTransport.RemoteAddr() }
-func (c *rpcConn) WaitUntilActive() <-chan struct{} { return c.activeChan }
-func (c *rpcConn) WaitUntilClosed() <-chan struct{} { return c.closedChan }
+func (c *baseConn) Error() <-chan error              { return c.errChan }
+func (c *baseConn) RemoteAddr() string               { return c.frameTransport.RemoteAddr() }
+func (c *baseConn) WaitUntilActive() <-chan struct{} { return c.activeChan }
+func (c *baseConn) WaitUntilClosed() <-chan struct{} { return c.closedChan }
 
-func (c *rpcConn) State() ConnectionState {
+func (c *baseConn) State() ConnectionState {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.state
 }
 
-func (c *rpcConn) IsActive() bool {
+func (c *baseConn) IsActive() bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.state == ConnectionStateActive
 }
 
-func (c *rpcConn) IsClosed() bool {
+func (c *baseConn) IsClosed() bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.state == ConnectionStateClosed
 }
 
-func (c *rpcConn) Closed() bool {
+func (c *baseConn) Closed() bool {
 	c.closeMu.Lock()
 	defer c.closeMu.Unlock()
 	return c.closed
