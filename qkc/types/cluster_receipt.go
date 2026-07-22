@@ -147,7 +147,7 @@ func NewClusterTransactionReceipt(r *Receipt) (*ClusterTransactionReceipt, error
 		return nil, err
 	}
 	return &ClusterTransactionReceipt{
-		Success:         status,
+		Success:         common.CopyBytes(status),
 		GasUsed:         r.CumulativeGasUsed,
 		PrevGasUsed:     prevGasUsed,
 		Bloom:           r.Bloom,

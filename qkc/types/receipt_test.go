@@ -148,6 +148,22 @@ func TestReceiptRejectsLegacyPostStateQKCWire(t *testing.T) {
 	}
 }
 
+func TestClusterReceiptCopiesStatus(t *testing.T) {
+	first, err := NewClusterTransactionReceipt(NewReceipt(false, 0))
+	if err != nil {
+		t.Fatal("NewClusterTransactionReceipt error: ", err)
+	}
+	first.Success[0] = 2
+
+	second, err := NewClusterTransactionReceipt(NewReceipt(false, 0))
+	if err != nil {
+		t.Fatal("NewClusterTransactionReceipt error: ", err)
+	}
+	if got := common.Bytes2Hex(second.Success); got != "01" {
+		t.Errorf("success status mutated through public receipt: got %s, want 01", got)
+	}
+}
+
 func checkReceipt(t *testing.T, receipt *Receipt, status uint64, qkcWire bool) {
 	t.Helper()
 	check := func(f string, got, want interface{}) {
