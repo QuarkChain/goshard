@@ -109,6 +109,9 @@ func (r *Receipt) DecodeRLP(s *rlp.Stream) error {
 	if err := r.setStatus(dec.Status); err != nil {
 		return err
 	}
+	if len(dec.ContractAddress) != 0 && len(dec.ContractAddress) != common.AddressLength {
+		return fmt.Errorf("invalid contract address length %d", len(dec.ContractAddress))
+	}
 	r.CumulativeGasUsed, r.Bloom, r.Logs, r.ContractAddress, r.ContractFullShardKey = dec.CumulativeGasUsed,
 		dec.Bloom, dec.Logs, common.BytesToAddress(dec.ContractAddress), dec.ContractFullShardKey.GetValue()
 	return nil

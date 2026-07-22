@@ -5,6 +5,7 @@
 package types
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -135,6 +136,26 @@ func TestReceiptRejectsLegacyPostStateRLP(t *testing.T) {
 	var receipt Receipt
 	if err := rlp.DecodeBytes(common.FromHex(receiptLegacyPostStateRLPHex), &receipt); err == nil {
 		t.Fatal("legacy post-state receipt was accepted")
+	}
+}
+
+func TestReceiptRejectsInvalidContractAddressLength(t *testing.T) {
+	for _, size := range []int{1, common.AddressLength - 1, common.AddressLength + 1, common.HashLength} {
+		t.Run(fmt.Sprintf("%d_bytes", size), func(t *testing.T) {
+			fullShardKey := Uint32(0)
+			encoded, err := rlp.EncodeToBytes(&receiptRLP{
+				Status:               receiptStatusSuccessfulRLP,
+				ContractAddress:      make([]byte, size),
+				ContractFullShardKey: &fullShardKey,
+			})
+			if err != nil {
+				t.Fatal("EncodeToBytes error: ", err)
+			}
+			var receipt Receipt
+			if err := rlp.DecodeBytes(encoded, &receipt); err == nil {
+				t.Fatalf("accepted %d-byte contract address", size)
+			}
+		})
 	}
 }
 
