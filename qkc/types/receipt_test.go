@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -34,7 +35,7 @@ var (
 		receiptBlockHashHex +
 		"00000064" +
 		receiptTxHashHex +
-		"000000c8"
+		"00000000"
 
 	receiptClusterReceiptBodyHex = "00000000000003e8" +
 		"0000000000000384" +
@@ -185,6 +186,24 @@ func TestClusterReceiptCopiesStatus(t *testing.T) {
 	}
 }
 
+func TestClusterReceiptUsesReceiptLocalLogIndexes(t *testing.T) {
+	clusterReceipt, err := NewClusterTransactionReceipt(&Receipt{
+		Status: ReceiptStatusSuccessful,
+		Logs: []*coretypes.Log{
+			{TxIndex: 1, Index: 2},
+			{TxIndex: 1, Index: 3},
+		},
+	})
+	if err != nil {
+		t.Fatal("NewClusterTransactionReceipt error: ", err)
+	}
+	for i, log := range clusterReceipt.Logs {
+		if log.Index != uint32(i) {
+			t.Errorf("log %d: got index %d, want %d", i, log.Index, i)
+		}
+	}
+}
+
 func checkReceipt(t *testing.T, receipt *Receipt, status uint64, qkcWire bool) {
 	t.Helper()
 	check := func(f string, got, want interface{}) {
@@ -208,7 +227,7 @@ func checkReceipt(t *testing.T, receipt *Receipt, status uint64, qkcWire bool) {
 		check("Logs[0]BlockHash", common.Bytes2Hex(receipt.Logs[0].BlockHash.Bytes()), receiptBlockHashHex)
 		check("Logs[0]TxIndex", receipt.Logs[0].TxIndex, uint(100))
 		check("Logs[0]TxHash", common.Bytes2Hex(receipt.Logs[0].TxHash.Bytes()), receiptTxHashHex)
-		check("Logs[0]Index", receipt.Logs[0].Index, uint(200))
+		check("Logs[0]Index", receipt.Logs[0].Index, uint(0))
 		check("GasUsed", receipt.GasUsed, uint64(100))
 	}
 }

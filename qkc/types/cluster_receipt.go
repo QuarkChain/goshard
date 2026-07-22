@@ -29,15 +29,13 @@ type ClusterLog struct {
 }
 
 // NewClusterLog converts geth's execution log into pyquarkchain's cluster log.
-func NewClusterLog(log *coretypes.Log) (*ClusterLog, error) {
+// index is the log's position within its receipt.
+func NewClusterLog(log *coretypes.Log, index uint32) (*ClusterLog, error) {
 	if log == nil {
 		return nil, fmt.Errorf("nil log")
 	}
 	if log.TxIndex > math.MaxUint32 {
 		return nil, fmt.Errorf("log tx index %d exceeds uint32", log.TxIndex)
-	}
-	if log.Index > math.MaxUint32 {
-		return nil, fmt.Errorf("log index %d exceeds uint32", log.Index)
 	}
 	return &ClusterLog{
 		Recipient:   log.Address,
@@ -47,7 +45,7 @@ func NewClusterLog(log *coretypes.Log) (*ClusterLog, error) {
 		BlockHash:   log.BlockHash,
 		TxIndex:     uint32(log.TxIndex),
 		TxHash:      log.TxHash,
-		Index:       uint32(log.Index),
+		Index:       index,
 	}, nil
 }
 
@@ -137,7 +135,10 @@ func NewClusterTransactionReceipt(r *Receipt) (*ClusterTransactionReceipt, error
 	}
 	logs := make([]*ClusterLog, len(r.Logs))
 	for i, log := range r.Logs {
-		logs[i], err = NewClusterLog(log)
+		if uint64(i) > math.MaxUint32 {
+			return nil, fmt.Errorf("log index %d exceeds uint32", i)
+		}
+		logs[i], err = NewClusterLog(log, uint32(i))
 		if err != nil {
 			return nil, fmt.Errorf("log %d: %w", i, err)
 		}
