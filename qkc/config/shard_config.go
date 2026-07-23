@@ -16,6 +16,19 @@ import (
 	qcom "github.com/ethereum/go-ethereum/qkc/common"
 )
 
+// decodeGenesisHex strictly decodes an optional-"0x"-prefixed hex string. Unlike
+// common.FromHex/Hex2Bytes (which silently drop invalid input, so "zz" decodes to
+// empty and a malformed genesis passes validation), it reports malformed hex so the
+// failure surfaces at config load instead of at shard-genesis creation. An empty
+// string is a valid empty value.
+func decodeGenesisHex(s string) ([]byte, error) {
+	s = strings.TrimPrefix(s, "0x")
+	if s == "" {
+		return nil, nil
+	}
+	return hex.DecodeString(s)
+}
+
 type ShardGenesis struct {
 	RootHeight         uint32                         `json:"ROOT_HEIGHT"`
 	Version            uint32                         `json:"VERSION"`
@@ -98,7 +111,11 @@ func (a *Allocation) UnmarshalJSON(input []byte) error {
 		a.Balances = jsonConfig.Balances
 	}
 	if jsonConfig.Code != "" {
-		a.Code = common.FromHex(jsonConfig.Code)
+		code, err := decodeGenesisHex(jsonConfig.Code)
+		if err != nil {
+			return fmt.Errorf("code: %w", err)
+		}
+		a.Code = code
 	}
 	if jsonConfig.Storage != nil {
 		a.Storage = make(map[common.Hash]common.Hash, len(jsonConfig.Storage))
@@ -155,7 +172,11 @@ func (s *ShardGenesis) UnmarshalJSON(input []byte) error {
 		return err
 	}
 	*s = ShardGenesis(jsonConfig.ShardGenesisAlias)
-	s.ExtraData = common.Hex2Bytes(jsonConfig.ExtraData)
+	extra, err := decodeGenesisHex(jsonConfig.ExtraData)
+	if err != nil {
+		return fmt.Errorf("EXTRA_DATA: %w", err)
+	}
+	s.ExtraData = extra
 	s.Alloc = make(map[account.Address]Allocation)
 	for addr, val := range jsonConfig.Alloc {
 		address, err := account.CreatAddressFromBytes(common.FromHex(addr))

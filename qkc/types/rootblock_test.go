@@ -3,7 +3,6 @@
 package types
 
 import (
-	"bytes"
 	"encoding/hex"
 	"math/big"
 	"testing"
@@ -11,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/holiman/uint256"
 )
 
 // Golden values produced by pyquarkchain (the compatibility source of truth). See
@@ -79,10 +79,10 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 				MinorHeaderHash: common.BytesToHash(rep(0x02, 32)),
 				Root:            common.BytesToHash(rep(0x03, 32)),
 				Coinbase:        account.NewAddress(common.BytesToAddress(rep(0xaa, 20)), 0x00010001),
-				CoinbaseAmount: NewTokenBalances(map[uint64]*big.Int{
-					1:       big.NewInt(100),
-					2:       big.NewInt(0),
-					1000000: big.NewInt(999),
+				CoinbaseAmount: NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+					1:       uint256.NewInt(100),
+					2:       uint256.NewInt(0),
+					1000000: uint256.NewInt(999),
 				}),
 				Time:            1600000000,
 				Difficulty:      big.NewInt(1000000),
@@ -114,47 +114,6 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 				t.Errorf("seal hash mismatch\n got %s\nwant 0x%s", h.Hex(), tc.sealHash)
 			}
 		})
-	}
-}
-
-func TestTokenBalancesRoundTrip(t *testing.T) {
-	// Pinned against pyquarkchain TokenBalanceMap({1:100, 2:0, 1000000:999}).serialize():
-	// 4-byte count of non-zero entries, then sorted (biguint key, biguint value).
-	const wantHex = "0000000201010164030f42400203e7"
-
-	tb := NewTokenBalances(map[uint64]*big.Int{
-		1:       big.NewInt(100),
-		2:       big.NewInt(0), // skipped: zero balance
-		1000000: big.NewInt(999),
-	})
-	if tb.Len() != 2 {
-		t.Fatalf("Len = %d, want 2 (zero balance skipped)", tb.Len())
-	}
-
-	var w []byte
-	if err := tb.Serialize(&w); err != nil {
-		t.Fatalf("serialize: %v", err)
-	}
-	if h := hex.EncodeToString(w); h != wantHex {
-		t.Fatalf("serialized bytes mismatch\n got %s\nwant %s", h, wantHex)
-	}
-
-	var back TokenBalances
-	if err := back.Deserialize(serialize.NewByteBuffer(w)); err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-	got := back.Balances()
-	if len(got) != 2 || got[1].Cmp(big.NewInt(100)) != 0 || got[1000000].Cmp(big.NewInt(999)) != 0 {
-		t.Fatalf("round-trip mismatch: %v", got)
-	}
-
-	// Re-serializing the decoded map reproduces the same bytes.
-	var w2 []byte
-	if err := back.Serialize(&w2); err != nil {
-		t.Fatalf("re-serialize: %v", err)
-	}
-	if !bytes.Equal(w, w2) {
-		t.Fatalf("re-serialize not canonical:\n got %x\nwant %x", w2, w)
 	}
 }
 

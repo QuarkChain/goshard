@@ -143,8 +143,12 @@ type RootGenesis struct {
 	HashPrevBlock  string `json:"HASH_PREV_BLOCK"`
 	HashMerkleRoot string `json:"HASH_MERKLE_ROOT"`
 	Timestamp      uint64 `json:"TIMESTAMP"`
-	Difficulty     uint64 `json:"DIFFICULTY"`
-	Nonce          uint32 `json:"NONCE"`
+	// Difficulty is a biguint and Nonce a uint64 on the QKC wire (RootBlockHeader),
+	// so the config must preserve those ranges: a uint64/uint32 here would reject
+	// valid pyquarkchain configs (difficulty 2^64, nonce 2^32) before the genesis
+	// header is ever hashed.
+	Difficulty *big.Int `json:"DIFFICULTY"`
+	Nonce      uint64   `json:"NONCE"`
 }
 
 func NewRootGenesis() *RootGenesis {
@@ -154,7 +158,7 @@ func NewRootGenesis() *RootGenesis {
 		HashPrevBlock:  "",
 		HashMerkleRoot: "",
 		Timestamp:      1519147489,
-		Difficulty:     1000000,
+		Difficulty:     big.NewInt(1000000),
 		Nonce:          0,
 	}
 }

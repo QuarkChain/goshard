@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -56,6 +57,9 @@ func LoadClusterConfig(path string) (*ClusterConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := cfg.deriveEthChainID(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -77,16 +81,17 @@ func unmarshalClusterConfig(content []byte) (cfg *ClusterConfig, err error) {
 
 // Validate checks the boot-relevant invariants before any database opens:
 //   - the config carries a chain config and at least one slave;
-//   - no slave still uses the legacy CHAIN_MASK_LIST shard-assignment form;
+//   - no slave carries the legacy CHAIN_MASK_LIST key, and every slave owns at
+//     least one shard;
 //   - every owned full shard id resolves to a configured chain/shard;
 //   - no slave lists the same full shard id twice (intra-slave only — the same
 //     shard on multiple slaves is a valid multi-replica deployment, allowed here
 //     and validated at the master layer);
+//   - the root and owned-shard genesis hash fields are well-formed hex;
 //   - each owned shard's genesis ROOT_HEIGHT equals ROOT.GENESIS.HEIGHT (this
-//     issue derives only the genesis root block);
-//   - the root genesis hash fields are well-formed hex;
-//   - any per-chain ETH_CHAIN_ID equals BASE_ETH_CHAIN_ID + CHAIN_ID + 1, the
-//     derivation pyquarkchain forces on load (config.py:534).
+//     issue derives only the genesis root block).
+//
+// ETH_CHAIN_ID is filled in and consistency-checked separately by deriveEthChainID.
 func (c *ClusterConfig) Validate() error {
 	if c.Quarkchain == nil {
 		return fmt.Errorf("missing QUARKCHAIN config")
@@ -111,22 +116,19 @@ func (c *ClusterConfig) Validate() error {
 		}
 	}
 
-	for _, chain := range c.Quarkchain.Chains {
-		// Computed in uint64: pyquarkchain's arithmetic is unbounded, so the
-		// derivation may exceed uint32 and must not silently wrap.
-		want := uint64(c.Quarkchain.BaseEthChainID) + uint64(chain.ChainID) + 1
-		if chain.EthChainID != 0 && uint64(chain.EthChainID) != want {
-			return fmt.Errorf("chain %d ETH_CHAIN_ID %d != BASE_ETH_CHAIN_ID %d + CHAIN_ID + 1 = %d",
-				chain.ChainID, chain.EthChainID, c.Quarkchain.BaseEthChainID, want)
-		}
-	}
-
 	for _, slave := range c.SlaveList {
 		if slave == nil {
 			continue
 		}
-		if len(slave.ChainMaskListForBackward) > 0 {
+		// The legacy CHAIN_MASK_LIST form is unsupported. Reject it whenever the key
+		// is present, including an empty list: slave_config.go leaves the field nil
+		// when the key is absent and a non-nil (possibly empty) slice when present,
+		// so len()>0 alone would let CHAIN_MASK_LIST:[] slip through as zero shards.
+		if slave.ChainMaskListForBackward != nil {
 			return fmt.Errorf("slave %q uses legacy CHAIN_MASK_LIST: legacy config not supported, use FULL_SHARD_ID_LIST", slave.ID)
+		}
+		if len(slave.FullShardList) == 0 {
+			return fmt.Errorf("slave %q owns no shards: FULL_SHARD_ID_LIST is empty", slave.ID)
 		}
 		// Duplicates are rejected only within one slave's list. The same id on two
 		// slaves is a valid multi-replica deployment (pyquarkchain master.py:1122);
@@ -144,9 +146,61 @@ func (c *ClusterConfig) Validate() error {
 			if shard.Genesis == nil {
 				return fmt.Errorf("full shard id 0x%08x has no GENESIS", id)
 			}
+			// Validate the shard genesis hash fields at load, not deferred to shard
+			// genesis creation, so a malformed hex value fails while reporting config.
+			for _, h := range []struct {
+				field string
+				value string
+			}{
+				{"HASH_PREV_MINOR_BLOCK", shard.Genesis.HashPrevMinorBlock},
+				{"HASH_MERKLE_ROOT", shard.Genesis.HashMerkleRoot},
+			} {
+				if err := validateRootHashHex(h.value); err != nil {
+					return fmt.Errorf("full shard id 0x%08x GENESIS.%s: %w", id, h.field, err)
+				}
+			}
 			if shard.Genesis.RootHeight != root.Height {
 				return fmt.Errorf("full shard id 0x%08x genesis ROOT_HEIGHT %d != ROOT.GENESIS.HEIGHT %d", id, shard.Genesis.RootHeight, root.Height)
 			}
+		}
+	}
+	return nil
+}
+
+// deriveEthChainID fills in each chain's ETH_CHAIN_ID the way pyquarkchain does on
+// load: ETH_CHAIN_ID = BASE_ETH_CHAIN_ID + CHAIN_ID + 1 (config.py:534). pyquarkchain
+// overwrites any configured value with this derivation; goshard is stricter and first
+// rejects a present-but-inconsistent value so a hand-edited typo is reported rather
+// than silently overwritten. A zero value is treated as absent (a real id is
+// BASE_ETH_CHAIN_ID + 1 or greater, so it is never zero). The derivation is applied to
+// the chain configs and to the shard configs copied from them (NewShardConfig deep-
+// copies each chain config before this runs), so both carry the resolved id.
+func (c *ClusterConfig) deriveEthChainID() error {
+	if c.Quarkchain == nil {
+		return nil // Validate reports the missing config.
+	}
+	derive := func(cc *ChainConfig) error {
+		// Computed in uint64: pyquarkchain's arithmetic is unbounded, so the
+		// derivation may exceed uint32 and must not silently wrap.
+		want := uint64(c.Quarkchain.BaseEthChainID) + uint64(cc.ChainID) + 1
+		if cc.EthChainID != 0 && uint64(cc.EthChainID) != want {
+			return fmt.Errorf("chain %d ETH_CHAIN_ID %d != BASE_ETH_CHAIN_ID %d + CHAIN_ID + 1 = %d",
+				cc.ChainID, cc.EthChainID, c.Quarkchain.BaseEthChainID, want)
+		}
+		if want > math.MaxUint32 {
+			return fmt.Errorf("chain %d derived ETH_CHAIN_ID %d exceeds uint32", cc.ChainID, want)
+		}
+		cc.EthChainID = uint32(want)
+		return nil
+	}
+	for _, chain := range c.Quarkchain.Chains {
+		if err := derive(chain); err != nil {
+			return err
+		}
+	}
+	for _, shard := range c.Quarkchain.shards {
+		if err := derive(shard.ChainConfig); err != nil {
+			return err
 		}
 	}
 	return nil

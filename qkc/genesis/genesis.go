@@ -41,7 +41,10 @@ func RootBlock(qkc *config.QuarkChainConfig) (*types.RootBlockHeader, error) {
 		return nil, fmt.Errorf("genesis: ROOT.GENESIS.HASH_MERKLE_ROOT: %w", err)
 	}
 
-	difficulty := new(big.Int).SetUint64(g.Difficulty)
+	difficulty := new(big.Int)
+	if g.Difficulty != nil {
+		difficulty.Set(g.Difficulty)
+	}
 	return &types.RootBlockHeader{
 		Version:         g.Version,
 		Number:          g.Height,
@@ -52,7 +55,7 @@ func RootBlock(qkc *config.QuarkChainConfig) (*types.RootBlockHeader, error) {
 		Time:            g.Timestamp,
 		Difficulty:      difficulty,
 		TotalDifficulty: new(big.Int).Set(difficulty),
-		Nonce:           uint64(g.Nonce),
+		Nonce:           g.Nonce,
 	}, nil
 }
 

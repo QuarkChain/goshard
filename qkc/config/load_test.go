@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"strings"
@@ -82,8 +83,8 @@ func TestLoadClusterConfigFixture(t *testing.T) {
 			}
 
 			root := cfg.Quarkchain.Root.Genesis
-			if root.Difficulty != nw.rootDiff {
-				t.Errorf("ROOT.GENESIS.DIFFICULTY = %d, want %d", root.Difficulty, nw.rootDiff)
+			if root.Difficulty == nil || root.Difficulty.Uint64() != nw.rootDiff {
+				t.Errorf("ROOT.GENESIS.DIFFICULTY = %v, want %d", root.Difficulty, nw.rootDiff)
 			}
 			if root.Timestamp != 1556639999 {
 				t.Errorf("ROOT.GENESIS.TIMESTAMP = %d, want 1556639999", root.Timestamp)
@@ -171,31 +172,54 @@ func TestValidateAllowsCrossSlaveReplica(t *testing.T) {
 	}
 }
 
-// TestValidateEthChainID: a per-chain ETH_CHAIN_ID must equal the derivation
-// pyquarkchain forces on load, BASE_ETH_CHAIN_ID + CHAIN_ID + 1 (config.py:534);
-// a consistent value is accepted, an inconsistent one rejected.
-func TestValidateEthChainID(t *testing.T) {
-	cfg := mustLoad(t)
-	cfg.Quarkchain.Chains[0].EthChainID = cfg.Quarkchain.BaseEthChainID + 1
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate rejected a consistent ETH_CHAIN_ID: %v", err)
+// TestDeriveEthChainID: pyquarkchain forces ETH_CHAIN_ID = BASE_ETH_CHAIN_ID +
+// CHAIN_ID + 1 on load (config.py:534). Derivation fills every chain and the shard
+// copies made before it runs, accepts a consistent explicit value, rejects an
+// inconsistent one, and does not wrap the uint64 arithmetic into uint32.
+func TestDeriveEthChainID(t *testing.T) {
+	content, err := os.ReadFile(fixtureMainnet)
+	if err != nil {
+		t.Fatal(err)
 	}
-	cfg.Quarkchain.Chains[0].EthChainID = 42
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ETH_CHAIN_ID") {
-		t.Fatalf("Validate err = %v, want ETH_CHAIN_ID mismatch", err)
+	// parse without the LoadClusterConfig normalization, so ETH_CHAIN_ID is still
+	// absent (the fixtures omit it) and derivation can be exercised in isolation.
+	parse := func() *ClusterConfig {
+		cfg, err := unmarshalClusterConfig(content)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return cfg
 	}
 
-	// The derivation must not wrap in uint32 (pyquarkchain computes it unbounded):
-	// with BASE_ETH_CHAIN_ID = MaxUint32 and CHAIN_ID = 0 the true derivation is
-	// 4294967296, not a wrapped 0 — which would read as "absent" and pass any value.
-	cfg = mustLoad(t)
-	cfg.Quarkchain.BaseEthChainID = math.MaxUint32
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate rejected an absent ETH_CHAIN_ID at the uint32 boundary: %v", err)
+	cfg := parse()
+	if err := cfg.deriveEthChainID(); err != nil {
+		t.Fatalf("deriveEthChainID: %v", err)
 	}
-	cfg.Quarkchain.Chains[0].EthChainID = 1
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "4294967296") {
-		t.Fatalf("Validate err = %v, want mismatch against the unwrapped derivation 4294967296", err)
+	for _, chain := range cfg.Quarkchain.Chains {
+		if want := cfg.Quarkchain.BaseEthChainID + chain.ChainID + 1; chain.EthChainID != want {
+			t.Errorf("chain %d ETH_CHAIN_ID = %d, want %d", chain.ChainID, chain.EthChainID, want)
+		}
+	}
+	// The shard copies (deep-copied from the chain config before derivation) must
+	// carry the derived id too, not the pre-derivation zero.
+	shard := cfg.Quarkchain.GetShardConfigByFullShardID(0x00000001)
+	if want := cfg.Quarkchain.BaseEthChainID + 1; shard == nil || shard.EthChainID != want {
+		t.Errorf("shard 0x00000001 ETH_CHAIN_ID = %v, want %d", shard, want)
+	}
+
+	// A present-but-inconsistent value is rejected rather than silently overwritten.
+	cfg = parse()
+	cfg.Quarkchain.Chains[0].EthChainID = 42
+	if err := cfg.deriveEthChainID(); err == nil || !strings.Contains(err.Error(), "ETH_CHAIN_ID") {
+		t.Fatalf("deriveEthChainID err = %v, want ETH_CHAIN_ID mismatch", err)
+	}
+
+	// The derivation is computed in uint64 and must not wrap into uint32: with
+	// BASE_ETH_CHAIN_ID = MaxUint32 the true id 4294967296 does not fit a uint32.
+	cfg = parse()
+	cfg.Quarkchain.BaseEthChainID = math.MaxUint32
+	if err := cfg.deriveEthChainID(); err == nil || !strings.Contains(err.Error(), "exceeds uint32") {
+		t.Fatalf("deriveEthChainID err = %v, want 'exceeds uint32'", err)
 	}
 }
 
@@ -231,6 +255,51 @@ func TestLoadRejectsChainMaskList(t *testing.T) {
 	if _, err := LoadClusterConfig(templatePath); err == nil ||
 		!strings.Contains(err.Error(), "legacy config not supported") {
 		t.Fatalf("LoadClusterConfig(template) err = %v, want 'legacy config not supported'", err)
+	}
+}
+
+// TestValidateRejectsBadShardGenesisHash: an owned shard's genesis hash fields are
+// validated at load, so a malformed value fails while reporting config rather than
+// being deferred (and silently mis-decoded) at shard genesis creation.
+func TestValidateRejectsBadShardGenesisHash(t *testing.T) {
+	cfg := mustLoad(t)
+	cfg.Quarkchain.GetShardConfigByFullShardID(0x00000001).Genesis.HashPrevMinorBlock = "nothex!!"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "HASH_PREV_MINOR_BLOCK") {
+		t.Fatalf("Validate err = %v, want 'HASH_PREV_MINOR_BLOCK'", err)
+	}
+}
+
+// TestShardGenesisRejectsBadExtraData: EXTRA_DATA is decoded to bytes at parse time,
+// so it must be strictly validated there. common.Hex2Bytes silently turns "zz" into
+// an empty slice; decodeGenesisHex reports it instead.
+func TestShardGenesisRejectsBadExtraData(t *testing.T) {
+	var g ShardGenesis
+	if err := json.Unmarshal([]byte(`{"EXTRA_DATA":"zz"}`), &g); err == nil || !strings.Contains(err.Error(), "EXTRA_DATA") {
+		t.Fatalf("Unmarshal err = %v, want 'EXTRA_DATA'", err)
+	}
+	if err := json.Unmarshal([]byte(`{"EXTRA_DATA":"abcd"}`), &g); err != nil {
+		t.Fatalf("Unmarshal valid EXTRA_DATA: %v", err)
+	}
+}
+
+// TestValidateRejectsEmptyChainMaskList: a present-but-empty CHAIN_MASK_LIST is a
+// non-nil zero-length slice; it must be rejected as the unsupported legacy form
+// rather than slipping through len()>0 and reporting a slave with zero shards.
+func TestValidateRejectsEmptyChainMaskList(t *testing.T) {
+	cfg := mustLoad(t)
+	cfg.SlaveList[0].ChainMaskListForBackward = []uint32{}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "legacy config not supported") {
+		t.Fatalf("Validate err = %v, want 'legacy config not supported'", err)
+	}
+}
+
+// TestValidateRejectsZeroShardSlave: a slave that resolves to no shards (e.g. an
+// empty FULL_SHARD_ID_LIST) is meaningless and must fail loudly.
+func TestValidateRejectsZeroShardSlave(t *testing.T) {
+	cfg := mustLoad(t)
+	cfg.SlaveList[0].FullShardList = nil
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "owns no shards") {
+		t.Fatalf("Validate err = %v, want 'owns no shards'", err)
 	}
 }
 

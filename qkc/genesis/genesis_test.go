@@ -3,6 +3,7 @@
 package genesis
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -66,7 +67,7 @@ func TestRootBlockSynthetic(t *testing.T) {
 		HashPrevBlock:  "1111111111111111111111111111111111111111111111111111111111111111",
 		HashMerkleRoot: "2222222222222222222222222222222222222222222222222222222222222222",
 		Timestamp:      1234567890,
-		Difficulty:     11259375, // 0xabcdef
+		Difficulty:     big.NewInt(11259375), // 0xabcdef
 		Nonce:          99,
 	}
 
