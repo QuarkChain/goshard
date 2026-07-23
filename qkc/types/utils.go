@@ -1,9 +1,11 @@
 // Copyright 2026-2027, QuarkChain.
 
+// QKC serialization hash helper; output matches pyquarkchain wire hashing.
+// Adaptation: sha3.NewKeccak256() -> crypto.Keccak256Hash() (identical Keccak-256 digest).
+
 package types
 
 import (
-	"fmt"
 	"reflect"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -11,19 +13,17 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// serHash returns keccak256(qkc_serialize(val)), optionally excluding the named
-// struct fields from the encoding. It mirrors pyquarkchain's
-// sha3_256(obj.serialize()) — sha3_256 there is keccak (legacy Keccak-256), the
-// same digest as geth's crypto.Keccak256 — so hashes match byte-for-byte.
-//
-// val must be a struct value (not a pointer): SerializeStructWithout walks its
-// fields in declaration order. A serialization failure is a programmer error in
-// the field layout, so it panics rather than returning a zero hash that would
-// silently pass a compatibility test.
-func serHash(val interface{}, exclude map[string]bool) common.Hash {
-	w := make([]byte, 0, 256)
-	if err := serialize.SerializeStructWithout(reflect.ValueOf(val), &w, exclude); err != nil {
-		panic(fmt.Sprintf("qkc/types: serialize %T for hashing: %v", val, err))
+type writeCounter common.StorageSize
+
+func (c *writeCounter) Write(b []byte) (int, error) {
+	*c += writeCounter(len(b))
+	return len(b), nil
+}
+
+func serHash(val interface{}, excludeList map[string]bool) (h common.Hash) {
+	var bytes []byte
+	if err := serialize.SerializeStructWithout(reflect.ValueOf(val), &bytes, excludeList); err != nil {
+		panic(err)
 	}
-	return crypto.Keccak256Hash(w)
+	return crypto.Keccak256Hash(bytes)
 }
