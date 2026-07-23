@@ -12,7 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-const MaxUint24 = uint32(1<<24 - 1)
+const crossShardTransactionListVersion = uint32(1)
 
 type CrossShardTransactionDepositV0 struct {
 	TxHash          common.Hash
@@ -25,8 +25,8 @@ type CrossShardTransactionDepositV0 struct {
 	GasRemained     *serialize.Uint256
 	MessageData     []byte `bytesizeofslicelen:"4"`
 	CreateContract  bool
-		// Follow pyquarkchain (core.py CrossShardTransactionDepositV0.FIELDS):
-		// is_from_root_chain is serialized last for master/slave wire compatibility.
+	// Follow pyquarkchain (core.py CrossShardTransactionDepositV0.FIELDS):
+	// is_from_root_chain is serialized last for master/slave wire compatibility.
 	IsFromRootChain bool
 }
 
@@ -35,62 +35,48 @@ type CrossShardTransactionDeposit struct {
 	RefundRate uint8
 }
 
-type crossShardTransactionDepositListV1 struct {
-	TXList []*CrossShardTransactionDeposit `bytesizeofslicelen:"4"`
+// CrossShardTransactionList is pyquarkchain's CrossShardTransactionList
+// version 1 wire type.
+type CrossShardTransactionList struct {
+	TXList []*CrossShardTransactionDeposit
 }
 
-type CrossShardTransactionDepositList struct {
-	TXList []*CrossShardTransactionDeposit `bytesizeofslicelen:"4"`
-}
-
-func NewCrossShardTransactionDepositList(txList []*CrossShardTransactionDeposit) *CrossShardTransactionDepositList {
+func NewCrossShardTransactionList(txList []*CrossShardTransactionDeposit) *CrossShardTransactionList {
 	if txList == nil {
 		txList = make([]*CrossShardTransactionDeposit, 0)
 	}
-	return &CrossShardTransactionDepositList{
+	return &CrossShardTransactionList{
 		TXList: txList,
 	}
 }
 
-func (c *CrossShardTransactionDepositList) Serialize(w *[]byte) error {
-	list := crossShardTransactionDepositListV1{c.TXList}
-	bytes, err := serialize.SerializeToBytes(list)
-	if err != nil {
+// Serialize writes pyquarkchain CrossShardTransactionList.FIELDS order:
+// tx_list followed by version(uint32).
+func (c *CrossShardTransactionList) Serialize(w *[]byte) error {
+	if c == nil {
+		return fmt.Errorf("nil cross-shard transaction list")
+	}
+	if err := serialize.SerializeWithTags(w, c.TXList, serialize.Tags{ByteSizeOfSliceLen: 4}); err != nil {
 		return err
 	}
-	bytes[0] = 1
-	*w = append(*w, bytes...)
-	return nil
+	return serialize.Serialize(w, crossShardTransactionListVersion)
 }
 
-func (c *CrossShardTransactionDepositList) Deserialize(bb *serialize.ByteBuffer) error {
-	size, err := bb.GetUInt32()
-	if err != nil {
+// Deserialize reads the current pyquarkchain CrossShardTransactionList version.
+func (c *CrossShardTransactionList) Deserialize(bb *serialize.ByteBuffer) error {
+	if c == nil {
+		return fmt.Errorf("nil cross-shard transaction list")
+	}
+	var txList []*CrossShardTransactionDeposit
+	if err := serialize.DeserializeWithTags(bb, &txList, serialize.Tags{ByteSizeOfSliceLen: 4}); err != nil {
 		return err
 	}
-	version := size >> 24
-	size = size & MaxUint24
-	txList := make([]*CrossShardTransactionDeposit, size)
-	switch version {
-	case 0:
-		for i := 0; i < int(size); i++ {
-			cstx := CrossShardTransactionDepositV0{}
-			if err := serialize.Deserialize(bb, &cstx); err != nil {
-				return err
-			}
-			txList[i] = &CrossShardTransactionDeposit{cstx, 100}
-		}
-	case 1:
-		for i := 0; i < int(size); i++ {
-			cstx := CrossShardTransactionDeposit{}
-			if err := serialize.Deserialize(bb, &cstx); err != nil {
-				return err
-			}
-			txList[i] = &cstx
-		}
-	default:
-		return fmt.Errorf("not support version %v", version)
-
+	var version uint32
+	if err := serialize.Deserialize(bb, &version); err != nil {
+		return err
+	}
+	if version != crossShardTransactionListVersion {
+		return fmt.Errorf("unsupported cross-shard transaction list version %d", version)
 	}
 	c.TXList = txList
 	return nil
