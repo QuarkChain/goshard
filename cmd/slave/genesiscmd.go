@@ -30,7 +30,7 @@ func runGenesis(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	header, err := genesis.RootBlock(cfg.Quarkchain)
+	header, err := genesis.CreateRootBlock(cfg.Quarkchain)
 	if err != nil {
 		return err
 	}

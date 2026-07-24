@@ -54,7 +54,7 @@ func TestGenesisOutput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			header, err := genesis.RootBlock(cfg.Quarkchain)
+			header, err := genesis.CreateRootBlock(cfg.Quarkchain)
 			if err != nil {
 				t.Fatalf("genesis: %v", err)
 			}

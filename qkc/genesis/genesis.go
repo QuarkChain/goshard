@@ -19,14 +19,14 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// RootBlock derives the genesis root block header purely from
+// CreateRootBlock derives the genesis root block header purely from
 // QUARKCHAIN.ROOT.GENESIS, mirroring pyquarkchain's
 // GenesisManager.create_root_block (quarkchain/genesis.py:28). total_difficulty is
 // set equal to difficulty; the evm-state root, coinbase, amount map, extra data,
 // mixhash, and signature are all empty/zero, exactly as the Python default header.
 // The resulting header.Hash() is byte-identical to pyquarkchain's
 // create_root_block().header.get_hash().
-func RootBlock(qkc *config.QuarkChainConfig) (*types.RootBlockHeader, error) {
+func CreateRootBlock(qkc *config.QuarkChainConfig) (*types.RootBlockHeader, error) {
 	if qkc == nil || qkc.Root == nil || qkc.Root.Genesis == nil {
 		return nil, fmt.Errorf("genesis: QUARKCHAIN.ROOT.GENESIS is missing")
 	}

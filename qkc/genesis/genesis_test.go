@@ -39,9 +39,9 @@ func TestRootBlockFromFixture(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load fixture: %v", err)
 			}
-			header, err := RootBlock(cfg.Quarkchain)
+			header, err := CreateRootBlock(cfg.Quarkchain)
 			if err != nil {
-				t.Fatalf("RootBlock: %v", err)
+				t.Fatalf("CreateRootBlock: %v", err)
 			}
 			if got := header.Hash(); got != common.HexToHash(tc.hash) {
 				t.Errorf("root genesis hash mismatch\n got %s\nwant %s", got.Hex(), tc.hash)
@@ -71,9 +71,9 @@ func TestRootBlockSynthetic(t *testing.T) {
 		Nonce:          99,
 	}
 
-	header, err := RootBlock(qkc)
+	header, err := CreateRootBlock(qkc)
 	if err != nil {
-		t.Fatalf("RootBlock: %v", err)
+		t.Fatalf("CreateRootBlock: %v", err)
 	}
 
 	const (
@@ -91,7 +91,7 @@ func TestRootBlockSynthetic(t *testing.T) {
 func TestRootBlockRejectsBadHash(t *testing.T) {
 	qkc := config.NewQuarkChainConfig()
 	qkc.Root.Genesis = &config.RootGenesis{HashPrevBlock: "zznothex"}
-	if _, err := RootBlock(qkc); err == nil {
+	if _, err := CreateRootBlock(qkc); err == nil {
 		t.Fatal("expected error for malformed HASH_PREV_BLOCK, got nil")
 	}
 }
