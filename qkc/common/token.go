@@ -2,7 +2,7 @@
 
 // Token balance encoding follows pyquarkchain-compatible QKC wire bytes.
 
-package types
+package common
 
 import (
 	"bytes"

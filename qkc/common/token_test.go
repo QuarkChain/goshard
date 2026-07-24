@@ -2,7 +2,7 @@
 
 // Token balance tests exercise pyquarkchain-compatible QKC wire bytes.
 
-package types
+package common
 
 import (
 	"encoding/hex"
