@@ -29,6 +29,12 @@ func testU256Decimal(t *testing.T, v string) *uint256.Int {
 	return data
 }
 
+func TestDefaultTokenID(t *testing.T) {
+	// DefaultTokenID must equal TokenIDEncode("QKC") = 35760.
+	assert.Equal(t, uint64(35760), DefaultTokenID)
+	assert.Equal(t, TokenIDEncode("QKC"), DefaultTokenID)
+}
+
 func TestNewTokenBalanceMap(t *testing.T) {
 	m0 := make(map[uint64]*uint256.Int)
 	m0[3234] = testU256(1000)
