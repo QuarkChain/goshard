@@ -45,7 +45,7 @@ func TestRootBlockEncoding(t *testing.T) {
 	check("CoinbaseAmount", blockHeader.CoinbaseAmount.GetBalanceMap()[2], testU256(2))
 	check("Time", blockHeader.Time, uint64(10000000))
 	check("Difficulty", blockHeader.Difficulty, big.NewInt(10000))
-	check("TotalDifficulty", blockHeader.ToTalDifficulty, big.NewInt(10000))
+	check("TotalDifficulty", blockHeader.TotalDifficulty, big.NewInt(10000))
 	check("Nonce", blockHeader.Nonce, uint64(100))
 	check("Extra", common.Bytes2Hex(blockHeader.Extra), "01020304")
 	check("MixDigest", common.Bytes2Hex(blockHeader.MixDigest.Bytes()), "df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28")
