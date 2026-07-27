@@ -205,7 +205,7 @@ func types(tx []map[string]string) []string {
 func data(tx []map[string]string) []string {
 	t := make([]string, 0)
 	for _, v := range tx {
-		if v["types"] == "bytes" {
+		if v["type"] == "bytes" {
 			t = append(t, v["value"][2:])
 		} else {
 			t = append(t, v["value"])

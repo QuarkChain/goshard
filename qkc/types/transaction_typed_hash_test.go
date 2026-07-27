@@ -145,6 +145,19 @@ func TestTypedSignatureHash(t *testing.T) {
 	assert.Equal(t, h, "0xe768719d0a211ffb0b7f9c7bc6af9286136b3dd8b6be634a57dc9d6bee35b492")
 }
 
+func TestTypedSignatureHashWithPayload(t *testing.T) {
+	typedTx := append([]map[string]string(nil), tx...)
+	typedTx[5] = map[string]string{
+		"type":  "bytes",
+		"name":  "data",
+		"value": "0xdeadbeef",
+	}
+
+	h, err := typedSignatureHash(typedTx)
+	assert.NoError(t, err)
+	assert.Equal(t, h, "0x3816812fc28bba89fbadfec978d42ba11df564c7b39712987aa1a9abc2f50380")
+}
+
 func TestRecover(t *testing.T) {
 	rawTx.EvmTx.SetVRS(bytesToBigInt("0x1b"), bytesToBigInt("0xb5145678e43df2b7ea8e0e969e51dbf72c956dd52e234c95393ad68744394855"), bytesToBigInt("0x44515b465dbbf746a484239c11adb98f967e35347e17e71b84d850d8e5c38a6a"))
 
