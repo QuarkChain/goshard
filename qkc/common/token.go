@@ -126,11 +126,6 @@ func NewTokenBalancesWithMap(data map[uint64]*uint256.Int) *TokenBalances {
 	return t
 }
 
-// NewTokenBalancesFromBytes is an alias for NewTokenBalances.
-func NewTokenBalancesFromBytes(data []byte) (*TokenBalances, error) {
-	return NewTokenBalances(data)
-}
-
 func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	tokenBalances := NewEmptyTokenBalances()
 	if len(data) == 0 {
