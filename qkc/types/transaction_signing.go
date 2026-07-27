@@ -139,7 +139,20 @@ func (s EIP155Signer) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *
 // Hash returns the hash to be signed by the sender.
 // It does not uniquely identify the transaction.
 func (s EIP155Signer) Hash(tx *EvmTransaction) common.Hash {
-	return tx.getUnsignedHash()
+	switch tx.Version() {
+	case 0:
+		return tx.getUnsignedHash()
+	case 1:
+		hash, err := tx.typedHash()
+		if err != nil {
+			panic(fmt.Sprintf("typed transaction hash: %v", err))
+		}
+		return hash
+	case 2:
+		return tx.getUnsignedHashForEip155(tx.NetworkId())
+	default:
+		panic(fmt.Sprintf("unsupported transaction version %d", tx.Version()))
+	}
 }
 
 func recoverPlain(sighash common.Hash, R, S, Vb *big.Int, homestead bool) (account.Recipient, error) {
