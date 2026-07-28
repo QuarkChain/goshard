@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/qkc"
 	"github.com/ethereum/go-ethereum/qkc/config"
-	"github.com/ethereum/go-ethereum/qkc/genesis"
 	"github.com/urfave/cli/v2"
 )
 
@@ -54,7 +54,7 @@ func TestGenesisOutput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			header, err := genesis.CreateRootBlock(cfg.Quarkchain)
+			header, err := qkc.CreateRootBlock(cfg.Quarkchain)
 			if err != nil {
 				t.Fatalf("genesis: %v", err)
 			}

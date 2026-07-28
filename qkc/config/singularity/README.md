@@ -21,7 +21,7 @@ pyquarkchain's
 
 ## Pinned root-genesis values
 
-The root genesis header derived from each config (`qkc/genesis.CreateRootBlock`) must hash
+The root genesis header derived from each config (`qkc.CreateRootBlock`) must hash
 byte-identically to pyquarkchain's
 `GenesisManager.create_root_block().header.get_hash()`. Regenerate with (swap the
 path for devnet):
@@ -50,4 +50,4 @@ devnet   hash 5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
          seal 055a7b410a50c098c52c123983e3596c5914ba227bf9e2c0c93309ff8f650d41
 ```
 
-Consumed by `qkc/config`, `qkc/genesis`, `qkc/types`, and `cmd/slave` tests.
+Consumed by `qkc`, `qkc/config`, `qkc/types`, and `cmd/slave` tests.

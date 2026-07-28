@@ -1,11 +1,11 @@
 // Copyright 2026-2027, QuarkChain.
 
-// qkc/genesis is the GenesisManager analog: pure functions of the parsed config
-// that derive the cluster's genesis blocks. Only the root genesis block (the
-// anchor every shard genesis links to) is derived here; shard genesis state
-// materialization belongs to the separate shard-chain task.
+// The GenesisManager analog: pure functions of the parsed config that derive the
+// cluster's genesis blocks. Only the root genesis block (the anchor every shard
+// genesis links to) is derived here; shard genesis state materialization belongs
+// to the separate shard-chain task.
 
-package genesis
+package qkc
 
 import (
 	"encoding/hex"

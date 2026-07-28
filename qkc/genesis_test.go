@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package genesis
+package qkc
 
 import (
 	"math/big"
@@ -23,13 +23,13 @@ func TestRootBlockFromFixture(t *testing.T) {
 	}{
 		{
 			name: "mainnet",
-			path: "../config/singularity/mainnet.json",
+			path: "config/singularity/mainnet.json",
 			hash: "0x4036783e441eb5057bf2be96bf1fd4585ac49824de15c0d92a4c14a97886ca51",
 			seal: "0xe7dcdecc09e724ad81e493d70dedcd6d9ea0ee830d7ab2528a5648f2a0cf8178",
 		},
 		{
 			name: "devnet",
-			path: "../config/singularity/devnet.json",
+			path: "config/singularity/devnet.json",
 			hash: "0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d",
 			seal: "0x055a7b410a50c098c52c123983e3596c5914ba227bf9e2c0c93309ff8f650d41",
 		},

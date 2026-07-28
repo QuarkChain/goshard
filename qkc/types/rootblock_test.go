@@ -42,7 +42,7 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 	}{
 		{
 			// The real QuarkChain mainnet (singularity) root genesis, built exactly
-			// as qkc/genesis.CreateRootBlock builds it from ROOT.GENESIS.
+			// as qkc.CreateRootBlock builds it from ROOT.GENESIS.
 			name: "mainnet_root_genesis",
 			header: &RootBlockHeader{
 				Time:            1556639999,

@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/ethereum/go-ethereum/qkc/genesis"
+	"github.com/ethereum/go-ethereum/qkc"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/urfave/cli/v2"
 )
@@ -30,7 +30,7 @@ func runGenesis(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	header, err := genesis.CreateRootBlock(cfg.Quarkchain)
+	header, err := qkc.CreateRootBlock(cfg.Quarkchain)
 	if err != nil {
 		return err
 	}
