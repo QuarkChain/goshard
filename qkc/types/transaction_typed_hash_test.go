@@ -44,14 +44,11 @@ func bytesToBigInt(data string) *big.Int {
 }
 
 var (
-	rawEvmTx = NewEvmTransaction(bytesToUint64("0x0d"), common.BytesToAddress(common.FromHex("314b2cd22c6d26618ce051a58c65af1253aecbb8")),
+	rawQkcTx = NewQkcTransaction(bytesToUint64("0x0d"), common.BytesToAddress(common.FromHex("314b2cd22c6d26618ce051a58c65af1253aecbb8")),
 		bytesToBigInt("0x056bc75e2d63100000"), bytesToUint64("0x7530"), bytesToBigInt("0x02540be400"), bytesToUint32("0xc47decfd"),
 		bytesToUint32("0xc49c1950"), bytesToUint32("0x03"), 1, nil, bytesToUint64("0x0111"), bytesToUint64("0x0222"),
 	)
-	rawTx = Transaction{
-		TxType: EvmTx,
-		EvmTx:  rawEvmTx,
-	}
+	rawTx = NewTransaction(rawQkcTx.inner)
 
 	tx = []map[string]string{
 		{
@@ -118,7 +115,7 @@ var (
 )
 
 func TestTyped(t *testing.T) {
-	assert.Equal(t, tx, evmTxToTypedData(rawEvmTx))
+	assert.Equal(t, tx, qkcTxToTypedData(qkcTxData(rawQkcTx)))
 }
 
 func TestSolidityPack(t *testing.T) {
@@ -159,9 +156,9 @@ func TestTypedSignatureHashWithPayload(t *testing.T) {
 }
 
 func TestRecover(t *testing.T) {
-	rawTx.EvmTx.SetVRS(bytesToBigInt("0x1b"), bytesToBigInt("0xb5145678e43df2b7ea8e0e969e51dbf72c956dd52e234c95393ad68744394855"), bytesToBigInt("0x44515b465dbbf746a484239c11adb98f967e35347e17e71b84d850d8e5c38a6a"))
+	rawTx.SetVRS(bytesToBigInt("0x1b"), bytesToBigInt("0xb5145678e43df2b7ea8e0e969e51dbf72c956dd52e234c95393ad68744394855"), bytesToBigInt("0x44515b465dbbf746a484239c11adb98f967e35347e17e71b84d850d8e5c38a6a"))
 
-	sender, err := Sender(NewQKCSigner(rawTx.EvmTx.NetworkId(), rawTx.EvmTx.NetworkId()), rawTx.EvmTx)
+	sender, err := Sender(NewEIP155Signer(rawTx.NetworkId()), rawTx)
 	assert.NoError(t, err)
 	assert.Equal(t, strings.ToLower(sender.String()[2:]), "2e6144d0a4786e6f62892eee59c24d1e81e33272")
 }

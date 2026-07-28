@@ -30,7 +30,7 @@ func uint32ToHex(data uint32) string {
 	return hexutil.Encode(new(big.Int).SetUint64(uint64(data)).Bytes())
 }
 
-func recipientToHex(data *account.Recipient) string {
+func receiptToHex(data *account.Recipient) string {
 	if data == nil {
 		return "0x"
 	}
@@ -49,62 +49,62 @@ func strRJust(initStr []byte, fill byte, width int) []byte {
 	return data
 }
 
-func evmTxToTypedData(evmTx *EvmTransaction) []map[string]string {
+func qkcTxToTypedData(qkcTx *QkcTx) []map[string]string {
 	typedTxData := make([]map[string]string, 0)
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "nonce",
-		"value": uint64ToHex(evmTx.data.AccountNonce),
+		"value": uint64ToHex(qkcTx.AccountNonce),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "gasPrice",
-		"value": bigIntToHex(evmTx.data.Price),
+		"value": bigIntToHex(qkcTx.Price),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "gasLimit",
-		"value": uint64ToHex(evmTx.data.GasLimit),
+		"value": uint64ToHex(qkcTx.GasLimit),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint160",
 		"name":  "to",
-		"value": recipientToHex(evmTx.To()),
+		"value": receiptToHex(qkcTx.to()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "value",
-		"value": bigIntToHex(evmTx.data.Amount),
+		"value": bigIntToHex(qkcTx.Amount),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "bytes",
 		"name":  "data",
-		"value": "0x" + hex.EncodeToString(evmTx.data.Payload),
+		"value": "0x" + hex.EncodeToString(qkcTx.Payload),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "networkId",
-		"value": uint32ToHex(evmTx.data.NetworkId),
+		"value": uint32ToHex(qkcTx.NetworkID),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint32",
 		"name":  "fromFullShardKey",
-		"value": uint32ToHex(evmTx.data.FromFullShardKey.GetValue()),
+		"value": uint32ToHex(qkcTx.FromFullShardKey.GetValue()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint32",
 		"name":  "toFullShardKey",
-		"value": uint32ToHex(evmTx.data.ToFullShardKey.GetValue()),
+		"value": uint32ToHex(qkcTx.ToFullShardKey.GetValue()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint64",
 		"name":  "gasTokenId",
-		"value": uint64ToHex(evmTx.data.GasTokenID),
+		"value": uint64ToHex(qkcTx.GasTokenID),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint64",
 		"name":  "transferTokenId",
-		"value": uint64ToHex(evmTx.data.TransferTokenID),
+		"value": uint64ToHex(qkcTx.TransferTokenID),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "string",

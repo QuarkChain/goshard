@@ -17,23 +17,30 @@ import (
 )
 
 var (
-	ErrInvalidNetworkID = errors.New("invalid network ID for signer")
+	ErrInvalidNetworkId = errors.New("invalid network id for signer")
 )
 
-// sigCache is used to cache the derived sender and contains
-// the signer used to derive it.
 type sigCache struct {
 	signer Signer
 	from   account.Recipient
 }
 
-// MakeSigner returns a signer with the expected QKC network and Ethereum chain IDs.
-func MakeSigner(qkcNetworkID, ethChainID uint32) Signer {
-	return NewQKCSigner(qkcNetworkID, ethChainID)
+// MakeSigner returns a Signer based on the given chain config and block number.
+func MakeSigner(networkId uint32) Signer {
+	return NewEIP155Signer(networkId)
 }
 
 // SignTx signs the transaction using the given signer and private key
-func SignTx(tx *EvmTransaction, s Signer, prv *ecdsa.PrivateKey) (*EvmTransaction, error) {
+func SignTx(tx *Transaction, s Signer, prv *ecdsa.PrivateKey) (*Transaction, error) {
+	if tx == nil {
+		return nil, errors.New("cannot sign nil transaction")
+	}
+	if tx.Version() > 2 {
+		return nil, fmt.Errorf("version %d is not supported", tx.Version())
+	}
+	if tx.Version() != 2 && tx.NetworkId() != s.NetworkID() {
+		return nil, ErrInvalidNetworkId
+	}
 	h := s.Hash(tx)
 	sig, err := crypto.Sign(h[:], prv)
 	if err != nil {
@@ -49,99 +56,88 @@ func SignTx(tx *EvmTransaction, s Signer, prv *ecdsa.PrivateKey) (*EvmTransactio
 // Sender may cache the address, allowing it to be used regardless of
 // signing method. The cache is invalidated if the cached signer does
 // not match the signer used in the current call.
-func Sender(signer Signer, tx *EvmTransaction) (account.Recipient, error) {
-	if sc := tx.from.Load(); sc != nil {
-		sigCache := sc.(sigCache)
-		// If the signer used to derive from in a previous
-		// call is not the same as used current, invalidate
-		// the cache.
-		if sigCache.signer.Equal(signer) {
-			return sigCache.from, nil
+func Sender(signer Signer, tx *Transaction) (account.Recipient, error) {
+	if tx == nil {
+		return account.Recipient{}, errors.New("cannot recover sender from nil transaction")
+	}
+	if cached := tx.from.Load(); cached != nil {
+		cache := cached.(sigCache)
+		if cache.signer.Equal(signer) {
+			return cache.from, nil
 		}
 	}
-
-	addr, err := signer.Sender(tx)
+	sender, err := signer.Sender(tx)
 	if err != nil {
 		return account.Recipient{}, err
 	}
-	tx.from.Store(sigCache{signer: signer, from: addr})
-	return addr, nil
+	tx.from.Store(sigCache{signer: signer, from: sender})
+	return sender, nil
 }
 
 // Signer encapsulates transaction signature handling. Note that this interface is not a
 // stable API and may change at any time to accommodate new protocol rules.
 type Signer interface {
 	// Sender returns the sender address of the transaction.
-	Sender(tx *EvmTransaction) (account.Recipient, error)
+	Sender(tx *Transaction) (account.Recipient, error)
 	// SignatureValues returns the raw R, S, V values corresponding to the
 	// given signature.
-	SignatureValues(tx *EvmTransaction, sig []byte) (r, s, v *big.Int, err error)
+	SignatureValues(tx *Transaction, sig []byte) (r, s, v *big.Int, err error)
 	// Hash returns the hash to be signed.
-	Hash(tx *EvmTransaction) common.Hash
+	Hash(tx *Transaction) common.Hash
+	// NetworkID returns the network accepted by the signer.
+	NetworkID() uint32
 	// Equal returns true if the given signer is the same as the receiver.
 	Equal(Signer) bool
 }
 
-// QKCSigner implements QKC transaction signature rules for all supported versions.
-// Version 0 and 1 use qkcNetworkID, while version 2 uses ethChainID.
-type QKCSigner struct {
-	qkcNetworkID uint32
-	ethChainID   uint32
+// EIP155Transaction implements Signer using the EIP155 rules.
+type EIP155Signer struct {
+	networkId uint32
 }
 
-func NewQKCSigner(qkcNetworkID, ethChainID uint32) QKCSigner {
-	return QKCSigner{
-		qkcNetworkID: qkcNetworkID,
-		ethChainID:   ethChainID,
+func NewEIP155Signer(networkId uint32) EIP155Signer {
+	return EIP155Signer{
+		networkId: networkId,
 	}
 }
 
-func (s QKCSigner) Equal(s2 Signer) bool {
-	other, ok := s2.(QKCSigner)
-	return ok && other.qkcNetworkID == s.qkcNetworkID && other.ethChainID == s.ethChainID
+func (s EIP155Signer) Equal(s2 Signer) bool {
+	eip155, ok := s2.(EIP155Signer)
+	return ok && eip155.networkId == s.networkId
 }
 
-func (s QKCSigner) Sender(tx *EvmTransaction) (account.Recipient, error) {
-	switch tx.Version() {
-	case 0:
-		if tx.NetworkId() != s.qkcNetworkID {
-			return account.Recipient{}, ErrInvalidNetworkID
-		}
-		return recoverPlain(tx.getUnsignedHash(), tx.data.R, tx.data.S, tx.data.V, true)
-	case 1:
-		if tx.NetworkId() != s.qkcNetworkID {
-			return account.Recipient{}, ErrInvalidNetworkID
-		}
-		hashTyped, err := tx.typedHash()
-		if err != nil {
-			return account.Recipient{}, err
-		}
-		return recoverPlain(hashTyped, tx.data.R, tx.data.S, tx.data.V, true)
-	case 2:
-		if tx.NetworkId() != s.ethChainID {
-			return account.Recipient{}, ErrInvalidNetworkID
-		}
-		chainIDMul := new(big.Int).Mul(big.NewInt(int64(s.ethChainID)), big.NewInt(2))
-		V := new(big.Int).Sub(tx.data.V, chainIDMul)
-		V.Sub(V, big.NewInt(8))
-		sender, err := recoverPlain(tx.getUnsignedHashForEip155(s.ethChainID), tx.data.R, tx.data.S, V, true)
-		return sender, err
-	default:
-		return account.Recipient{}, fmt.Errorf("unsupported transaction version %d", tx.Version())
+func (s EIP155Signer) NetworkID() uint32 { return s.networkId }
+
+func (s EIP155Signer) Sender(tx *Transaction) (account.Recipient, error) {
+	if tx.Version() != 2 && tx.NetworkId() != s.networkId {
+		return account.Recipient{}, ErrInvalidNetworkId
 	}
+
+	hash, err := tx.inner.sigHash()
+	if err != nil {
+		return account.Recipient{}, err
+	}
+	v, r, sigS := tx.RawSignatureValues()
+	if tx.Version() == 2 {
+		chainIDMul := new(big.Int).Mul(big.NewInt(int64(tx.NetworkId())), big.NewInt(2))
+		v = new(big.Int).Sub(v, chainIDMul)
+		v.Sub(v, big.NewInt(8))
+	}
+	return recoverPlain(hash, r, sigS, v, true)
 }
 
 // SignatureValues returns signature values. This signature
 // needs to be in the [R || S || V] format where V is 0 or 1.
-func (s QKCSigner) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *big.Int, err error) {
+func (s EIP155Signer) SignatureValues(tx *Transaction, sig []byte) (R, S, V *big.Int, err error) {
 	if len(sig) != 65 {
-		panic(fmt.Sprintf("wrong size for signature: got %d, want 65", len(sig)))
+		return nil, nil, nil, fmt.Errorf("wrong size for signature: got %d, want 65", len(sig))
 	}
 	R = new(big.Int).SetBytes(sig[:32])
 	S = new(big.Int).SetBytes(sig[32:64])
-	V = new(big.Int).SetBytes([]byte{sig[64] + 27})
 	if tx.Version() == 2 {
-		V.Add(V, new(big.Int).SetUint64(8+2*uint64(tx.NetworkId())))
+		V = new(big.Int).SetUint64(uint64(sig[64]) + 35 + 2*uint64(tx.NetworkId()))
+	} else {
+		V = new(big.Int).SetUint64(uint64(sig[64]) + 27)
 	}
 
 	return R, S, V, nil
@@ -149,21 +145,12 @@ func (s QKCSigner) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *big
 
 // Hash returns the hash to be signed by the sender.
 // It does not uniquely identify the transaction.
-func (s QKCSigner) Hash(tx *EvmTransaction) common.Hash {
-	switch tx.Version() {
-	case 0:
-		return tx.getUnsignedHash()
-	case 1:
-		hash, err := tx.typedHash()
-		if err != nil {
-			panic(fmt.Sprintf("typed transaction hash: %v", err))
-		}
-		return hash
-	case 2:
-		return tx.getUnsignedHashForEip155(s.ethChainID)
-	default:
-		panic(fmt.Sprintf("unsupported transaction version %d", tx.Version()))
+func (s EIP155Signer) Hash(tx *Transaction) common.Hash {
+	hash, err := tx.inner.sigHash()
+	if err != nil {
+		panic(err)
 	}
+	return hash
 }
 
 func recoverPlain(sighash common.Hash, R, S, Vb *big.Int, homestead bool) (account.Recipient, error) {

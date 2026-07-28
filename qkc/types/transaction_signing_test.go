@@ -21,20 +21,20 @@
 package types
 
 import (
-	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/qkc/account"
+	"github.com/stretchr/testify/require"
 )
 
-func TestQKCSigning(t *testing.T) {
+func TestEIP155Signing(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
 
-	signer := NewQKCSigner(1, 1)
-	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 0, nil, 0, 0), signer, key)
+	signer := NewEIP155Signer(1)
+	tx, err := SignTx(NewQkcTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 0, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +51,8 @@ func TestQKCSigning(t *testing.T) {
 func TestTypedTransactionSigning(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
-	signer := NewQKCSigner(1, 1)
-	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 1, nil, 0, 0), signer, key)
+	signer := NewEIP155Signer(1)
+	tx, err := SignTx(NewQkcTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 1, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,62 +66,53 @@ func TestTypedTransactionSigning(t *testing.T) {
 	}
 }
 
-func TestEIP155TransactionSigning(t *testing.T) {
+func TestEIP155SignerHashForVersion2(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipient := publicKey2Recipient(&key.PublicKey)
-	const chainID = uint32(3)
-	signer := NewQKCSigner(1, chainID)
-	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, chainID, 2, nil, 0, 0), signer, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx := NewQkcTransaction(0, publicKey2Recipient(&key.PublicKey), new(big.Int), 0, new(big.Int), 0, 0, 1, 2, nil, 0, 0)
+	signer := NewEIP155Signer(tx.NetworkId())
 
-	v, _, _ := tx.RawSignatureValues()
-	base := uint64(35 + 2*chainID)
-	if got := v.Uint64(); got != base && got != base+1 {
-		t.Fatalf("unexpected EIP-155 V %d, want %d or %d", got, base, base+1)
-	}
-	from, err := Sender(signer, tx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if from != recipient {
-		t.Errorf("expected sender %x, got %x", recipient, from)
-	}
-}
-
-func TestQKCSignerHashForVersion2(t *testing.T) {
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx := NewEvmTransaction(0, publicKey2Recipient(&key.PublicKey), new(big.Int), 0, new(big.Int), 0, 0, 1, 2, nil, 0, 0)
-	signer := NewQKCSigner(1, tx.NetworkId())
-
-	if got, want := signer.Hash(tx), tx.getUnsignedHashForEip155(tx.NetworkId()); got != want {
+	if got, want := signer.Hash(tx), qkcTxData(tx).getUnsignedHashForEip155(tx.NetworkId()); got != want {
 		t.Errorf("EIP-155 hash mismatch, got %x want %x", got, want)
 	}
 }
 
-func TestQKCSignerRejectsWrongNetworkID(t *testing.T) {
-	tests := []struct {
-		name    string
-		version uint32
-		network uint32
-		signer  QKCSigner
-	}{
-		{"qkc", 0, 2, NewQKCSigner(1, 3)},
-		{"eip-155", 2, 4, NewQKCSigner(1, 3)},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			tx := NewEvmTransaction(0, account.Recipient{}, new(big.Int), 0, new(big.Int), 0, 0, test.network, test.version, nil, 0, 0)
-			_, err := Sender(test.signer, tx)
-			if !errors.Is(err, ErrInvalidNetworkID) {
-				t.Fatalf("expected ErrInvalidNetworkID, got %v", err)
+func TestSignTxVersionsRecoverSender(t *testing.T) {
+	key, err := crypto.HexToECDSA("45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8")
+	require.NoError(t, err)
+	want := publicKey2Recipient(&key.PublicKey)
+	const networkID = uint32(3)
+	signer := NewEIP155Signer(networkID)
+
+	for _, version := range []uint32{0, 1, 2} {
+		t.Run(string(rune('0'+version)), func(t *testing.T) {
+			tx := NewQkcTransaction(
+				13,
+				common.HexToAddress("0x314b2cd22c6d26618ce051a58c65af1253aecbb8"),
+				big.NewInt(1000),
+				30000,
+				big.NewInt(10_000_000_000),
+				0xc47decfd,
+				0xc49c1950,
+				networkID,
+				version,
+				[]byte{1, 2, 3},
+				0x111,
+				0x222,
+			)
+			signed, err := SignTx(tx, signer, key)
+			require.NoError(t, err)
+			from, err := Sender(signer, signed)
+			require.NoError(t, err)
+			require.Equal(t, want, from)
+
+			v, _, _ := signed.RawSignatureValues()
+			if version == 2 {
+				require.Contains(t, []uint64{41, 42}, v.Uint64())
+			} else {
+				require.Contains(t, []uint64{27, 28}, v.Uint64())
 			}
 		})
 	}
