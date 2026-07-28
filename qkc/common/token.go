@@ -2,7 +2,7 @@
 
 // Token balance encoding follows pyquarkchain-compatible QKC wire bytes.
 
-package types
+package common
 
 import (
 	"bytes"
@@ -21,8 +21,15 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// DefaultTokenID is the QKC native token ID (= TokenIDEncode("QKC") = 35760).
+// The QKC balance is carried as this token ID inside the multi-token balance
+// set when merging into the QuarkChain account trie encoding.
+const DefaultTokenID = uint64(35760)
+
 // TokenTrieThreshold is the maximum number of non-zero token balances supported
-// by this list-only implementation.
+// by this list-only implementation. Accounts with > 16 MNT tokens (goquarkchain's
+// 0x01 trie format) are not implemented; supporting them would require a
+// database-backed trie.
 const TokenTrieThreshold = 16
 
 const (
