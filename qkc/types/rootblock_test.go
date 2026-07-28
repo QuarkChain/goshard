@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/holiman/uint256"
 )
@@ -46,7 +47,7 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 			header: &RootBlockHeader{
 				Time:            1556639999,
 				Coinbase:        account.CreatEmptyAddress(0),
-				CoinbaseAmount:  NewEmptyTokenBalances(),
+				CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
 				Difficulty:      big.NewInt(10000000000000),
 				TotalDifficulty: big.NewInt(10000000000000),
 			},
@@ -60,7 +61,7 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 			header: &RootBlockHeader{
 				Time:            1556639999,
 				Coinbase:        account.CreatEmptyAddress(0),
-				CoinbaseAmount:  NewEmptyTokenBalances(),
+				CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
 				Difficulty:      big.NewInt(100000),
 				TotalDifficulty: big.NewInt(100000),
 			},
@@ -79,7 +80,7 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 				MinorHeaderHash: common.BytesToHash(rep(0x02, 32)),
 				Root:            common.BytesToHash(rep(0x03, 32)),
 				Coinbase:        account.NewAddress(common.BytesToAddress(rep(0xaa, 20)), 0x00010001),
-				CoinbaseAmount: NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+				CoinbaseAmount: qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
 					1:       uint256.NewInt(100),
 					2:       uint256.NewInt(0),
 					1000000: uint256.NewInt(999),
@@ -119,7 +120,7 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 
 func TestEmptyTokenBalancesSerialize(t *testing.T) {
 	var w []byte
-	if err := NewEmptyTokenBalances().Serialize(&w); err != nil {
+	if err := qkcCommon.NewEmptyTokenBalances().Serialize(&w); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 	if h := hex.EncodeToString(w); h != "00000000" {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
@@ -51,7 +52,7 @@ func CreateRootBlock(qkc *config.QuarkChainConfig) (*types.RootBlockHeader, erro
 		ParentHash:      prev,
 		MinorHeaderHash: merkle,
 		Coinbase:        account.CreatEmptyAddress(0),
-		CoinbaseAmount:  types.NewEmptyTokenBalances(),
+		CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
 		Time:            g.Timestamp,
 		Difficulty:      difficulty,
 		TotalDifficulty: new(big.Int).Set(difficulty),

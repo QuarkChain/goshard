@@ -30,6 +30,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 // RootBlockHeader is the QuarkChain root block header. Only the subset of behavior
@@ -41,7 +42,7 @@ type RootBlockHeader struct {
 	MinorHeaderHash common.Hash
 	Root            common.Hash
 	Coinbase        account.Address
-	CoinbaseAmount  *TokenBalances
+	CoinbaseAmount  *qkcCommon.TokenBalances
 	Time            uint64
 	Difficulty      *big.Int
 	TotalDifficulty *big.Int
