@@ -66,6 +66,33 @@ func TestTypedTransactionSigning(t *testing.T) {
 	}
 }
 
+func TestEIP155TransactionSigning(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient := publicKey2Recipient(&key.PublicKey)
+	const chainID = uint32(3)
+	signer := NewQKCSigner(1, chainID)
+	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, chainID, 2, nil, 0, 0), signer, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v, _, _ := tx.RawSignatureValues()
+	base := uint64(35 + 2*chainID)
+	if got := v.Uint64(); got != base && got != base+1 {
+		t.Fatalf("unexpected EIP-155 V %d, want %d or %d", got, base, base+1)
+	}
+	from, err := Sender(signer, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if from != recipient {
+		t.Errorf("expected sender %x, got %x", recipient, from)
+	}
+}
+
 func TestQKCSignerHashForVersion2(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {

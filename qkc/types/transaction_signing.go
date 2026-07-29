@@ -140,6 +140,9 @@ func (s QKCSigner) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *big
 	R = new(big.Int).SetBytes(sig[:32])
 	S = new(big.Int).SetBytes(sig[32:64])
 	V = new(big.Int).SetBytes([]byte{sig[64] + 27})
+	if tx.Version() == 2 {
+		V.Add(V, new(big.Int).SetUint64(8+2*uint64(tx.NetworkId())))
+	}
 
 	return R, S, V, nil
 }
