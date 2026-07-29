@@ -37,7 +37,7 @@ type EvmTransaction struct {
 	data txdata
 	// caches
 	updated       bool
-	hash          atomic.Value
+	hash          atomic.Value // RLP hash of the inner EVM transaction.
 	size          atomic.Value
 	from          atomic.Value
 	FromShardsize uint32
@@ -61,9 +61,6 @@ type txdata struct {
 	V *big.Int `json:"v"             gencodec:"required"`
 	R *big.Int `json:"r"             gencodec:"required"`
 	S *big.Int `json:"s"             gencodec:"required"`
-
-	// This is only used when marshaling to JSON.
-	Hash *common.Hash `json:"hash"              rlp:"-"`
 }
 
 func NewEvmTransaction(nonce uint64, to account.Recipient, amount *big.Int, gasLimit uint64, gasPrice *big.Int, fromFullShardKey uint32,
@@ -372,7 +369,7 @@ type Transaction struct {
 	TxType uint8
 	EvmTx  *EvmTransaction
 
-	hash atomic.Value
+	hash atomic.Value // Hash of the typed QKC transaction envelope.
 }
 
 func (tx *Transaction) CopyEvmTx() (*Transaction, error) {
