@@ -21,17 +21,19 @@
 package types
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/qkc/account"
 )
 
-func TestEIP155Signing(t *testing.T) {
+func TestQKCSigning(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
 
-	signer := NewEIP155Signer(1)
+	signer := NewQKCSigner(1, 1)
 	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 0, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +51,7 @@ func TestEIP155Signing(t *testing.T) {
 func TestTypedTransactionSigning(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
-	signer := NewEIP155Signer(1)
+	signer := NewQKCSigner(1, 1)
 	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 1, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
@@ -64,15 +66,36 @@ func TestTypedTransactionSigning(t *testing.T) {
 	}
 }
 
-func TestEIP155SignerHashForVersion2(t *testing.T) {
+func TestQKCSignerHashForVersion2(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	tx := NewEvmTransaction(0, publicKey2Recipient(&key.PublicKey), new(big.Int), 0, new(big.Int), 0, 0, 1, 2, nil, 0, 0)
-	signer := NewEIP155Signer(tx.NetworkId())
+	signer := NewQKCSigner(1, tx.NetworkId())
 
 	if got, want := signer.Hash(tx), tx.getUnsignedHashForEip155(tx.NetworkId()); got != want {
 		t.Errorf("EIP-155 hash mismatch, got %x want %x", got, want)
+	}
+}
+
+func TestQKCSignerRejectsWrongNetworkID(t *testing.T) {
+	tests := []struct {
+		name    string
+		version uint32
+		network uint32
+		signer  QKCSigner
+	}{
+		{"qkc", 0, 2, NewQKCSigner(1, 3)},
+		{"eip-155", 2, 4, NewQKCSigner(1, 3)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tx := NewEvmTransaction(0, account.Recipient{}, new(big.Int), 0, new(big.Int), 0, 0, test.network, test.version, nil, 0, 0)
+			_, err := Sender(test.signer, tx)
+			if !errors.Is(err, ErrInvalidNetworkID) {
+				t.Fatalf("expected ErrInvalidNetworkID, got %v", err)
+			}
+		})
 	}
 }

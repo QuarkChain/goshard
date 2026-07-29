@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	ErrInvalidNetworkId = errors.New("invalid network id for signer")
+	ErrInvalidNetworkID = errors.New("invalid network ID for signer")
 )
 
 // sigCache is used to cache the derived sender and contains
@@ -27,9 +27,9 @@ type sigCache struct {
 	from   account.Recipient
 }
 
-// MakeSigner returns a Signer based on the given chain config and block number.
-func MakeSigner(networkId uint32) Signer {
-	return NewEIP155Signer(networkId)
+// MakeSigner returns a signer with the expected QKC network and Ethereum chain IDs.
+func MakeSigner(qkcNetworkID, ethChainID uint32) Signer {
+	return NewQKCSigner(qkcNetworkID, ethChainID)
 }
 
 // SignTx signs the transaction using the given signer and private key
@@ -82,50 +82,58 @@ type Signer interface {
 	Equal(Signer) bool
 }
 
-// EIP155Transaction implements Signer using the EIP155 rules.
-type EIP155Signer struct {
-	networkId uint32
+// QKCSigner implements QKC transaction signature rules for all supported versions.
+// Version 0 and 1 use qkcNetworkID, while version 2 uses ethChainID.
+type QKCSigner struct {
+	qkcNetworkID uint32
+	ethChainID   uint32
 }
 
-func NewEIP155Signer(networkId uint32) EIP155Signer {
-	return EIP155Signer{
-		networkId: networkId,
+func NewQKCSigner(qkcNetworkID, ethChainID uint32) QKCSigner {
+	return QKCSigner{
+		qkcNetworkID: qkcNetworkID,
+		ethChainID:   ethChainID,
 	}
 }
 
-func (s EIP155Signer) Equal(s2 Signer) bool {
-	eip155, ok := s2.(EIP155Signer)
-	return ok && eip155.networkId == s.networkId
+func (s QKCSigner) Equal(s2 Signer) bool {
+	other, ok := s2.(QKCSigner)
+	return ok && other.qkcNetworkID == s.qkcNetworkID && other.ethChainID == s.ethChainID
 }
 
-func (s EIP155Signer) Sender(tx *EvmTransaction) (account.Recipient, error) {
-	if tx.Version() != 2 && tx.NetworkId() != s.networkId {
-		return account.Recipient{}, ErrInvalidNetworkId
-	}
-
-	if tx.data.Version == 0 {
+func (s QKCSigner) Sender(tx *EvmTransaction) (account.Recipient, error) {
+	switch tx.Version() {
+	case 0:
+		if tx.NetworkId() != s.qkcNetworkID {
+			return account.Recipient{}, ErrInvalidNetworkID
+		}
 		return recoverPlain(tx.getUnsignedHash(), tx.data.R, tx.data.S, tx.data.V, true)
-	} else if tx.data.Version == 1 {
+	case 1:
+		if tx.NetworkId() != s.qkcNetworkID {
+			return account.Recipient{}, ErrInvalidNetworkID
+		}
 		hashTyped, err := tx.typedHash()
 		if err != nil {
 			return account.Recipient{}, err
 		}
 		return recoverPlain(hashTyped, tx.data.R, tx.data.S, tx.data.V, true)
-	} else if tx.data.Version == 2 {
-		chainID := tx.NetworkId()
-		chainIDMul := new(big.Int).Mul(big.NewInt(int64(chainID)), big.NewInt(2))
+	case 2:
+		if tx.NetworkId() != s.ethChainID {
+			return account.Recipient{}, ErrInvalidNetworkID
+		}
+		chainIDMul := new(big.Int).Mul(big.NewInt(int64(s.ethChainID)), big.NewInt(2))
 		V := new(big.Int).Sub(tx.data.V, chainIDMul)
 		V.Sub(V, big.NewInt(8))
-		sender, err := recoverPlain(tx.getUnsignedHashForEip155(chainID), tx.data.R, tx.data.S, V, true)
+		sender, err := recoverPlain(tx.getUnsignedHashForEip155(s.ethChainID), tx.data.R, tx.data.S, V, true)
 		return sender, err
-	} else {
-		return account.Recipient{}, fmt.Errorf("Version %d is not suppot", tx.data.Version)
+	default:
+		return account.Recipient{}, fmt.Errorf("unsupported transaction version %d", tx.Version())
 	}
 }
 
 // SignatureValues returns signature values. This signature
 // needs to be in the [R || S || V] format where V is 0 or 1.
-func (s EIP155Signer) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *big.Int, err error) {
+func (s QKCSigner) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *big.Int, err error) {
 	if len(sig) != 65 {
 		panic(fmt.Sprintf("wrong size for signature: got %d, want 65", len(sig)))
 	}
@@ -138,7 +146,7 @@ func (s EIP155Signer) SignatureValues(tx *EvmTransaction, sig []byte) (R, S, V *
 
 // Hash returns the hash to be signed by the sender.
 // It does not uniquely identify the transaction.
-func (s EIP155Signer) Hash(tx *EvmTransaction) common.Hash {
+func (s QKCSigner) Hash(tx *EvmTransaction) common.Hash {
 	switch tx.Version() {
 	case 0:
 		return tx.getUnsignedHash()
@@ -149,7 +157,7 @@ func (s EIP155Signer) Hash(tx *EvmTransaction) common.Hash {
 		}
 		return hash
 	case 2:
-		return tx.getUnsignedHashForEip155(tx.NetworkId())
+		return tx.getUnsignedHashForEip155(s.ethChainID)
 	default:
 		panic(fmt.Sprintf("unsupported transaction version %d", tx.Version()))
 	}
