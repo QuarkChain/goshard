@@ -67,6 +67,31 @@ func TestTransactionSigHash(t *testing.T) {
 	}
 }
 
+func TestEvmTransactionHashInvalidatedBySetters(t *testing.T) {
+	newTx := func() *EvmTransaction {
+		return NewEvmTransaction(0, reciept, big.NewInt(0), 0, big.NewInt(0), 0, 0, 1, 0, nil, 0, 0)
+	}
+	tests := []struct {
+		name string
+		set  func(*EvmTransaction)
+	}{
+		{"gas", func(tx *EvmTransaction) { tx.SetGas(1) }},
+		{"from full shard key", func(tx *EvmTransaction) { tx.SetFromFullShardKey(1) }},
+		{"nonce", func(tx *EvmTransaction) { tx.SetNonce(1) }},
+		{"signature", func(tx *EvmTransaction) { tx.SetVRS(big.NewInt(27), big.NewInt(1), big.NewInt(1)) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tx := newTx()
+			before := tx.Hash()
+			test.set(tx)
+			if got := tx.Hash(); got == before {
+				t.Fatal("hash was not invalidated")
+			}
+		})
+	}
+}
+
 func TestTransactionEncode(t *testing.T) {
 	txb, err := rlp.EncodeToBytes(rightvrsTx)
 	if err != nil {

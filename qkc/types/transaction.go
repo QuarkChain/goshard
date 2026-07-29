@@ -36,7 +36,7 @@ var (
 type EvmTransaction struct {
 	data txdata
 	// caches
-	updated       bool
+	hashDirty     bool         // true after a setter changes the inner RLP payload.
 	hash          atomic.Value // RLP hash of the inner EVM transaction.
 	size          atomic.Value
 	from          atomic.Value
@@ -70,24 +70,25 @@ func NewEvmTransaction(nonce uint64, to account.Recipient, amount *big.Int, gasL
 
 func (e *EvmTransaction) SetGas(data uint64) {
 	e.data.GasLimit = data
-	e.updated = true
+	e.hashDirty = true
 }
 
 func (e *EvmTransaction) SetFromFullShardKey(data uint32) {
 	t := Uint32(data)
 	e.data.FromFullShardKey = &t
+	e.hashDirty = true
 }
 
 func (e *EvmTransaction) SetNonce(data uint64) {
 	e.data.AccountNonce = data
-	e.updated = true
+	e.hashDirty = true
 }
 
 func (e *EvmTransaction) SetVRS(v, r, s *big.Int) {
 	e.data.V = v
 	e.data.R = r
 	e.data.S = s
-	e.updated = true
+	e.hashDirty = true
 }
 
 func (e *EvmTransaction) SetSender(addr account.Recipient) {
@@ -281,11 +282,12 @@ func (tx *EvmTransaction) To() *account.Recipient {
 // Hash hashes the RLP encoding of tx.
 // It uniquely identifies the transaction.
 func (tx *EvmTransaction) Hash() common.Hash {
-	if hash := tx.hash.Load(); hash != nil && !tx.updated {
+	if hash := tx.hash.Load(); hash != nil && !tx.hashDirty {
 		return hash.(common.Hash)
 	}
 	v := rlpHash(tx)
 	tx.hash.Store(v)
+	tx.hashDirty = false
 	return v
 }
 
