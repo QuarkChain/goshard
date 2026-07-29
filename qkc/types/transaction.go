@@ -302,40 +302,6 @@ func (tx *EvmTransaction) Size() common.StorageSize {
 	return common.StorageSize(c)
 }
 
-// AsMessage returns the transaction as a core.Message.
-// AsMessage requires a signer to derive the sender.
-// XXX Rename message to something less arbitrary?
-func (tx *EvmTransaction) AsMessage(s Signer, txHash common.Hash, gasPrice *big.Int, gasTokenID uint64, refundRate uint8) (Message, error) {
-	msgTo := new(common.Address)
-	if tx.data.Recipient != nil {
-		msgTo.SetBytes(tx.data.Recipient.Bytes())
-	} else {
-		msgTo = nil
-	}
-
-	toFullShardKey := tx.data.ToFullShardKey.GetValue()
-	msg := Message{
-		nonce:            tx.data.AccountNonce,
-		gasLimit:         tx.data.GasLimit,
-		gasPrice:         new(big.Int).Set(gasPrice),
-		to:               msgTo,
-		amount:           tx.data.Amount,
-		data:             tx.data.Payload,
-		checkNonce:       true,
-		fromFullShardKey: tx.data.FromFullShardKey.GetValue(),
-		toFullShardKey:   &toFullShardKey,
-		txHash:           txHash,
-		isCrossShard:     tx.IsCrossShard(),
-		transferTokenID:  tx.data.TransferTokenID,
-		gasTokenID:       gasTokenID,
-		refundRate:       refundRate,
-	}
-
-	msgFrom, err := Sender(s, tx)
-	msg.from = msgFrom
-	return msg, err
-}
-
 // WithSignature returns a new transaction with the given signature.
 // This signature needs to be formatted as described in the yellow paper (v+27).
 func (tx *EvmTransaction) WithSignature(signer Signer, sig []byte) (*EvmTransaction, error) {
@@ -615,60 +581,3 @@ func (t *TransactionsByPriceAndNonce) Shift() error {
 func (t *TransactionsByPriceAndNonce) Pop() {
 	heap.Pop(&t.heads)
 }
-
-// Message is a fully derived transaction and implements core.Message
-//
-// NOTE: In a future PR this will be removed.
-type Message struct {
-	to               *common.Address
-	from             common.Address
-	nonce            uint64
-	amount           *big.Int
-	gasLimit         uint64
-	gasPrice         *big.Int
-	data             []byte
-	checkNonce       bool
-	fromFullShardKey uint32
-	toFullShardKey   *uint32
-	txHash           common.Hash
-	isCrossShard     bool
-	transferTokenID  uint64
-	gasTokenID       uint64
-	refundRate       uint8
-}
-
-func NewMessage(from common.Address, to *common.Address, nonce uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int,
-	data []byte, checkNonce bool, fromFullShardKey uint32, toFullShardKey *uint32, transferTokenID, gasTokenID uint64, refundRate uint8) Message {
-
-	return Message{
-		from:             from,
-		to:               to,
-		nonce:            nonce,
-		amount:           amount,
-		gasLimit:         gasLimit,
-		gasPrice:         gasPrice,
-		data:             data,
-		checkNonce:       checkNonce,
-		fromFullShardKey: fromFullShardKey,
-		toFullShardKey:   toFullShardKey,
-		transferTokenID:  transferTokenID,
-		gasTokenID:       gasTokenID,
-		refundRate:       refundRate,
-	}
-}
-
-func (m Message) From() common.Address     { return m.from }
-func (m Message) To() *common.Address      { return m.to }
-func (m Message) GasPrice() *big.Int       { return m.gasPrice }
-func (m Message) Value() *big.Int          { return m.amount }
-func (m Message) Gas() uint64              { return m.gasLimit }
-func (m Message) Nonce() uint64            { return m.nonce }
-func (m Message) Data() []byte             { return m.data }
-func (m Message) CheckNonce() bool         { return m.checkNonce }
-func (m Message) IsCrossShard() bool       { return m.isCrossShard }
-func (m Message) FromFullShardKey() uint32 { return m.fromFullShardKey }
-func (m Message) ToFullShardKey() *uint32  { return m.toFullShardKey }
-func (m Message) TxHash() common.Hash      { return m.txHash }
-func (m Message) GasTokenID() uint64       { return m.gasTokenID }
-func (m Message) TransferTokenID() uint64  { return m.transferTokenID }
-func (m Message) RefundRate() uint8        { return m.refundRate }
