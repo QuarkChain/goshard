@@ -1,4 +1,23 @@
 // Copyright 2026-2027, QuarkChain.
+//
+// =============================================================================
+// Protocol compatibility and serialization tests
+// =============================================================================
+//
+// This suite validates the goshard wire protocol implementation against
+// pyquarkchain protocol definitions.
+//
+// Coverage notes:
+//
+//   - This is not an exhaustive byte-level test of all 60+ messages.
+//   - Python/Go golden vectors are added for selected fully concrete messages.
+//   - Messages containing RawBytes placeholders are excluded from byte-level
+//     compatibility checks until their underlying types are migrated.
+//   - Some concrete messages may not have golden vectors yet and will be added
+//     as additional protocol types are validated.
+//
+// Round-trip tests verify Go serializer consistency only; they do not prove
+// Python/Go byte compatibility.
 
 package wire
 
