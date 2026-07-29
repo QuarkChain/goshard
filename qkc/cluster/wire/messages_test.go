@@ -1,4 +1,23 @@
 // Copyright 2026-2027, QuarkChain.
+//
+// =============================================================================
+// Protocol compatibility and serialization tests
+// =============================================================================
+//
+// This suite validates the goshard wire protocol implementation against
+// pyquarkchain protocol definitions.
+//
+// Coverage notes:
+//
+//   - This is not an exhaustive byte-level test of all 60+ messages.
+//   - Python/Go golden vectors are added for selected fully concrete messages.
+//   - Messages containing RawBytes placeholders are excluded from byte-level
+//     compatibility checks until their underlying types are migrated.
+//   - Some concrete messages may not have golden vectors yet and will be added
+//     as additional protocol types are validated.
+//
+// Round-trip tests verify Go serializer consistency only; they do not prove
+// Python/Go byte compatibility.
 
 package wire
 
@@ -375,11 +394,20 @@ func TestPythonCompat_TransactionDetail(t *testing.T) {
 	assertPythonMatch(t, wantHex, buf)
 }
 
-func TestPythonCompat_SyncMinorBlockListResponse_NonNilShardStats(t *testing.T) {
-	// Covers: BigUint in message context (via ShardStats.Difficulty),
-	// Optional(struct) non-nil (ShardStats), and nested struct composition.
+func TestMessageEncoding_SyncMinorBlockListResponse_NonNilShardStats(t *testing.T) {
+	// Tests wire encoding of SyncMinorBlockListResponse.
 	//
-	// Python FIELDS:
+	// NOTE:
+	// BlockCoinbaseMap is currently represented as *RawBytes placeholder.
+	// Its encoding follows Go byte slice serialization and is NOT compatible
+	// with Python's PrependedSizeMapSerializer(4, hash256, TokenBalanceMap).
+	//
+	// Covers:
+	// - BigUint in message context (via ShardStats.Difficulty)
+	// - Optional(struct) non-nil (ShardStats)
+	// - nested struct composition
+	//
+	// Python schema reference (not a golden byte compatibility assertion):
 	//   ("error_code", uint32),
 	//   ("block_coinbase_map", PrependedSizeMapSerializer(4, hash256, TokenBalanceMap)),
 	//   ("shard_stats", Optional(ShardStats)),
@@ -397,7 +425,7 @@ func TestPythonCompat_SyncMinorBlockListResponse_NonNilShardStats(t *testing.T) 
 	//   ("stale_block_count60s", uint32),# uint32
 	//   ("last_block_time", uint32),     # uint32
 	wantHex := "00000000" + // error_code (4B)
-		"02aabb" + // block_coinbase_map: 1B len=2 + 2B data (3B)
+		"02aabb" + // block_coinbase_map: RawBytes placeholder encoding
 		"01" + // shard_stats present marker (1B)
 		"00000001" + // branch (4B)
 		"0000000000000064" + // height (8B)
