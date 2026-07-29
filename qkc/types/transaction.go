@@ -206,7 +206,6 @@ func (tx *EvmTransaction) Gas() uint64        { return tx.data.GasLimit }
 func (tx *EvmTransaction) GasPrice() *big.Int { return new(big.Int).Set(tx.data.Price) }
 func (tx *EvmTransaction) Value() *big.Int    { return new(big.Int).Set(tx.data.Amount) }
 func (tx *EvmTransaction) Nonce() uint64      { return tx.data.AccountNonce }
-func (tx *EvmTransaction) CheckNonce() bool   { return true }
 func (tx *EvmTransaction) FromFullShardId() uint32 {
 	return tx.FromChainID()<<16 | tx.FromShardSize() | tx.FromShardID()
 }
