@@ -14,7 +14,9 @@ import (
 
 const crossShardTransactionListVersion = uint32(1)
 
-type CrossShardTransactionDepositV0 struct {
+// CrossShardTransactionDeposit matches pyquarkchain's current
+// CrossShardTransactionDeposit.FIELDS order.
+type CrossShardTransactionDeposit struct {
 	TxHash          common.Hash
 	From            account.Address
 	To              account.Address
@@ -25,14 +27,8 @@ type CrossShardTransactionDepositV0 struct {
 	GasRemained     *serialize.Uint256
 	MessageData     []byte `bytesizeofslicelen:"4"`
 	CreateContract  bool
-	// Follow pyquarkchain (core.py CrossShardTransactionDepositV0.FIELDS):
-	// is_from_root_chain is serialized last for master/slave wire compatibility.
 	IsFromRootChain bool
-}
-
-type CrossShardTransactionDeposit struct {
-	CrossShardTransactionDepositV0
-	RefundRate uint8
+	RefundRate      uint8
 }
 
 // CrossShardTransactionList is pyquarkchain's CrossShardTransactionList

@@ -5,7 +5,6 @@
 package types
 
 import (
-	"bytes"
 	"math/big"
 	"testing"
 
@@ -15,77 +14,30 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type legacyDepositV0FieldOrderForTest struct {
-	TxHash          common.Hash
-	From            account.Address
-	To              account.Address
-	Value           *serialize.Uint256
-	GasPrice        *serialize.Uint256
-	GasTokenID      uint64
-	TransferTokenID uint64
-	IsFromRootChain bool
-	GasRemained     *serialize.Uint256
-	MessageData     []byte `bytesizeofslicelen:"4"`
-	CreateContract  bool
-}
-
-func TestCrossShardDepositV0PyquarkchainFieldOrder(t *testing.T) {
-	u256 := &serialize.Uint256{Value: big.NewInt(1)}
-	deposit := CrossShardTransactionDepositV0{
-		Value:           u256,
-		GasPrice:        u256,
-		GasTokenID:      2,
-		TransferTokenID: 3,
-		GasRemained:     u256,
-		MessageData:     []byte{0xaa},
-		CreateContract:  false,
-		IsFromRootChain: true,
-	}
-	encoded, err := serialize.SerializeToBytes(deposit)
-	assert.NoError(t, err)
-	assert.Equal(t, byte(1), encoded[len(encoded)-1], "pyquarkchain serializes is_from_root_chain last")
-
-	wrongOrder := legacyDepositV0FieldOrderForTest{
-		Value:           u256,
-		GasPrice:        u256,
-		GasTokenID:      2,
-		TransferTokenID: 3,
-		IsFromRootChain: true,
-		GasRemained:     u256,
-		MessageData:     []byte{0xaa},
-		CreateContract:  false,
-	}
-	wrongEncoded, err := serialize.SerializeToBytes(wrongOrder)
-	assert.NoError(t, err)
-	assert.False(t, bytes.Equal(encoded, wrongEncoded), "legacy field order is not pyquarkchain-compatible")
-}
-
 func TestCrossShardTransactionList(t *testing.T) {
 	c1 := NewCrossShardTransactionList(nil)
 	for index := uint64(0); index < 100; index++ {
 		u256 := new(serialize.Uint256)
 		u256.Value = new(big.Int).SetUint64(index)
 		c1.TXList = append(c1.TXList, &CrossShardTransactionDeposit{
-			CrossShardTransactionDepositV0: CrossShardTransactionDepositV0{
-				TxHash: common.BigToHash(new(big.Int).SetUint64(index)),
-				From: account.Address{
-					Recipient:    common.BigToAddress(new(big.Int).SetUint64(2)),
-					FullShardKey: 2,
-				},
-				To: account.Address{
-					Recipient:    common.BigToAddress(new(big.Int).SetUint64(3)),
-					FullShardKey: 3,
-				},
-				Value:           u256,
-				GasPrice:        u256,
-				GasTokenID:      123,
-				TransferTokenID: 456,
-				IsFromRootChain: false,
-				GasRemained:     u256,
-				MessageData:     []byte{},
-				CreateContract:  true,
+			TxHash: common.BigToHash(new(big.Int).SetUint64(index)),
+			From: account.Address{
+				Recipient:    common.BigToAddress(new(big.Int).SetUint64(2)),
+				FullShardKey: 2,
 			},
-			RefundRate: uint8(index),
+			To: account.Address{
+				Recipient:    common.BigToAddress(new(big.Int).SetUint64(3)),
+				FullShardKey: 3,
+			},
+			Value:           u256,
+			GasPrice:        u256,
+			GasTokenID:      123,
+			TransferTokenID: 456,
+			IsFromRootChain: false,
+			GasRemained:     u256,
+			MessageData:     []byte{},
+			CreateContract:  true,
+			RefundRate:      uint8(index),
 		})
 	}
 
@@ -132,20 +84,18 @@ func TestCrossShardTransactionListPyquarkchainGolden(t *testing.T) {
 
 	u256 := func(value int64) *serialize.Uint256 { return &serialize.Uint256{Value: big.NewInt(value)} }
 	assertSerialized(t, NewCrossShardTransactionList([]*CrossShardTransactionDeposit{{
-		CrossShardTransactionDepositV0: CrossShardTransactionDepositV0{
-			TxHash:          common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
-			From:            account.Address{Recipient: common.HexToAddress("0x2222222222222222222222222222222222222222"), FullShardKey: 3},
-			To:              account.Address{Recipient: common.HexToAddress("0x3333333333333333333333333333333333333333"), FullShardKey: 4},
-			Value:           u256(5),
-			GasPrice:        u256(6),
-			GasTokenID:      7,
-			TransferTokenID: 8,
-			GasRemained:     u256(9),
-			MessageData:     []byte{0xaa, 0xbb},
-			CreateContract:  true,
-			IsFromRootChain: true,
-		},
-		RefundRate: 10,
+		TxHash:          common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		From:            account.Address{Recipient: common.HexToAddress("0x2222222222222222222222222222222222222222"), FullShardKey: 3},
+		To:              account.Address{Recipient: common.HexToAddress("0x3333333333333333333333333333333333333333"), FullShardKey: 4},
+		Value:           u256(5),
+		GasPrice:        u256(6),
+		GasTokenID:      7,
+		TransferTokenID: 8,
+		GasRemained:     u256(9),
+		MessageData:     []byte{0xaa, 0xbb},
+		CreateContract:  true,
+		IsFromRootChain: true,
+		RefundRate:      10,
 	}}), "0000000111111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222000000033333333333333333333333333333333333333333000000040000000000000000000000000000000000000000000000000000000000000005000000000000000000000000000000000000000000000000000000000000000600000000000000070000000000000008000000000000000000000000000000000000000000000000000000000000000900000002aabb01010a00000001")
 }
 
