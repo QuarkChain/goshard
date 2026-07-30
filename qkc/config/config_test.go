@@ -236,6 +236,42 @@ func TestShardGenesisAlloc(t *testing.T) {
 	assert.Contains(t, string(jsonConfig), `608060405260043610610112576000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff`)
 }
 
+func TestAllocationPreservesEmptyCodePresence(t *testing.T) {
+	var absent Allocation
+	if err := json.Unmarshal([]byte(`{}`), &absent); err != nil {
+		t.Fatalf("decode allocation without code: %v", err)
+	}
+	if absent.CodePresent {
+		t.Fatal("allocation without code marked it present")
+	}
+	encoded, err := json.Marshal(absent)
+	if err != nil {
+		t.Fatalf("encode allocation without code: %v", err)
+	}
+	if strings.Contains(string(encoded), `"code"`) {
+		t.Fatalf("allocation without code encoded a code field: %s", encoded)
+	}
+
+	var explicit Allocation
+	if err := json.Unmarshal([]byte(`{"code":"0x"}`), &explicit); err != nil {
+		t.Fatalf("decode allocation with empty code: %v", err)
+	}
+	if !explicit.CodePresent || len(explicit.Code) != 0 {
+		t.Fatalf("empty code decoded as present=%v code=%x, want present empty code", explicit.CodePresent, explicit.Code)
+	}
+	encoded, err = json.Marshal(explicit)
+	if err != nil {
+		t.Fatalf("encode allocation with empty code: %v", err)
+	}
+	var roundTrip Allocation
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatalf("round-trip allocation with empty code: %v", err)
+	}
+	if !roundTrip.CodePresent || len(roundTrip.Code) != 0 {
+		t.Fatalf("empty code round trip = present=%v code=%x, want present empty code", roundTrip.CodePresent, roundTrip.Code)
+	}
+}
+
 func loadConfig(file string, cfg *ClusterConfig) error {
 	var (
 		content []byte
