@@ -83,6 +83,9 @@ header there with the command in that README's
 [Pinned root-genesis values](../../qkc/config/singularity/README.md#pinned-root-genesis-values)
 section and compare its `hash` output with the `hash:` line printed here.
 
-The shard-level `chain genesis` printed by `slave inspect` is the config
-descriptor's fingerprint, not a pyquarkchain minor-block hash; it becomes the
-real shard genesis block hash when the QKC block format (#1) lands.
+The shard-level genesis hash printed by `slave inspect` is the QuarkChain minor
+genesis block hash, byte-identical to pyquarkchain's
+`GenesisManager.create_minor_block().header.get_hash()` — the genesis block and
+its allocated state are derived by [`qkc.CreateMinorBlock`](../../qkc/genesis.go)
+and can be cross-validated the same way as the root genesis (see that README's
+[Pinned minor-genesis values](../../qkc/config/singularity/README.md#pinned-minor-genesis-values)).
