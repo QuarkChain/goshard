@@ -90,8 +90,7 @@ func (e *EvmTransaction) SetVRS(v, r, s *big.Int) {
 	e.hashDirty = true
 }
 
-func (e *EvmTransaction) SetSender(addr account.Recipient) {
-	signer := MakeSigner(e.NetworkId(), e.NetworkId())
+func (e *EvmTransaction) SetSender(signer Signer, addr account.Recipient) {
 	e.from.Store(sigCache{signer: signer, from: addr})
 }
 

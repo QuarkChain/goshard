@@ -92,6 +92,21 @@ func TestEvmTransactionHashInvalidatedBySetters(t *testing.T) {
 	}
 }
 
+func TestSetSenderUsesProvidedSigner(t *testing.T) {
+	tx := NewEvmTransaction(0, reciept, big.NewInt(0), 0, big.NewInt(0), 0, 0, 3, 2, nil, 0, 0)
+	signer := NewQKCSigner(1, 3)
+	want := account.BytesToIdentityRecipient([]byte{1})
+	tx.SetSender(signer, want)
+
+	got, err := Sender(signer, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("cached sender mismatch: got %x, want %x", got, want)
+	}
+}
+
 func TestTransactionEncode(t *testing.T) {
 	txb, err := rlp.EncodeToBytes(rightvrsTx)
 	if err != nil {
