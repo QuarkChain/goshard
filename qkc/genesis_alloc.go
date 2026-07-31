@@ -121,6 +121,12 @@ func genesisAccount(tdb *triedb.Database, batch ethdb.Batch, addr account.Addres
 
 	balances := qkcCommon.NewEmptyTokenBalances()
 	for token, value := range allocation.Balances {
+		// The name is checked even for an entry that contributes no balance, so a
+		// malformed allocation is reported rather than silently dropped.
+		tokenID, err := qkcCommon.TokenIDEncodeChecked(token)
+		if err != nil {
+			return nil, nil, err
+		}
 		if value == nil || value.Sign() == 0 {
 			continue
 		}
@@ -131,7 +137,7 @@ func genesisAccount(tdb *triedb.Database, batch ethdb.Batch, addr account.Addres
 		if overflow {
 			return nil, nil, fmt.Errorf("token %s: balance overflows 256 bits (%s)", token, value)
 		}
-		balances.SetValue(amount, qkcCommon.TokenIDEncode(token))
+		balances.SetValue(amount, tokenID)
 	}
 	blob, err := balances.SerializeToBytes()
 	if err != nil {

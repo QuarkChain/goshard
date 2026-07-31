@@ -229,6 +229,11 @@ func genesisCoinbaseAmount(qkc *config.QuarkChainConfig, shardCfg *config.ShardC
 	if overflow {
 		return nil, fmt.Errorf("COINBASE_AMOUNT × local fee rate overflows 256 bits (%s)", amount)
 	}
+	// GetDefaultChainTokenID panics on a GENESIS_TOKEN outside the encodable domain,
+	// which a config built in code rather than loaded through Validate can be.
+	if err := qkcCommon.ValidateTokenName(qkc.GenesisToken); err != nil {
+		return nil, fmt.Errorf("GENESIS_TOKEN: %w", err)
+	}
 	return qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
 		qkc.GetDefaultChainTokenID(): value,
 	}), nil
