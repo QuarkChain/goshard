@@ -19,12 +19,13 @@ import (
 // genesisBlockKey is the single QKC-prefixed chaindb key the shard's genesis block
 // is stored under, encoded with qkc/serialize.
 //
-// TODO: scaffolding, though the object it holds is not. The permanent home of a
-// minor block is the chain's own block storage — canonical-hash mapping, head
-// pointers, written in one batch by the chain's commit, as geth does in
-// Genesis.Commit (core/genesis.go). Those accessors belong to the chain; until
-// they exist the slave keeps block 0 under this one key so a reopened datadir can
-// still be checked. Dropped, not migrated, when the chain owns block storage.
+// TODO: this key is scaffolding, though the block it holds is not. The permanent
+// home of a minor block is the chain's own block storage — canonical-hash
+// mapping, head pointers, written in one batch by the chain's commit, as geth
+// does in Genesis.Commit (core/genesis.go). Those accessors belong to the chain;
+// until they exist the slave keeps block 0 under this one key so a reopened
+// datadir can still be checked. Dropped, not migrated, when the chain owns block
+// storage.
 var genesisBlockKey = []byte("QKC-genesis-block")
 
 // GenesisMismatchError reports a database that was initialized from a different

@@ -27,8 +27,11 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// Modest fixed sizing for the skeleton's per-shard pebble instance; real tuning
-// belongs to the chain task.
+// Modest fixed sizing for the skeleton's per-shard pebble instance.
+//
+// TODO: size these against the cluster's real shard count and the process cache
+// budget once the chain task owns the database — a slave hosting many shards
+// multiplies both numbers, and 16 is a placeholder, not a measurement.
 const (
 	dbCacheMB = 16
 	dbHandles = 16
