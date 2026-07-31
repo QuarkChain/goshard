@@ -3,6 +3,7 @@
 package qkc
 
 import (
+	"bytes"
 	"encoding/json"
 	"math/big"
 	"strings"
@@ -208,6 +209,53 @@ func TestGenesisAllocAccountEncoding(t *testing.T) {
 	bare := readAccount(t, db2, root2, plain)
 	if bare.Nonce != 0 || bare.CodeHash != coretypes.EmptyCodeHash || bare.Root != coretypes.EmptyRootHash {
 		t.Errorf("plain account = %+v, want nonce 0 with empty code and storage", bare)
+	}
+}
+
+// TestCommitGenesisAllocPersistsStorage: an allocated slot survives the commit.
+// The account leaf naming a storage root is not enough — the storage trie's own
+// nodes have to reach the disk, or every read of that contract's state fails
+// once the genesis database is reopened.
+func TestCommitGenesisAllocPersistsStorage(t *testing.T) {
+	addr := account.NewAddress(
+		account.BytesToIdentityRecipient(common.FromHex("32c53c6c2b57a4a5b0b5ccc9d82c8fff7f0a1122")),
+		0x000075b2,
+	)
+	slot := common.HexToHash("0x01")
+	value := common.HexToHash("0xdead")
+	db := rawdb.NewMemoryDatabase()
+	root, err := commitGenesisAlloc(db, map[account.Address]config.Allocation{
+		addr: {
+			Balances: map[string]*big.Int{"QKC": big.NewInt(1000)},
+			Code:     []byte{0x60, 0x00, 0x60, 0x00},
+			Storage:  map[common.Hash]common.Hash{slot: value},
+		},
+	})
+	if err != nil {
+		t.Fatalf("commitGenesisAlloc: %v", err)
+	}
+	acct := readAccount(t, db, root, addr)
+	if acct.Root == coretypes.EmptyRootHash {
+		t.Fatal("storage root is empty, want the slot's trie root")
+	}
+	if !rawdb.HasLegacyTrieNode(db, acct.Root) {
+		t.Errorf("storage root %s is not in the database", acct.Root)
+	}
+
+	tdb := triedb.NewDatabase(db, triedb.HashDefaults)
+	defer tdb.Close()
+	owner := crypto.Keccak256Hash(addr.Recipient.Bytes())
+	storage, err := trie.NewStateTrie(trie.StorageTrieID(root, owner, acct.Root), tdb)
+	if err != nil {
+		t.Fatalf("open storage trie at %s: %v", acct.Root, err)
+	}
+	got, err := storage.GetStorage(common.Address{}, slot.Bytes())
+	if err != nil {
+		t.Fatalf("read slot %s: %v", slot, err)
+	}
+	// Slots hold integers: the value is stored with its leading zeros stripped.
+	if want := value.Bytes()[common.HashLength-2:]; !bytes.Equal(got, want) {
+		t.Errorf("slot %s = %x, want %x", slot, got, want)
 	}
 }
 

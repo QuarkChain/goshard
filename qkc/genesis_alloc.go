@@ -55,6 +55,7 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		return common.Hash{}, fmt.Errorf("open genesis state trie: %w", err)
 	}
 	nodes := trienode.NewMergedNodeSet()
+	var storageRoots []common.Hash
 	batch := db.NewBatch()
 
 	for addr, allocation := range alloc {
@@ -72,6 +73,7 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 			if err := nodes.Merge(storageNodes); err != nil {
 				return common.Hash{}, err
 			}
+			storageRoots = append(storageRoots, acct.Root)
 		}
 		enc, err := rlp.EncodeToBytes(acct)
 		if err != nil {
@@ -90,6 +92,17 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 	}
 	if err := tdb.Update(root, coretypes.EmptyRootHash, 0, nodes, nil); err != nil {
 		return common.Hash{}, fmt.Errorf("update genesis trie nodes: %w", err)
+	}
+	// Commit walks the trie from its root, and a storage root is reachable from
+	// the account trie only through the account -> storage-root references hashdb
+	// builds out of leaf metadata. It cannot build them here: it decodes leaves as
+	// geth's four-field StateAccount, which a QuarkChain account is not. So flush
+	// every storage trie as a root in its own right, before the account trie that
+	// names it.
+	for _, storageRoot := range storageRoots {
+		if err := tdb.Commit(storageRoot, false); err != nil {
+			return common.Hash{}, fmt.Errorf("commit genesis storage %s: %w", storageRoot, err)
+		}
 	}
 	if err := tdb.Commit(root, false); err != nil {
 		return common.Hash{}, fmt.Errorf("commit genesis state: %w", err)
