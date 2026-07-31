@@ -212,6 +212,61 @@ func TestGenesisAllocAccountEncoding(t *testing.T) {
 	}
 }
 
+// TestGenesisAllocMixedLegacyFormat pins the mixed allocation form — bare token
+// balances alongside code or storage — against pyquarkchain, which reads code and
+// storage on their own and takes the entry itself as the balance table whenever
+// there is no "balances" field. Dropping those balances would silently underfund
+// the genesis and fork the state root. Roots are
+// GenesisManager.create_minor_block().meta.hash_evm_state_root over a
+// single-entry ALLOC for this address; recipe in qkc/config/singularity/README.md.
+func TestGenesisAllocMixedLegacyFormat(t *testing.T) {
+	addr := account.NewAddress(
+		account.BytesToIdentityRecipient(common.FromHex("32c53c6c2b57a4a5b0b5ccc9d82c8fff7f0a1122")),
+		0,
+	)
+	for _, tc := range []struct {
+		name  string
+		alloc string
+		root  string
+	}{
+		{
+			name:  "legacy balance with empty code",
+			alloc: `{"QKC": 7, "code": "0x"}`,
+			root:  "0x6183e9362a9b355c482073e2b9f97d8000aae28df27bb13b9b3bed275dcb4ab5",
+		},
+		{
+			// The same account written the v2 way hashes to the same root.
+			name:  "v2 equivalent",
+			alloc: `{"balances": {"QKC": 7}, "code": "0x"}`,
+			root:  "0x6183e9362a9b355c482073e2b9f97d8000aae28df27bb13b9b3bed275dcb4ab5",
+		},
+		{
+			name:  "legacy balances with code and storage",
+			alloc: `{"QKC": 7, "QI": 3, "code": "0x60006000", "storage": {"0x01": "0x02"}}`,
+			root:  "0x926ea28d095037551989c7a6d3ce4737be99f2b3620d6bcf21c8e8ec7d8525bc",
+		},
+		{
+			name:  "legacy only",
+			alloc: `{"QKC": 7}`,
+			root:  "0x107394bbc6ee4e7650b387a010b72ee8d21d042e35140056e7290c0baa26528d",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var allocation config.Allocation
+			if err := json.Unmarshal([]byte(tc.alloc), &allocation); err != nil {
+				t.Fatalf("decode allocation: %v", err)
+			}
+			root, err := genesisAllocRoot(map[account.Address]config.Allocation{addr: allocation})
+			if err != nil {
+				t.Fatalf("genesisAllocRoot: %v", err)
+			}
+			if root != common.HexToHash(tc.root) {
+				t.Errorf("genesis state root mismatch\n got %s\nwant %s", root.Hex(), tc.root)
+			}
+		})
+	}
+}
+
 // TestCommitGenesisAllocPersistsStorage: an allocated slot survives the commit.
 // The account leaf naming a storage root is not enough — the storage trie's own
 // nodes have to reach the disk, or every read of that contract's state fails
