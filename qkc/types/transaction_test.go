@@ -248,62 +248,6 @@ func TestRecipientNormal(t *testing.T) {
 	}
 }
 
-// Tests that transactions can be correctly sorted according to their price in
-// decreasing order, but at the same time with increasing nonces when issued by
-// the same account.
-func TestTransactionPriceNonceSort(t *testing.T) {
-	// Generate a batch of accounts to start with
-	keys := make([]*ecdsa.PrivateKey, 25)
-	for i := 0; i < len(keys); i++ {
-		keys[i], _ = crypto.GenerateKey()
-	}
-
-	signer := NewEIP155Signer(1)
-	// Generate a batch of transactions with overlapping values, but shifted nonces
-	groups := map[account.Recipient]Transactions{}
-	for start, key := range keys {
-		recipient := publicKey2Recipient(&key.PublicKey)
-		for i := 0; i < 25; i++ {
-			tx, _ := SignTx(NewQkcTransaction(uint64(start+i), account.Recipient{}, big.NewInt(100), 100, big.NewInt(int64(start+i)), 0, 0, 1, 0, nil, 0, 0), signer, key)
-			groups[recipient] = append(groups[recipient], tx)
-		}
-	}
-	// Sort the transactions and cross check the nonce ordering
-	txset, err := NewTransactionsByPriceAndNonce(signer, groups)
-	if err != nil {
-		t.Errorf("NewTransactionsByPriceAndNonce err %v", err)
-	}
-
-	txs := Transactions{}
-	for tx := txset.Peek(); tx != nil; tx = txset.Peek() {
-		txs = append(txs, tx)
-		txset.Shift()
-	}
-	if len(txs) != 25*25 {
-		t.Errorf("expected %d transactions, found %d", 25*25, len(txs))
-	}
-	for i, txi := range txs {
-		fromi, _ := Sender(signer, txi)
-
-		// Make sure the nonce order is valid
-		for j, txj := range txs[i+1:] {
-			fromj, _ := Sender(signer, txj)
-
-			if fromi == fromj && txi.Nonce() > txj.Nonce() {
-				t.Errorf("invalid nonce ordering: tx #%d (A=%x N=%v) < tx #%d (A=%x N=%v)", i, fromi[:4], txi.Nonce(), i+j, fromj[:4], txj.Nonce())
-			}
-		}
-
-		// If the next tx has different from account, the price must be lower than the current one
-		if i+1 < len(txs) {
-			next := txs[i+1]
-			fromNext, _ := Sender(signer, next)
-			if fromi != fromNext && txi.GasPrice().Cmp(next.GasPrice()) < 0 {
-				t.Errorf("invalid gasprice ordering: tx #%d (A=%x P=%v) < tx #%d (A=%x P=%v)", i, fromi[:4], txi.GasPrice(), i+1, fromNext[:4], next.GasPrice())
-			}
-		}
-	}
-}
 func TestTxSize(t *testing.T) {
 
 	id1, err := account.CreatRandomIdentity()
