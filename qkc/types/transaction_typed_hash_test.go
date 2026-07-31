@@ -44,7 +44,7 @@ func bytesToBigInt(data string) *big.Int {
 }
 
 var (
-	rawQkcTx = NewQkcTransaction(bytesToUint64("0x0d"), common.BytesToAddress(common.FromHex("314b2cd22c6d26618ce051a58c65af1253aecbb8")),
+	rawQkcTx = NewEvmTransaction(bytesToUint64("0x0d"), common.BytesToAddress(common.FromHex("314b2cd22c6d26618ce051a58c65af1253aecbb8")),
 		bytesToBigInt("0x056bc75e2d63100000"), bytesToUint64("0x7530"), bytesToBigInt("0x02540be400"), bytesToUint32("0xc47decfd"),
 		bytesToUint32("0xc49c1950"), bytesToUint32("0x03"), 1, nil, bytesToUint64("0x0111"), bytesToUint64("0x0222"),
 	)
@@ -115,7 +115,7 @@ var (
 )
 
 func TestTyped(t *testing.T) {
-	assert.Equal(t, tx, qkcTxToTypedData(qkcTxData(rawQkcTx)))
+	assert.Equal(t, tx, evmTxToTypedData(evmTxData(rawQkcTx)))
 }
 
 func TestSolidityPack(t *testing.T) {

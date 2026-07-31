@@ -17,7 +17,9 @@ import (
 )
 
 var (
-	ErrInvalidNetworkID = errors.New("invalid network ID for signer")
+	ErrInvalidNetworkID  = errors.New("invalid network ID for signer")
+	ErrV2NonDefaultToken = errors.New("version 2 transaction must use the default QKC token")
+	ErrV2CrossShard      = errors.New("version 2 transaction must not be cross-shard")
 )
 
 type sigCache struct {
@@ -35,11 +37,8 @@ func SignTx(tx *Transaction, s Signer, prv *ecdsa.PrivateKey) (*Transaction, err
 	if tx == nil {
 		return nil, errors.New("cannot sign nil transaction")
 	}
-	if tx.Version() > 2 {
-		return nil, fmt.Errorf("version %d is not supported", tx.Version())
-	}
-	if tx.Version() != 2 && tx.NetworkId() != s.NetworkID() {
-		return nil, ErrInvalidNetworkID
+	if err := s.Validate(tx); err != nil {
+		return nil, err
 	}
 	h := s.Hash(tx)
 	sig, err := crypto.Sign(h[:], prv)
@@ -84,8 +83,8 @@ type Signer interface {
 	SignatureValues(tx *Transaction, sig []byte) (r, s, v *big.Int, err error)
 	// Hash returns the hash to be signed.
 	Hash(tx *Transaction) common.Hash
-	// NetworkID returns the network accepted by the signer.
-	NetworkID() uint32
+	// Validate checks whether the signer accepts the transaction.
+	Validate(tx *Transaction) error
 	// Equal returns true if the given signer is the same as the receiver.
 	Equal(Signer) bool
 }
@@ -109,14 +108,22 @@ func (s QKCSigner) Equal(s2 Signer) bool {
 	return ok && other.qkcNetworkID == s.qkcNetworkID && other.ethChainID == s.ethChainID
 }
 
-func (s QKCSigner) NetworkID() uint32 { return s.qkcNetworkID }
-
-func (s QKCSigner) Sender(tx *Transaction) (account.Recipient, error) {
-	if tx.Version() != 2 && tx.NetworkId() != s.qkcNetworkID {
-		return account.Recipient{}, ErrInvalidNetworkID
+func (s QKCSigner) Validate(tx *Transaction) error {
+	if err := tx.Validate(); err != nil {
+		return err
+	}
+	if tx.Version() < 2 && tx.NetworkId() != s.qkcNetworkID {
+		return ErrInvalidNetworkID
 	}
 	if tx.Version() == 2 && tx.NetworkId() != s.ethChainID {
-		return account.Recipient{}, ErrInvalidNetworkID
+		return ErrInvalidNetworkID
+	}
+	return nil
+}
+
+func (s QKCSigner) Sender(tx *Transaction) (account.Recipient, error) {
+	if err := s.Validate(tx); err != nil {
+		return account.Recipient{}, err
 	}
 
 	hash, err := tx.inner.sigHash()
@@ -135,6 +142,9 @@ func (s QKCSigner) Sender(tx *Transaction) (account.Recipient, error) {
 // SignatureValues returns signature values. This signature
 // needs to be in the [R || S || V] format where V is 0 or 1.
 func (s QKCSigner) SignatureValues(tx *Transaction, sig []byte) (R, S, V *big.Int, err error) {
+	if err := s.Validate(tx); err != nil {
+		return nil, nil, nil, err
+	}
 	if len(sig) != 65 {
 		return nil, nil, nil, fmt.Errorf("wrong size for signature: got %d, want 65", len(sig))
 	}

@@ -26,6 +26,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/qkc/account"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,7 +36,7 @@ func TestQKCSigning(t *testing.T) {
 	recipient := publicKey2Recipient(&key.PublicKey)
 
 	signer := NewQKCSigner(1, 1)
-	tx, err := SignTx(NewQkcTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 0, nil, 0, 0), signer, key)
+	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 0, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +54,7 @@ func TestTypedTransactionSigning(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
 	signer := NewQKCSigner(1, 1)
-	tx, err := SignTx(NewQkcTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 1, nil, 0, 0), signer, key)
+	tx, err := SignTx(NewEvmTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 1, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,10 +73,10 @@ func TestQKCSignerHashForVersion2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx := NewQkcTransaction(0, publicKey2Recipient(&key.PublicKey), new(big.Int), 0, new(big.Int), 0, 0, 1, 2, nil, 0, 0)
+	tx := NewEvmTransaction(0, publicKey2Recipient(&key.PublicKey), new(big.Int), 0, new(big.Int), 0, 0, 1, 2, nil, 0, 0)
 	signer := NewQKCSigner(1, tx.NetworkId())
 
-	if got, want := signer.Hash(tx), qkcTxData(tx).getUnsignedHashForEip155(tx.NetworkId()); got != want {
+	if got, want := signer.Hash(tx), evmTxData(tx).getUnsignedHashForEip155(tx.NetworkId()); got != want {
 		t.Errorf("EIP-155 hash mismatch, got %x want %x", got, want)
 	}
 }
@@ -88,19 +90,25 @@ func TestSignTxVersionsRecoverSender(t *testing.T) {
 
 	for _, version := range []uint32{0, 1, 2} {
 		t.Run(string(rune('0'+version)), func(t *testing.T) {
-			tx := NewQkcTransaction(
+			toFullShardKey, gasTokenID, transferTokenID := uint32(0xc49c1950), uint64(0x111), uint64(0x222)
+			if version == 2 {
+				toFullShardKey = 0xc47decfd
+				gasTokenID = qkccommon.TokenIDEncode("QKC")
+				transferTokenID = gasTokenID
+			}
+			tx := NewEvmTransaction(
 				13,
 				common.HexToAddress("0x314b2cd22c6d26618ce051a58c65af1253aecbb8"),
 				big.NewInt(1000),
 				30000,
 				big.NewInt(10_000_000_000),
 				0xc47decfd,
-				0xc49c1950,
+				toFullShardKey,
 				networkID,
 				version,
 				[]byte{1, 2, 3},
-				0x111,
-				0x222,
+				gasTokenID,
+				transferTokenID,
 			)
 			signed, err := SignTx(tx, signer, key)
 			require.NoError(t, err)
@@ -114,6 +122,32 @@ func TestSignTxVersionsRecoverSender(t *testing.T) {
 			} else {
 				require.Contains(t, []uint64{27, 28}, v.Uint64())
 			}
+		})
+	}
+}
+
+func TestQKCSignerRejectsInvalidVersion2Fields(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	defaultTokenID := qkccommon.TokenIDEncode("QKC")
+	signer := NewQKCSigner(1, 3)
+	tests := []struct {
+		name             string
+		fromFullShardKey uint32
+		toFullShardKey   uint32
+		gasTokenID       uint64
+		transferTokenID  uint64
+		wantErr          error
+	}{
+		{"cross-shard", 0xc47d0000, 0xc49c0000, defaultTokenID, defaultTokenID, ErrV2CrossShard},
+		{"non-default-gas-token", 0xc47d0000, 0xc47d0000, 1, defaultTokenID, ErrV2NonDefaultToken},
+		{"non-default-transfer-token", 0xc47d0000, 0xc47d0000, defaultTokenID, 1, ErrV2NonDefaultToken},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tx := NewEvmTransaction(0, account.Recipient{}, nil, 0, nil, test.fromFullShardKey, test.toFullShardKey, 3, 2, nil, test.gasTokenID, test.transferTokenID)
+			_, err := SignTx(tx, signer, key)
+			require.ErrorIs(t, err, test.wantErr)
 		})
 	}
 }

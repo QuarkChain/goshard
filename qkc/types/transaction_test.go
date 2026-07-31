@@ -22,14 +22,14 @@ import (
 // The values in those tests are from the QkcTx tests.
 var (
 	reciept    = account.BytesToIdentityRecipient(common.Hex2Bytes("b94f5374fce5edbc8e2a8697c15331677e6ebf0b"))
-	emptyQkcTx = NewQkcTransaction(
+	emptyQkcTx = NewEvmTransaction(
 		0,
 		reciept,
 		big.NewInt(0), 0, big.NewInt(0),
 		0, 0, 1, 0, nil, 0, 0,
 	)
 	//nonce , to , amount , gasLimit , gasPrice, fromFullShardKey , toFullShardKey , networkId , version , data
-	rightvrsTx = NewQkcTransaction(
+	rightvrsTx = NewEvmTransaction(
 		3,
 		reciept,
 		big.NewInt(10),
@@ -47,8 +47,8 @@ var (
 	)
 )
 
-func qkcTxData(tx *Transaction) *QkcTx {
-	return tx.inner.(*QkcTx)
+func evmTxData(tx *Transaction) *EvmTx {
+	return tx.inner.(*EvmTx)
 }
 
 func TestTransactionSigHash(t *testing.T) {
@@ -57,7 +57,7 @@ func TestTransactionSigHash(t *testing.T) {
 	if signer.Hash(emptyQkcTx) != common.HexToHash("15e523e4a18884f01753358af140664007e19b2c67cfa6618cadb85de14f3bd0") {
 		t.Errorf("empty transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(emptyQkcTx), common.HexToHash("297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba495"))
 	}
-	if rlpHash(qkcTxData(emptyQkcTx)) != common.HexToHash("a04873d41928c8acc76d4d6495fec31fb58afc7d5a5782d9ba4bb30fdbf1b147") {
+	if rlpHash(evmTxData(emptyQkcTx)) != common.HexToHash("a04873d41928c8acc76d4d6495fec31fb58afc7d5a5782d9ba4bb30fdbf1b147") {
 		t.Errorf("empty transaction hash mismatch, got %x, expect %x", emptyQkcTx.Hash(), common.HexToHash("a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97"))
 	}
 
@@ -65,8 +65,8 @@ func TestTransactionSigHash(t *testing.T) {
 	if signer.Hash(rightvrsTx) != common.HexToHash("a8915d9a38bacbdc640ab287d4beb9b06ea1af52da8568c298739c9d7514e87b") {
 		t.Errorf("RightVRS transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(rightvrsTx), common.HexToHash("e4f3c1dd000045bf26006df7eb7cb0a882f70a6ab81723d93638151f6418f78a"))
 	}
-	if rlpHash(qkcTxData(rightvrsTx)) != common.HexToHash("4bf87b2a5b39b7894b4b4b197ffe1ef7e67085bbc60d599ed3d4d587aa72af76") {
-		t.Errorf("RightVRS transaction hash mismatch, got %x, expect %x", rlpHash(qkcTxData(rightvrsTx)), common.HexToHash("df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28"))
+	if rlpHash(evmTxData(rightvrsTx)) != common.HexToHash("4bf87b2a5b39b7894b4b4b197ffe1ef7e67085bbc60d599ed3d4d587aa72af76") {
+		t.Errorf("RightVRS transaction hash mismatch, got %x, expect %x", rlpHash(evmTxData(rightvrsTx)), common.HexToHash("df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28"))
 	}
 }
 
@@ -144,15 +144,15 @@ func TestWithSignatureDeepCopiesTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx := NewQkcTransaction(1, reciept, big.NewInt(2), 3, big.NewInt(4), 5, 6, 1, 0, []byte{7}, 8, 9)
+	tx := NewEvmTransaction(1, reciept, big.NewInt(2), 3, big.NewInt(4), 5, 6, 1, 0, []byte{7}, 8, 9)
 	signed, err := SignTx(tx, NewQKCSigner(1, 1), key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	qkcTxData(signed).Price.SetInt64(99)
-	qkcTxData(signed).Amount.SetInt64(98)
-	qkcTxData(signed).Payload[0] = 97
-	if qkcTxData(tx).Price.Int64() != 4 || qkcTxData(tx).Amount.Int64() != 2 || qkcTxData(tx).Payload[0] != 7 {
+	evmTxData(signed).Price.SetInt64(99)
+	evmTxData(signed).Amount.SetInt64(98)
+	evmTxData(signed).Payload[0] = 97
+	if evmTxData(tx).Price.Int64() != 4 || evmTxData(tx).Amount.Int64() != 2 || evmTxData(tx).Payload[0] != 7 {
 		t.Fatal("WithSignature shares mutable transaction data")
 	}
 }
@@ -163,7 +163,7 @@ func TestTransactionSettersClearCaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx, err := SignTx(
-		NewQkcTransaction(1, reciept, big.NewInt(2), 30_000, big.NewInt(4), 5, 6, 1, 0, []byte{7}, 8, 9),
+		NewEvmTransaction(1, reciept, big.NewInt(2), 30_000, big.NewInt(4), 5, 6, 1, 0, []byte{7}, 8, 9),
 		NewQKCSigner(1, 1),
 		key,
 	)
@@ -191,11 +191,43 @@ func TestTransactionSettersClearCaches(t *testing.T) {
 }
 
 func decodeTx(data []byte) (*Transaction, error) {
-	var inner QkcTx
-	if err := rlp.Decode(bytes.NewReader(data), &inner); err != nil {
+	var tx Transaction
+	if err := rlp.DecodeBytes(data, &tx); err != nil {
 		return nil, err
 	}
-	return NewTransaction(&inner), nil
+	return &tx, nil
+}
+
+func TestEvmTxRejectsInvalidDecodedFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*EvmTx)
+	}{
+		{"missing-from-full-shard-key", func(tx *EvmTx) { tx.FromFullShardKey = nil }},
+		{"missing-to-full-shard-key", func(tx *EvmTx) { tx.ToFullShardKey = nil }},
+		{"unsupported-version", func(tx *EvmTx) { tx.Version = 3 }},
+		{"oversized-amount", func(tx *EvmTx) { tx.Amount = new(big.Int).Lsh(big.NewInt(1), 256) }},
+		{"oversized-gas-price", func(tx *EvmTx) { tx.Price = new(big.Int).Lsh(big.NewInt(1), 256) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inner := newEvmTransaction(0, nil, nil, 0, nil, 0, 0, 1, 0, nil, 0, 0)
+			test.mutate(inner)
+			payload, err := rlp.EncodeToBytes(inner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Transaction
+			if err := rlp.DecodeBytes(payload, &decoded); err == nil {
+				t.Fatal("RLP decoded invalid transaction")
+			}
+			wire := []byte{EvmTxType, 0, 0, 0, byte(len(payload))}
+			wire = append(wire, payload...)
+			if err := serialize.DeserializeFromBytes(wire, &decoded); err == nil {
+				t.Fatal("wire decoded invalid transaction")
+			}
+		})
+	}
 }
 
 func publicKey2Recipient(pk *ecdsa.PublicKey) account.Recipient {
@@ -264,7 +296,7 @@ func TestTxSize(t *testing.T) {
 			t.Errorf("%s mismatch: got %v, want %v", f, got, want)
 		}
 	}
-	qkcTx := NewQkcTransaction(
+	qkcTx := NewEvmTransaction(
 		0,
 		acc1.Recipient,
 		big.NewInt(0),
@@ -296,7 +328,7 @@ func TestTxSize(t *testing.T) {
 	TT256 := new(big.Int).Sub(new(big.Int).Exp(big.NewInt(2), big.NewInt(256), big.NewInt(0)), big.NewInt(1))
 	SHARD_KEY_MAX := new(big.Int).Exp(big.NewInt(256), big.NewInt(4), big.NewInt(0))
 	TOKEN_ID_MAX, _ := new(big.Int).SetString("4873763662273663091", 10)
-	qkcTx2 := NewQkcTransaction(
+	qkcTx2 := NewEvmTransaction(
 		TT256.Uint64(),
 		acc1.Recipient,
 		TT256,
