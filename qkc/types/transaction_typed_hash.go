@@ -30,7 +30,7 @@ func uint32ToHex(data uint32) string {
 	return hexutil.Encode(new(big.Int).SetUint64(uint64(data)).Bytes())
 }
 
-func receiptToHex(data *account.Recipient) string {
+func recipientToHex(data *account.Recipient) string {
 	if data == nil {
 		return "0x"
 	}
@@ -69,7 +69,7 @@ func qkcTxToTypedData(qkcTx *QkcTx) []map[string]string {
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint160",
 		"name":  "to",
-		"value": receiptToHex(qkcTx.to()),
+		"value": recipientToHex(qkcTx.to()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
