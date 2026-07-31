@@ -29,11 +29,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEIP155Signing(t *testing.T) {
+func TestQKCSigning(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
 
-	signer := NewEIP155Signer(1)
+	signer := NewQKCSigner(1, 1)
 	tx, err := SignTx(NewQkcTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 0, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestEIP155Signing(t *testing.T) {
 func TestTypedTransactionSigning(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	recipient := publicKey2Recipient(&key.PublicKey)
-	signer := NewEIP155Signer(1)
+	signer := NewQKCSigner(1, 1)
 	tx, err := SignTx(NewQkcTransaction(0, recipient, new(big.Int), 0, new(big.Int), 0, 0, 1, 1, nil, 0, 0), signer, key)
 	if err != nil {
 		t.Fatal(err)
@@ -66,13 +66,13 @@ func TestTypedTransactionSigning(t *testing.T) {
 	}
 }
 
-func TestEIP155SignerHashForVersion2(t *testing.T) {
+func TestQKCSignerHashForVersion2(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	tx := NewQkcTransaction(0, publicKey2Recipient(&key.PublicKey), new(big.Int), 0, new(big.Int), 0, 0, 1, 2, nil, 0, 0)
-	signer := NewEIP155Signer(tx.NetworkId())
+	signer := NewQKCSigner(1, tx.NetworkId())
 
 	if got, want := signer.Hash(tx), qkcTxData(tx).getUnsignedHashForEip155(tx.NetworkId()); got != want {
 		t.Errorf("EIP-155 hash mismatch, got %x want %x", got, want)
@@ -84,7 +84,7 @@ func TestSignTxVersionsRecoverSender(t *testing.T) {
 	require.NoError(t, err)
 	want := publicKey2Recipient(&key.PublicKey)
 	const networkID = uint32(3)
-	signer := NewEIP155Signer(networkID)
+	signer := NewQKCSigner(networkID, networkID)
 
 	for _, version := range []uint32{0, 1, 2} {
 		t.Run(string(rune('0'+version)), func(t *testing.T) {

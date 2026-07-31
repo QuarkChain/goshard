@@ -42,7 +42,7 @@ var (
 		nil, 0, 0,
 	)
 	signTx, _ = rightvrsTx.WithSignature(
-		NewEIP155Signer(1),
+		NewQKCSigner(1, 1),
 		common.Hex2Bytes("98ff921201554726367d2be8c804a7ff89ccf285ebc57dff8ae4c44b9c19ac4a8887321be575c8095f789dd4c743dfe42c1820f9231f98a962b210e3ac2452a301"),
 	)
 )
@@ -52,7 +52,7 @@ func qkcTxData(tx *Transaction) *QkcTx {
 }
 
 func TestTransactionSigHash(t *testing.T) {
-	var signer = NewEIP155Signer(1)
+	var signer = NewQKCSigner(1, 1)
 	//hash unsigned
 	if signer.Hash(emptyQkcTx) != common.HexToHash("15e523e4a18884f01753358af140664007e19b2c67cfa6618cadb85de14f3bd0") {
 		t.Errorf("empty transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(emptyQkcTx), common.HexToHash("297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba495"))
@@ -145,7 +145,7 @@ func TestWithSignatureDeepCopiesTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx := NewQkcTransaction(1, reciept, big.NewInt(2), 3, big.NewInt(4), 5, 6, 1, 0, []byte{7}, 8, 9)
-	signed, err := SignTx(tx, NewEIP155Signer(1), key)
+	signed, err := SignTx(tx, NewQKCSigner(1, 1), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,14 +164,14 @@ func TestTransactionSettersClearCaches(t *testing.T) {
 	}
 	tx, err := SignTx(
 		NewQkcTransaction(1, reciept, big.NewInt(2), 30_000, big.NewInt(4), 5, 6, 1, 0, []byte{7}, 8, 9),
-		NewEIP155Signer(1),
+		NewQKCSigner(1, 1),
 		key,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldHash, oldSize := tx.Hash(), tx.Size()
-	oldSender, err := Sender(NewEIP155Signer(1), tx)
+	oldSender, err := Sender(NewQKCSigner(1, 1), tx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestTransactionSettersClearCaches(t *testing.T) {
 	if tx.Hash() == oldHash || tx.Size() == oldSize {
 		t.Fatal("SetGas left a derived cache unchanged")
 	}
-	newSender, err := Sender(NewEIP155Signer(1), tx)
+	newSender, err := Sender(NewQKCSigner(1, 1), tx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestRecipientEmpty(t *testing.T) {
 		t.FailNow()
 	}
 
-	from, err := Sender(NewEIP155Signer(tx.NetworkId()), tx)
+	from, err := Sender(NewQKCSigner(tx.NetworkId(), tx.NetworkId()), tx)
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
@@ -237,7 +237,7 @@ func TestRecipientNormal(t *testing.T) {
 		t.FailNow()
 	}
 
-	from, err := Sender(NewEIP155Signer(1), tx)
+	from, err := Sender(NewQKCSigner(1, 1), tx)
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
@@ -278,7 +278,7 @@ func TestTxSize(t *testing.T) {
 		12345,
 		1234,
 	)
-	signer := NewEIP155Signer(1)
+	signer := NewQKCSigner(1, 1)
 	prvKey, err := crypto.HexToECDSA(hex.EncodeToString(id1.GetKey().Bytes()))
 	if err != nil {
 		t.Fatal("prvKey error: ", err)
