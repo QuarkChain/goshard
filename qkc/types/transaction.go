@@ -74,7 +74,6 @@ type TxData interface {
 	setNonce(uint64)
 
 	sigHash() (common.Hash, error)
-	asMessage(Signer, *Transaction, common.Hash, *big.Int, uint64, uint8) (Message, error)
 	cost() *big.Int
 }
 
@@ -278,40 +277,6 @@ func (tx *QkcTx) sigHash() (common.Hash, error) {
 	}
 }
 
-// AsMessage returns the transaction as a core.Message.
-// AsMessage requires a signer to derive the sender.
-// XXX Rename message to something less arbitrary?
-func (tx *QkcTx) asMessage(s Signer, outer *Transaction, txHash common.Hash, gasPrice *big.Int, gasTokenID uint64, refundRate uint8) (Message, error) {
-	msgTo := new(common.Address)
-	if tx.Recipient != nil {
-		msgTo.SetBytes(tx.Recipient.Bytes())
-	} else {
-		msgTo = nil
-	}
-
-	toFullShardKey := tx.toFullShardKey()
-	msg := Message{
-		nonce:            tx.AccountNonce,
-		gasLimit:         tx.GasLimit,
-		gasPrice:         new(big.Int).Set(gasPrice),
-		to:               msgTo,
-		amount:           tx.Amount,
-		data:             tx.Payload,
-		checkNonce:       true,
-		fromFullShardKey: tx.fromFullShardKey(),
-		toFullShardKey:   &toFullShardKey,
-		txHash:           txHash,
-		isCrossShard:     tx.isCrossShard(),
-		transferTokenID:  tx.TransferTokenID,
-		gasTokenID:       gasTokenID,
-		refundRate:       refundRate,
-	}
-
-	msgFrom, err := Sender(s, outer)
-	msg.from = msgFrom
-	return msg, err
-}
-
 func (tx *QkcTx) copyData() *QkcTx {
 	cpy := *tx
 	cpy.Price = copyBigInt(tx.Price)
@@ -417,9 +382,6 @@ func (tx *Transaction) Size() common.StorageSize {
 	return size
 }
 func (tx *Transaction) Cost() *big.Int { return tx.inner.cost() }
-func (tx *Transaction) AsMessage(s Signer, txHash common.Hash, gasPrice *big.Int, gasTokenID uint64, refundRate uint8) (Message, error) {
-	return tx.inner.asMessage(s, tx, txHash, gasPrice, gasTokenID, refundRate)
-}
 
 func (tx *Transaction) Type() uint8 { return tx.inner.txType() }
 
@@ -729,60 +691,3 @@ func (t *TransactionsByPriceAndNonce) Shift() error {
 func (t *TransactionsByPriceAndNonce) Pop() {
 	heap.Pop(&t.heads)
 }
-
-// Message is a fully derived transaction and implements core.Message
-//
-// NOTE: In a future PR this will be removed.
-type Message struct {
-	to               *common.Address
-	from             common.Address
-	nonce            uint64
-	amount           *big.Int
-	gasLimit         uint64
-	gasPrice         *big.Int
-	data             []byte
-	checkNonce       bool
-	fromFullShardKey uint32
-	toFullShardKey   *uint32
-	txHash           common.Hash
-	isCrossShard     bool
-	transferTokenID  uint64
-	gasTokenID       uint64
-	refundRate       uint8
-}
-
-func NewMessage(from common.Address, to *common.Address, nonce uint64, amount *big.Int, gasLimit uint64, gasPrice *big.Int,
-	data []byte, checkNonce bool, fromFullShardKey uint32, toFullShardKey *uint32, transferTokenID, gasTokenID uint64, refundRate uint8) Message {
-
-	return Message{
-		from:             from,
-		to:               to,
-		nonce:            nonce,
-		amount:           amount,
-		gasLimit:         gasLimit,
-		gasPrice:         gasPrice,
-		data:             data,
-		checkNonce:       checkNonce,
-		fromFullShardKey: fromFullShardKey,
-		toFullShardKey:   toFullShardKey,
-		transferTokenID:  transferTokenID,
-		gasTokenID:       gasTokenID,
-		refundRate:       refundRate,
-	}
-}
-
-func (m Message) From() common.Address     { return m.from }
-func (m Message) To() *common.Address      { return m.to }
-func (m Message) GasPrice() *big.Int       { return m.gasPrice }
-func (m Message) Value() *big.Int          { return m.amount }
-func (m Message) Gas() uint64              { return m.gasLimit }
-func (m Message) Nonce() uint64            { return m.nonce }
-func (m Message) Data() []byte             { return m.data }
-func (m Message) CheckNonce() bool         { return m.checkNonce }
-func (m Message) IsCrossShard() bool       { return m.isCrossShard }
-func (m Message) FromFullShardKey() uint32 { return m.fromFullShardKey }
-func (m Message) ToFullShardKey() *uint32  { return m.toFullShardKey }
-func (m Message) TxHash() common.Hash      { return m.txHash }
-func (m Message) GasTokenID() uint64       { return m.gasTokenID }
-func (m Message) TransferTokenID() uint64  { return m.transferTokenID }
-func (m Message) RefundRate() uint8        { return m.refundRate }
