@@ -18,6 +18,7 @@ package types
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
@@ -50,6 +52,7 @@ const (
 	DynamicFeeTxType = 0x02
 	BlobTxType       = 0x03
 	SetCodeTxType    = 0x04
+	QkcTxType        = 0x7f
 )
 
 // Transaction is an Ethereum transaction.
@@ -123,6 +126,20 @@ func (tx *Transaction) EncodeRLP(w io.Writer) error {
 
 // encodeTyped writes the canonical encoding of a typed transaction to w.
 func (tx *Transaction) encodeTyped(w *bytes.Buffer) error {
+	if tx.Type() == QkcTxType {
+		w.WriteByte(qkcWireTxType)
+		buf := encodeBufferPool.Get().(*bytes.Buffer)
+		defer encodeBufferPool.Put(buf)
+		buf.Reset()
+		if err := tx.inner.encode(buf); err != nil {
+			return err
+		}
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(buf.Len()))
+		w.Write(length[:])
+		w.Write(buf.Bytes())
+		return nil
+	}
 	w.WriteByte(tx.Type())
 	return tx.inner.encode(w)
 }
@@ -204,6 +221,16 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 	}
 	var inner TxData
 	switch b[0] {
+	case qkcWireTxType:
+		inner = new(QkcTx)
+		if len(b) <= 5 {
+			return nil, errShortTypedTx
+		}
+		length := binary.BigEndian.Uint32(b[1:5])
+		if uint64(length) != uint64(len(b)-5) {
+			return nil, fmt.Errorf("invalid transaction length %d", length)
+		}
+		return inner, inner.decode(b[5:])
 	case AccessListTxType:
 		inner = new(AccessListTx)
 	case DynamicFeeTxType:
@@ -581,14 +608,20 @@ func (tx *Transaction) Hash() common.Hash {
 		return *hash
 	}
 
-	var h common.Hash
-	if tx.Type() == LegacyTxType {
-		h = rlpHash(tx.inner)
+	var hash common.Hash
+	if tx.Type() == QkcTxType {
+		encoded, err := serialize.SerializeToBytes(tx)
+		if err != nil {
+			panic(err)
+		}
+		hash = crypto.Keccak256Hash(encoded)
+	} else if tx.Type() == LegacyTxType {
+		hash = rlpHash(tx.inner)
 	} else {
-		h = prefixedRlpHash(tx.Type(), tx.inner)
+		hash = prefixedRlpHash(tx.Type(), tx.inner)
 	}
-	tx.hash.Store(&h)
-	return h
+	tx.hash.Store(&hash)
+	return hash
 }
 
 // Size returns the true encoded storage size of the transaction, either by encoding
@@ -611,7 +644,9 @@ func (tx *Transaction) Size() uint64 {
 	}
 
 	// For typed transactions, the encoding also includes the leading type byte.
-	if tx.Type() != LegacyTxType {
+	if tx.Type() == QkcTxType {
+		size += 5
+	} else if tx.Type() != LegacyTxType {
 		size += 1
 	}
 
