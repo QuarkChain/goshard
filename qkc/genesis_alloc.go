@@ -62,15 +62,16 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		if err != nil {
 			return common.Hash{}, fmt.Errorf("genesis account %s: %w", addr.ToHex(), err)
 		}
+		// Match pyquarkchain's account-existence rule: storage and the full shard
+		// key do not keep an otherwise blank account in the state trie. Its storage
+		// nodes go with it — dropped before the merge, since no leaf reaches them.
+		if acct.Nonce == 0 && len(acct.TokenBalances) == 0 && acct.CodeHash == coretypes.EmptyCodeHash {
+			continue
+		}
 		if storageNodes != nil {
 			if err := nodes.Merge(storageNodes); err != nil {
 				return common.Hash{}, err
 			}
-		}
-		// Match pyquarkchain's account-existence rule: storage and the full shard
-		// key do not keep an otherwise blank account in the state trie.
-		if acct.Nonce == 0 && len(acct.TokenBalances) == 0 && acct.CodeHash == coretypes.EmptyCodeHash {
-			continue
 		}
 		enc, err := rlp.EncodeToBytes(acct)
 		if err != nil {

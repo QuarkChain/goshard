@@ -122,6 +122,10 @@ func (b *MinorBlock) NumberU64() uint64 { return b.Header.Number }
 // Only the envelope is implemented. The shard genesis carries an empty
 // transaction list, so the element is never encoded — but the field needs a type,
 // and this is the one it will keep once transactions are ported.
+//
+// TODO: add the SERIALIZED_EVM encode/decode pair against the EVM transaction
+// type once transactions are ported. Nothing constructs or reads a
+// TypedTransaction today.
 type TypedTransaction struct {
 	Type         uint8
 	SerializedTx []byte `bytesizeofslicelen:"4"`
