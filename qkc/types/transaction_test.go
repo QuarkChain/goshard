@@ -7,6 +7,7 @@ package types
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"encoding/binary"
 	"encoding/hex"
 	"math/big"
 	"reflect"
@@ -55,18 +56,18 @@ func TestTransactionSigHash(t *testing.T) {
 	var signer = NewQKCSigner(1, 1)
 	//hash unsigned
 	if signer.Hash(emptyQkcTx) != common.HexToHash("15e523e4a18884f01753358af140664007e19b2c67cfa6618cadb85de14f3bd0") {
-		t.Errorf("empty transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(emptyQkcTx), common.HexToHash("297d6ae9803346cdb059a671dea7e37b684dcabfa767f2d872026ad0a3aba495"))
+		t.Errorf("empty transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(emptyQkcTx), common.HexToHash("15e523e4a18884f01753358af140664007e19b2c67cfa6618cadb85de14f3bd0"))
 	}
 	if rlpHash(evmTxData(emptyQkcTx)) != common.HexToHash("a04873d41928c8acc76d4d6495fec31fb58afc7d5a5782d9ba4bb30fdbf1b147") {
-		t.Errorf("empty transaction hash mismatch, got %x, expect %x", emptyQkcTx.Hash(), common.HexToHash("a40920ae6f758f88c61b405f9fc39fdd6274666462b14e3887522166e6537a97"))
+		t.Errorf("empty transaction hash mismatch, got %x, expect %x", rlpHash(evmTxData(emptyQkcTx)), common.HexToHash("a04873d41928c8acc76d4d6495fec31fb58afc7d5a5782d9ba4bb30fdbf1b147"))
 	}
 
 	//hash unsigned
 	if signer.Hash(rightvrsTx) != common.HexToHash("a8915d9a38bacbdc640ab287d4beb9b06ea1af52da8568c298739c9d7514e87b") {
-		t.Errorf("RightVRS transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(rightvrsTx), common.HexToHash("e4f3c1dd000045bf26006df7eb7cb0a882f70a6ab81723d93638151f6418f78a"))
+		t.Errorf("RightVRS transaction unsigned hash mismatch, got %x, expect %x", signer.Hash(rightvrsTx), common.HexToHash("a8915d9a38bacbdc640ab287d4beb9b06ea1af52da8568c298739c9d7514e87b"))
 	}
 	if rlpHash(evmTxData(rightvrsTx)) != common.HexToHash("4bf87b2a5b39b7894b4b4b197ffe1ef7e67085bbc60d599ed3d4d587aa72af76") {
-		t.Errorf("RightVRS transaction hash mismatch, got %x, expect %x", rlpHash(evmTxData(rightvrsTx)), common.HexToHash("df227f34313c2bc4a4a986817ea46437f049873f2fca8e2b89b1ecd0f9e67a28"))
+		t.Errorf("RightVRS transaction hash mismatch, got %x, expect %x", rlpHash(evmTxData(rightvrsTx)), common.HexToHash("4bf87b2a5b39b7894b4b4b197ffe1ef7e67085bbc60d599ed3d4d587aa72af76"))
 	}
 }
 
@@ -127,6 +128,24 @@ func TestTransactionCanonicalBytesAndHash(t *testing.T) {
 	}
 }
 
+func TestTransactionWireRejectsTrailingRLPPayload(t *testing.T) {
+	tx := NewEvmTransaction(0, reciept, nil, 0, nil, 0, 0, 1, 0, nil, 0, 0)
+	payload, err := rlp.EncodeToBytes(evmTxData(tx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = append(payload, 0xff)
+	wire := make([]byte, 5, 5+len(payload))
+	wire[0] = EvmTxType
+	binary.BigEndian.PutUint32(wire[1:], uint32(len(payload)))
+	wire = append(wire, payload...)
+
+	var decoded Transaction
+	if err := serialize.DeserializeFromBytes(wire, &decoded); err == nil {
+		t.Fatal("decoded transaction payload with trailing data")
+	}
+}
+
 func TestTransactionMinorBlockMerkleRootGolden(t *testing.T) {
 	txs := Transactions{
 		emptyQkcTx,
@@ -154,6 +173,26 @@ func TestWithSignatureDeepCopiesTransaction(t *testing.T) {
 	evmTxData(signed).Payload[0] = 97
 	if evmTxData(tx).Price.Int64() != 4 || evmTxData(tx).Amount.Int64() != 2 || evmTxData(tx).Payload[0] != 7 {
 		t.Fatal("WithSignature shares mutable transaction data")
+	}
+}
+
+func TestNewTransactionInitializesNilBigInts(t *testing.T) {
+	fromFullShardKey, toFullShardKey := Uint32(0), Uint32(0)
+	tx := NewTransaction(&EvmTx{
+		NetworkID:        1,
+		FromFullShardKey: &fromFullShardKey,
+		ToFullShardKey:   &toFullShardKey,
+	})
+
+	if tx.GasPrice().Sign() != 0 || tx.Value().Sign() != 0 || tx.Cost().Sign() != 0 {
+		t.Fatal("nil transaction values were not initialized to zero")
+	}
+	v, r, s := tx.RawSignatureValues()
+	if v == nil || r == nil || s == nil {
+		t.Fatal("nil signature values were not initialized to zero")
+	}
+	if _, err := Sender(NewQKCSigner(1, 1), tx); err == nil {
+		t.Fatal("recovered sender from an unsigned transaction")
 	}
 }
 
@@ -225,6 +264,28 @@ func TestEvmTxRejectsInvalidDecodedFields(t *testing.T) {
 			wire = append(wire, payload...)
 			if err := serialize.DeserializeFromBytes(wire, &decoded); err == nil {
 				t.Fatal("wire decoded invalid transaction")
+			}
+		})
+	}
+}
+
+func TestSignTxRejectsNegativeValues(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		amount   *big.Int
+		gasPrice *big.Int
+	}{
+		{name: "amount", amount: big.NewInt(-1), gasPrice: new(big.Int)},
+		{name: "gas-price", amount: new(big.Int), gasPrice: big.NewInt(-1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tx := NewEvmTransaction(0, reciept, test.amount, 0, test.gasPrice, 0, 0, 1, 0, nil, 0, 0)
+			if _, err := SignTx(tx, NewQKCSigner(1, 1), key); err == nil {
+				t.Fatal("signed transaction with negative value")
 			}
 		})
 	}

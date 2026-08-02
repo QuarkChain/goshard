@@ -158,6 +158,9 @@ func solidityPack(types, values []string) ([]byte, error) {
 				return nil, errors.New("unsupported byte size")
 			}
 			v, err := hex.DecodeString(value[2:])
+			if err != nil {
+				return nil, err
+			}
 			if len(v) > size {
 				return nil, errors.New("data is large than size")
 			}

@@ -7,7 +7,6 @@
 package types
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -50,6 +49,7 @@ type TxData interface {
 	value() *big.Int
 	data() []byte
 	to() *account.Recipient
+	chainID() *big.Int
 	networkID() uint32
 	gasTokenID() uint64
 	transferTokenID() uint64
@@ -168,8 +168,14 @@ func (tx *EvmTx) validate() error {
 	if tx.Amount != nil && len(tx.Amount.Bytes()) > 32 {
 		return errors.New("amount exceeds 32 bytes")
 	}
+	if tx.Amount != nil && tx.Amount.Sign() < 0 {
+		return errors.New("amount must not be negative")
+	}
 	if tx.Price != nil && len(tx.Price.Bytes()) > 32 {
 		return errors.New("gas price exceeds 32 bytes")
+	}
+	if tx.Price != nil && tx.Price.Sign() < 0 {
+		return errors.New("gas price must not be negative")
 	}
 	if tx.Version == 2 {
 		defaultTokenID := qkcCommon.TokenIDEncode("QKC")
@@ -248,6 +254,12 @@ func (tx *EvmTx) toFullShardID() uint32 {
 }
 func (tx *EvmTx) networkID() uint32 { return tx.NetworkID }
 func (tx *EvmTx) version() uint32   { return tx.Version }
+func (tx *EvmTx) chainID() *big.Int {
+	if tx.Version == 2 {
+		return new(big.Int).SetUint64(uint64(tx.NetworkID))
+	}
+	return new(big.Int)
+}
 func (tx *EvmTx) isCrossShard() bool {
 	return tx.fromChainID() != tx.toChainID() || tx.fromShardID() != tx.toShardID()
 }
@@ -316,12 +328,27 @@ func (tx *EvmTx) sigHash() (common.Hash, error) {
 
 func (tx *EvmTx) copyData() *EvmTx {
 	cpy := *tx
-	cpy.Price = copyBigInt(tx.Price)
-	cpy.Amount = copyBigInt(tx.Amount)
+	cpy.Price = new(big.Int)
+	cpy.Amount = new(big.Int)
 	cpy.Payload = common.CopyBytes(tx.Payload)
-	cpy.V = copyBigInt(tx.V)
-	cpy.R = copyBigInt(tx.R)
-	cpy.S = copyBigInt(tx.S)
+	cpy.V = new(big.Int)
+	cpy.R = new(big.Int)
+	cpy.S = new(big.Int)
+	if tx.Price != nil {
+		cpy.Price.Set(tx.Price)
+	}
+	if tx.Amount != nil {
+		cpy.Amount.Set(tx.Amount)
+	}
+	if tx.V != nil {
+		cpy.V.Set(tx.V)
+	}
+	if tx.R != nil {
+		cpy.R.Set(tx.R)
+	}
+	if tx.S != nil {
+		cpy.S.Set(tx.S)
+	}
 	if tx.Recipient != nil {
 		recipient := *tx.Recipient
 		cpy.Recipient = &recipient
@@ -391,6 +418,7 @@ func (tx *Transaction) Value() *big.Int          { return tx.inner.value() }
 func (tx *Transaction) Nonce() uint64            { return tx.inner.nonce() }
 func (tx *Transaction) NetworkId() uint32        { return tx.inner.networkID() }
 func (tx *Transaction) Version() uint32          { return tx.inner.version() }
+func (tx *Transaction) ChainId() *big.Int        { return tx.inner.chainID() }
 func (tx *Transaction) To() *account.Recipient   { return tx.inner.to() }
 func (tx *Transaction) GasTokenID() uint64       { return tx.inner.gasTokenID() }
 func (tx *Transaction) TransferTokenID() uint64  { return tx.inner.transferTokenID() }
@@ -463,21 +491,29 @@ func (tx *Transaction) clearCaches() {
 	tx.from = atomic.Value{}
 }
 
+// SetGas mutates tx in place and clears its derived caches.
+// It is not safe for concurrent use and must only be called before tx is shared.
 func (tx *Transaction) SetGas(gas uint64) {
 	tx.inner.setGas(gas)
 	tx.clearCaches()
 }
 
+// SetFromFullShardKey mutates tx in place and clears its derived caches.
+// It is not safe for concurrent use and must only be called before tx is shared.
 func (tx *Transaction) SetFromFullShardKey(fullShardKey uint32) {
 	tx.inner.setFromFullShardKey(fullShardKey)
 	tx.clearCaches()
 }
 
+// SetNonce mutates tx in place and clears its derived caches.
+// It is not safe for concurrent use and must only be called before tx is shared.
 func (tx *Transaction) SetNonce(nonce uint64) {
 	tx.inner.setNonce(nonce)
 	tx.clearCaches()
 }
 
+// SetVRS mutates tx in place and clears its derived caches.
+// It is not safe for concurrent use and must only be called before tx is shared.
 func (tx *Transaction) SetVRS(v, r, s *big.Int) {
 	tx.inner.setSignatureValues(v, r, s)
 	tx.clearCaches()
@@ -511,7 +547,7 @@ func (tx *Transaction) Serialize(w *[]byte) error {
 		*w = append(*w, bytes...)
 		return nil
 	default:
-		return fmt.Errorf("ser: Transacton type %d is not supported", tx.Type())
+		return fmt.Errorf("ser: transaction type %d is not supported", tx.Type())
 	}
 }
 
@@ -537,15 +573,17 @@ func (tx *Transaction) Deserialize(bb *serialize.ByteBuffer) error {
 		if err != nil {
 			return err
 		}
-		stream := rlp.NewStream(bytes.NewReader(payload), uint64(len(payload)))
-		if err := inner.decode(stream); err != nil {
+		if err := rlp.DecodeBytes(payload, inner); err != nil {
+			return err
+		}
+		if err := inner.validate(); err != nil {
 			return err
 		}
 		tx.inner = inner
 		tx.clearCaches()
 		return nil
 	default:
-		return fmt.Errorf("deser: Transacton type %d is not supported", txType)
+		return fmt.Errorf("deser: transaction type %d is not supported", txType)
 	}
 }
 
@@ -570,24 +608,6 @@ func (tx *Transaction) Hash() (h common.Hash) {
 	return *new(common.Hash)
 }
 
-func (tx *Transaction) getNonce() uint64 {
-	if tx.Type() == EvmTxType {
-		return tx.Nonce()
-	}
-
-	//todo verify the default value when have more type of tx
-	return 0
-}
-
-func (tx *Transaction) getPrice() *big.Int {
-	if tx.Type() == EvmTxType {
-		return tx.inner.gasPrice()
-	}
-
-	//todo verify the default value when have more type of tx
-	return big.NewInt(0)
-}
-
 func (tx *Transaction) Sender(signer Signer) (account.Recipient, error) {
 	if tx.Type() == EvmTxType {
 		addr, err := Sender(signer, tx)
@@ -598,7 +618,7 @@ func (tx *Transaction) Sender(signer Signer) (account.Recipient, error) {
 
 		return addr, nil
 	} else {
-		err := errors.New(fmt.Sprintf("do not support tx type %d", tx.Type()))
+		err := fmt.Errorf("do not support tx type %d", tx.Type())
 		log.Error(err.Error())
 		return account.Recipient{}, err
 	}

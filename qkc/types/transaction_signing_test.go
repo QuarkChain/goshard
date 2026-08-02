@@ -126,7 +126,7 @@ func TestSignTxVersionsRecoverSender(t *testing.T) {
 	}
 }
 
-func TestQKCSignerRejectsInvalidVersion2Fields(t *testing.T) {
+func TestQKCSignerRejectsInvalidFields(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	require.NoError(t, err)
 	defaultTokenID := qkccommon.TokenIDEncode("QKC")
@@ -148,6 +148,27 @@ func TestQKCSignerRejectsInvalidVersion2Fields(t *testing.T) {
 			tx := NewEvmTransaction(0, account.Recipient{}, nil, 0, nil, test.fromFullShardKey, test.toFullShardKey, 3, 2, nil, test.gasTokenID, test.transferTokenID)
 			_, err := SignTx(tx, signer, key)
 			require.ErrorIs(t, err, test.wantErr)
+		})
+	}
+
+	for _, test := range []struct {
+		name    string
+		version uint32
+		network uint32
+		signer  QKCSigner
+	}{
+		{"version-0-network", 0, 2, NewQKCSigner(1, 3)},
+		{"version-1-network", 1, 2, NewQKCSigner(1, 3)},
+		{"version-2-chain", 2, 4, NewQKCSigner(1, 3)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gasTokenID := uint64(0)
+			if test.version == 2 {
+				gasTokenID = defaultTokenID
+			}
+			tx := NewEvmTransaction(0, account.Recipient{}, nil, 0, nil, 0, 0, test.network, test.version, nil, gasTokenID, gasTokenID)
+			_, err := SignTx(tx, test.signer, key)
+			require.ErrorIs(t, err, ErrInvalidNetworkID)
 		})
 	}
 }
