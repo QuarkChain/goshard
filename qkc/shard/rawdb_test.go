@@ -295,8 +295,6 @@ func TestReconcileChainConfigBlock0ForkAboveGenesis(t *testing.T) {
 
 // TestReconcileChainConfigReadOnly: an unchanged config must not be rewritten,
 // the guard geth keeps for handles that cannot take a write (core/genesis.go).
-// The write is unrecoverable rather than merely failing: rawdb.WriteChainConfig
-// answers a failed Put with log.Crit, which exits the process.
 func TestReconcileChainConfigReadOnly(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	genesis := testGenesisBlock(t, fixtureMainnet)
@@ -307,6 +305,36 @@ func TestReconcileChainConfigReadOnly(t *testing.T) {
 	if err := ReconcileChainConfig(readOnlyDB{db}, genesis, cfg, 0, true, "/tmp/x"); err != nil {
 		t.Fatalf("ReconcileChainConfig(unchanged, read-only): %v", err)
 	}
+}
+
+// TestReconcileChainConfigWriteFailure: a rule set that cannot be persisted must
+// come back as an ordinary error, so the caller closes the chain and the database
+// it opened. Handing the database to rawdb.WriteChainConfig directly loses that:
+// the accessor answers a failed Put with log.Crit and exits the process, taking
+// down a test binary that reaches it — a regression here does not fail an
+// assertion, it kills the run.
+func TestReconcileChainConfigWriteFailure(t *testing.T) {
+	genesis := testGenesisBlock(t, fixtureMainnet)
+	cfg := petersburgOnly(100001)
+
+	t.Run("missing config", func(t *testing.T) {
+		db := readOnlyDB{rawdb.NewMemoryDatabase()}
+		if err := ReconcileChainConfig(db, genesis, cfg, 0, false, "/tmp/x"); err == nil {
+			t.Fatal("ReconcileChainConfig(unwritable) = nil, want a write error")
+		}
+	})
+
+	t.Run("changed config", func(t *testing.T) {
+		db := rawdb.NewMemoryDatabase()
+		if err := ReconcileChainConfig(db, genesis, cfg, 0, false, "/tmp/x"); err != nil {
+			t.Fatalf("ReconcileChainConfig(fresh): %v", err)
+		}
+		upgraded := petersburgOnly(100001)
+		upgraded.IstanbulBlock = big.NewInt(100)
+		if err := ReconcileChainConfig(readOnlyDB{db}, genesis, upgraded, 0, true, "/tmp/x"); err == nil {
+			t.Fatal("ReconcileChainConfig(changed, unwritable) = nil, want a write error")
+		}
+	})
 }
 
 // TestReconcileChainConfigMissingWarnsOnlyOnAnExistingGenesis: a fresh database
@@ -344,9 +372,14 @@ func TestReconcileChainConfigMissingWarnsOnlyOnAnExistingGenesis(t *testing.T) {
 	}
 }
 
-// readOnlyDB fails every write, standing in for a read-only pebble handle. A
-// regression here does not fail the assertion below it — the write reaches
-// log.Crit and takes the test binary down with it.
+// readOnlyDB fails every write, standing in for a read-only pebble handle — or,
+// equally, for a full disk. Batches fail where a real one does, in Write.
 type readOnlyDB struct{ ethdb.Database }
 
 func (readOnlyDB) Put([]byte, []byte) error { return errors.New("read-only database") }
+
+func (db readOnlyDB) NewBatch() ethdb.Batch { return readOnlyBatch{db.Database.NewBatch()} }
+
+type readOnlyBatch struct{ ethdb.Batch }
+
+func (readOnlyBatch) Write() error { return errors.New("read-only database") }

@@ -186,20 +186,31 @@ func ReconcileChainConfig(db ethdb.Database, genesis *types.MinorBlock, cfg *par
 		if existed {
 			log.Warn("found shard genesis without chain config", "shard", fmt.Sprintf("0x%08x", fullShardID))
 		}
-		rawdb.WriteChainConfig(db, genesisHash, cfg)
-		return nil
+		return writeChainConfig(db, genesisHash, cfg, fullShardID, dbPath)
 	}
 	if compatErr := stored.CheckCompatible(cfg, head, 0); compatErr != nil && head != 0 {
 		return fmt.Errorf("shard 0x%08x: incompatible chain config (db %s): %w", fullShardID, dbPath, compatErr)
 	}
 	// Never rewrite an identical config, as geth does not (core/genesis.go): the
-	// rewrite is noise, and rawdb.WriteChainConfig answers a failed write with
-	// log.Crit — it exits the process rather than returning an error, so a caller
-	// holding a read-only handle cannot recover from one. Nothing opens a shard
-	// datadir read-only and reconciles it today.
+	// rewrite is noise, and it leaves the common reopen — a rule set that has not
+	// changed — writeless, so a caller holding a read-only handle gets through it.
 	storedData, _ := json.Marshal(stored)
 	if newData, _ := json.Marshal(cfg); !bytes.Equal(storedData, newData) {
-		rawdb.WriteChainConfig(db, genesisHash, cfg)
+		return writeChainConfig(db, genesisHash, cfg, fullShardID, dbPath)
+	}
+	return nil
+}
+
+// writeChainConfig stores the rule set through a batch rather than handing the
+// database to rawdb.WriteChainConfig directly. That accessor answers a failed Put
+// with log.Crit, which exits the process — a full disk or a read-only handle would
+// take the slave down mid-boot, past every unwind its caller has. A batch's Put is
+// a memory append; the I/O it can fail on happens in Write, which returns an error.
+func writeChainConfig(db ethdb.Database, genesisHash common.Hash, cfg *params.ChainConfig, fullShardID uint32, dbPath string) error {
+	batch := db.NewBatch()
+	rawdb.WriteChainConfig(batch, genesisHash, cfg)
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("shard 0x%08x: write chain config (db %s): %w", fullShardID, dbPath, err)
 	}
 	return nil
 }
