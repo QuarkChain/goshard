@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 // SlaveContext is the narrowed view a single slave boots from: just its own slave
@@ -103,6 +104,10 @@ func (c *ClusterConfig) Validate() error {
 		return fmt.Errorf("SLAVE_LIST is empty")
 	}
 
+	if err := validateTokenNames(c.Quarkchain); err != nil {
+		return err
+	}
+
 	root := c.Quarkchain.Root.Genesis
 	for _, name := range []struct {
 		field string
@@ -161,6 +166,30 @@ func (c *ClusterConfig) Validate() error {
 			}
 			if shard.Genesis.RootHeight != root.Height {
 				return fmt.Errorf("full shard id 0x%08x genesis ROOT_HEIGHT %d != ROOT.GENESIS.HEIGHT %d", id, shard.Genesis.RootHeight, root.Height)
+			}
+		}
+	}
+	return nil
+}
+
+// validateTokenNames checks every token name the config can feed to the encoder —
+// GENESIS_TOKEN and every ALLOC balance key of every configured shard — against
+// pyquarkchain's [0-9A-Z]{1,12} domain. common.TokenIDEncode panics outside it while
+// its callers downstream of load (genesis materialization, GetDefaultChainTokenID)
+// report errors, so the domain has to be settled here.
+func validateTokenNames(q *QuarkChainConfig) error {
+	if err := qkccommon.ValidateTokenName(q.GenesisToken); err != nil {
+		return fmt.Errorf("QUARKCHAIN.GENESIS_TOKEN: %w", err)
+	}
+	for id, shard := range q.shards {
+		if shard == nil || shard.Genesis == nil {
+			continue
+		}
+		for addr, alloc := range shard.Genesis.Alloc {
+			for token := range alloc.Balances {
+				if err := qkccommon.ValidateTokenName(token); err != nil {
+					return fmt.Errorf("full shard id 0x%08x GENESIS.ALLOC %s: %w", id, addr.ToHex(), err)
+				}
 			}
 		}
 	}

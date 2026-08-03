@@ -5,9 +5,12 @@ package config
 import (
 	"encoding/json"
 	"math"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/qkc/account"
 )
 
 const (
@@ -300,6 +303,41 @@ func TestValidateRejectsZeroShardSlave(t *testing.T) {
 	cfg.SlaveList[0].FullShardList = nil
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "owns no shards") {
 		t.Fatalf("Validate err = %v, want 'owns no shards'", err)
+	}
+}
+
+// TestValidateRejectsBadTokenName: token names feed common.TokenIDEncode, which
+// panics outside pyquarkchain's [0-9A-Z]{1,12} domain, so GENESIS_TOKEN and every
+// ALLOC balance key are checked at load. An ALLOC entry such as {"lowercase": 1}
+// used to crash the process ("unknown character 108") from inside the
+// error-returning genesis path.
+func TestValidateRejectsBadTokenName(t *testing.T) {
+	for _, tc := range []struct{ name, token, want string }{
+		{"lowercase", "lowercase", "illegal character"},
+		{"punctuation", "QKC-2", "illegal character"},
+		{"empty", "", "empty"},
+		{"too long", "ZZZZZZZZZZZZZ", "longer than 12"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := mustLoad(t)
+			shard := cfg.Quarkchain.GetShardConfigByFullShardID(0x00000001)
+			addr := account.CreatEmptyAddress(0x00000001)
+			shard.Genesis.Alloc[addr] = Allocation{Balances: map[string]*big.Int{tc.token: big.NewInt(1)}}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate err = %v, want %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "GENESIS.ALLOC") || !strings.Contains(err.Error(), addr.ToHex()) {
+				t.Errorf("Validate err = %v, want the offending ALLOC entry named", err)
+			}
+
+			cfg = mustLoad(t)
+			cfg.Quarkchain.GenesisToken = tc.token
+			err = cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "GENESIS_TOKEN") {
+				t.Fatalf("Validate err = %v, want a GENESIS_TOKEN rejection (%q)", err, tc.want)
+			}
+		})
 	}
 }
 
