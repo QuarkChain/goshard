@@ -1,22 +1,9 @@
-// Copyright 2024 The go-ethereum Authors
-// This file is part of the go-ethereum library.
-//
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The go-ethereum library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2026-2027, QuarkChain.
 
 package types
 
 import (
+	"errors"
 	"io"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -42,7 +29,7 @@ type qkcAccountRLP struct {
 // balances into a single TokenBalances for wire encoding. Returns nil if both empty,
 // which causes EncodeRLP to write 0x80 (RLP nil/empty) matching goquarkchain behavior.
 func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances) *qkccommon.TokenBalances {
-	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.IsBlank()) {
+	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.Len() == 0) {
 		return nil
 	}
 	merged := qkccommon.NewEmptyTokenBalances()
@@ -61,23 +48,9 @@ func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances) *
 // 6-element format. Root is always written as 32 bytes (no nil optimization).
 func (acct *StateAccount) EncodeRLP(w io.Writer) error {
 	var tokenBal []byte
-	switch {
-	case acct.MntBalances == nil && (acct.Balance == nil || acct.Balance.IsZero()):
-		// No QKC balance, no MNT tokens — encode TokenBal as nil → 0x80.
-		// Covers: new accounts and accounts that never entered the TokenBalances map.
-		tokenBal = nil
-
-	case acct.MntBalances != nil && acct.MntBalances.IsBlank() && acct.Balance != nil && acct.Balance.IsZero():
-		// QKC balance zero, MNT map explicitly empty → re-serialize as
-		// list-format with zero pairs → 0x8200c0. This preserves the
-		// "account touched TokenBalances map then emptied it" history.
-		tokenBal, _ = acct.MntBalances.SerializeToBytes()
-
-	default:
-		// Normal case: has QKC balance and/or non-empty MNT tokens.
-		tb := mergeQKCTokenBalances(acct.Balance, acct.MntBalances)
+	if balances := mergeQKCTokenBalances(acct.Balance, acct.MntBalances); balances != nil {
 		var err error
-		tokenBal, err = tb.SerializeToBytes()
+		tokenBal, err = balances.SerializeToBytes()
 		if err != nil {
 			return err
 		}
@@ -108,9 +81,12 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 	acct.CodeHash = qkc.CodeHash
 	acct.Root = qkc.Root
 	acct.FullShardKey = uint32(qkc.FullShardKey)
+	if len(qkc.Optional) != 0 {
+		return errors.New("unsupported non-empty QuarkChain account optional field")
+	}
 	acct.Balance = new(uint256.Int)
 	if len(qkc.TokenBal) > 0 {
-		tb, err := qkccommon.NewTokenBalancesFromBytes(qkc.TokenBal)
+		tb, err := qkccommon.NewTokenBalances(qkc.TokenBal)
 		if err != nil {
 			return err
 		}
@@ -119,9 +95,8 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 			acct.Balance.Set(qkcBal)
 			delete(balMap, qkccommon.DefaultTokenID)
 		}
-		// Always set MntBalances when TokenBal has content — even if empty
-		// after stripping QKC, this lets EncodeRLP produce 0x8200c0 instead
-		// of 0x80, preserving byte-identical round-trip.
+		// Keep the decoded non-QKC balances. Empty lists are canonicalized to
+		// empty bytes when re-encoded, matching pyquarkchain.
 		acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
 	}
 	return nil

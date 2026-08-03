@@ -1,18 +1,4 @@
-// Copyright 2024 The go-ethereum Authors
-// This file is part of the go-ethereum library.
-//
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The go-ethereum library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2026-2027, QuarkChain.
 
 package types
 
@@ -123,6 +109,58 @@ func TestStateAccountEncodeDecodeRoundtrip(t *testing.T) {
 				require.NotNil(t, decoded.MntBalances)
 				assert.Equal(t, tc.acct.MntBalances.GetBalanceMap(), decoded.MntBalances.GetBalanceMap())
 			}
+		})
+	}
+}
+
+func TestStateAccountEmptyBalancesPythonGolden(t *testing.T) {
+	empty := StateAccount{Balance: nil, MntBalances: qkccommon.NewEmptyTokenBalances(), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes()}
+	encoded, err := rlp.EncodeToBytes(&empty)
+	require.NoError(t, err)
+	var emptyWire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(encoded, &emptyWire))
+	assert.Empty(t, emptyWire.TokenBal)
+
+	zeroOnly := StateAccount{
+		Balance:      new(uint256.Int),
+		MntBalances:  qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: new(uint256.Int)}),
+		Root:         EmptyRootHash,
+		CodeHash:     EmptyCodeHash.Bytes(),
+		FullShardKey: 1,
+	}
+	encoded, err = rlp.EncodeToBytes(&zeroOnly)
+	require.NoError(t, err)
+	var zeroWire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(encoded, &zeroWire))
+	assert.Equal(t, []byte{0, 0xc0}, zeroWire.TokenBal)
+
+	var decoded StateAccount
+	require.NoError(t, rlp.DecodeBytes(encoded, &decoded))
+	reencoded, err := rlp.EncodeToBytes(&decoded)
+	require.NoError(t, err)
+	assert.NotEqual(t, encoded, reencoded)
+	var reencodedWire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
+	assert.Empty(t, reencodedWire.TokenBal)
+}
+
+func TestStateAccountDecodeRejectsUnsupportedTokenBalanceEncoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		tokenBal []byte
+		want     string
+	}{
+		{name: "trie", tokenBal: append([]byte{1}, make([]byte, common.HashLength)...), want: "trie"},
+		{name: "unknown prefix", tokenBal: []byte{2}, want: "unknown enum byte"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			wire := qkcAccountRLP{TokenBal: test.tokenBal, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes()}
+			encoded, err := rlp.EncodeToBytes(&wire)
+			require.NoError(t, err)
+			var account StateAccount
+			err = rlp.DecodeBytes(encoded, &account)
+			assert.ErrorContains(t, err, test.want)
 		})
 	}
 }
@@ -242,15 +280,11 @@ func TestStateAccountPyquarkchainEncodeCompatibility(t *testing.T) {
 	}
 }
 
-// TestSlimRLPRoundTripEquivalence verifies that for non-MNT accounts (no MntBalances),
-// the round-trip slim-RLP → decode → QKC-encode produces the same bytes as direct
+// TestSlimRLPRoundTripEquivalence verifies that slim account round trips preserve
+// QuarkChain-specific MntBalances and FullShardKey fields. The round-trip
+// slim-RLP → decode → QKC-encode produces the same bytes as direct
 // QKC-encode. This is the invariant that allows execute.go to use slim-RLP as the
 // accountOrigin format for history reversal without affecting trie root correctness.
-//
-// Note: SlimAccount does not carry FullShardKey. Both paths therefore encode with
-// FullShardKey=0, so the test holds — but the slim-RLP path should only be used
-// for accounts where FullShardKey is known to be zero (e.g. freshly created accounts
-// before any shard key is set).
 func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 	cases := []struct {
 		name string
@@ -287,6 +321,70 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 			}
 			if !bytes.Equal(directQKC, viaSlim) {
 				t.Errorf("mismatch:\n  direct QKC: %x\n  via slim:   %x", directQKC, viaSlim)
+			}
+		})
+	}
+}
+
+// TestStateAccountEncodeBalanceMntCombinations walks every combination of
+// Balance (nil / zero / non-zero) against MntBalances (nil / empty / zero-valued
+// entry / non-zero entry) and pins the resulting wire TokenBal.
+//
+// The nil-Balance rows are the regression guard: mergeQKCTokenBalances returns
+// nil when the balance is nil or zero and the MNT set is empty, so encoding used
+// to call SerializeToBytes on that nil *TokenBalances and dereference its
+// unexported map. Encoding must succeed for every row here, and Balance must
+// always decode back non-nil.
+func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
+	withMap := func(m map[uint64]*uint256.Int) *qkccommon.TokenBalances {
+		return qkccommon.NewTokenBalancesWithMap(m)
+	}
+	cases := []struct {
+		name string
+		bal  *uint256.Int
+		mnt  *qkccommon.TokenBalances
+		// wantTokenBal is the expected hex of the wire TokenBal field. QKC
+		// (tokenID 35760 = 0x8bb0) sorts after tokenID 100 in the pair list.
+		wantTokenBal string
+	}{
+		{"nil balance, nil mnt", nil, nil, ""},
+		{"nil balance, empty mnt", nil, qkccommon.NewEmptyTokenBalances(), ""},
+		{"nil balance, zero-valued mnt", nil, withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), "00c0"},
+		{"nil balance, non-zero mnt", nil, withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), "00c3c26405"},
+		{"zero balance, nil mnt", new(uint256.Int), nil, ""},
+		{"zero balance, empty mnt", new(uint256.Int), qkccommon.NewEmptyTokenBalances(), ""},
+		{"zero balance, zero-valued mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), "00c0"},
+		{"zero balance, non-zero mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), "00c3c26405"},
+		{"non-zero balance, nil mnt", uint256.NewInt(9), nil, "00c5c4828bb009"},
+		{"non-zero balance, empty mnt", uint256.NewInt(9), qkccommon.NewEmptyTokenBalances(), "00c5c4828bb009"},
+		{"non-zero balance, zero-valued mnt", uint256.NewInt(9), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), "00c5c4828bb009"},
+		{"non-zero balance, non-zero mnt", uint256.NewInt(9), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), "00c8c26405c4828bb009"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			account := StateAccount{
+				Nonce:        1,
+				Balance:      tc.bal,
+				Root:         EmptyRootHash,
+				CodeHash:     EmptyCodeHash.Bytes(),
+				MntBalances:  tc.mnt,
+				FullShardKey: 7,
+			}
+			encoded, err := rlp.EncodeToBytes(&account)
+			require.NoError(t, err)
+
+			var wire qkcAccountRLP
+			require.NoError(t, rlp.DecodeBytes(encoded, &wire))
+			assert.Equal(t, tc.wantTokenBal, common.Bytes2Hex(wire.TokenBal))
+
+			var decoded StateAccount
+			require.NoError(t, rlp.DecodeBytes(encoded, &decoded))
+			assert.Equal(t, uint32(7), decoded.FullShardKey)
+			require.NotNil(t, decoded.Balance, "nil Balance must decode back as zero")
+			if tc.bal == nil {
+				assert.True(t, decoded.Balance.IsZero())
+			} else {
+				assert.Equal(t, tc.bal, decoded.Balance)
 			}
 		})
 	}
