@@ -29,7 +29,7 @@ type qkcAccountRLP struct {
 // balances into a single TokenBalances for wire encoding. Returns nil if both empty,
 // which causes EncodeRLP to write 0x80 (RLP nil/empty) matching goquarkchain behavior.
 func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances) *qkccommon.TokenBalances {
-	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.IsBlank()) {
+	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.Len() == 0) {
 		return nil
 	}
 	merged := qkccommon.NewEmptyTokenBalances()
@@ -95,9 +95,8 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 			acct.Balance.Set(qkcBal)
 			delete(balMap, qkccommon.DefaultTokenID)
 		}
-		// Always set MntBalances when TokenBal has content — even if empty
-		// after stripping QKC, this lets EncodeRLP produce 0x8200c0 instead
-		// of 0x80, preserving byte-identical round-trip.
+		// Keep the decoded non-QKC balances. Empty lists are canonicalized to
+		// empty bytes when re-encoded, matching pyquarkchain.
 		acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
 	}
 	return nil

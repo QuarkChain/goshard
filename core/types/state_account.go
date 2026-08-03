@@ -37,7 +37,7 @@ type StateAccount struct {
 	Balance      *uint256.Int
 	Root         common.Hash // merkle root of the storage trie
 	CodeHash     []byte
-	MntBalances  *qkccommon.TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
+	MntBalances  *qkccommon.TokenBalances // non-QKC MNT balances; nil = no MNT tokens
 	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
 }
 
