@@ -51,8 +51,8 @@ type txdata struct {
 	Amount           *big.Int           `json:"value"              gencodec:"required"`
 	Payload          []byte             `json:"input"              gencodec:"required"`
 	NetworkId        uint32             `json:"networkId"          gencodec:"required"`
-	FromFullShardKey *Uint32            `json:"fromfullshardkey"   gencodec:"required"`
-	ToFullShardKey   *Uint32            `json:"tofullshardkey"     gencodec:"required"`
+	FromFullShardKey *qkcCommon.Uint32            `json:"fromfullshardkey"   gencodec:"required"`
+	ToFullShardKey   *qkcCommon.Uint32            `json:"tofullshardkey"     gencodec:"required"`
 	GasTokenID       uint64             `json:"gas_token_id"       gencodec:"required"`
 	TransferTokenID  uint64             `json:"transfer_token_id"  gencodec:"required"`
 	Version          uint32             `json:"version"            gencodec:"required"`
@@ -73,7 +73,7 @@ func (e *EvmTransaction) SetGas(data uint64) {
 }
 
 func (e *EvmTransaction) SetFromFullShardKey(data uint32) {
-	t := Uint32(data)
+	t := qkcCommon.Uint32(data)
 	e.data.FromFullShardKey = &t
 	e.hashDirty = true
 }
@@ -99,8 +99,8 @@ func NewEvmContractCreation(nonce uint64, amount *big.Int, gasLimit uint64, gasP
 }
 
 func newEvmTransaction(nonce uint64, to *account.Recipient, amount *big.Int, gasLimit uint64, gasPrice *big.Int, fromFullShardKey uint32, toFullShardKey uint32, networkId uint32, version uint32, data []byte, gasTokenID, transferTokenID uint64) *EvmTransaction {
-	newFromFullShardKey := Uint32(fromFullShardKey)
-	newToFullShardKey := Uint32(toFullShardKey)
+	newFromFullShardKey := qkcCommon.Uint32(fromFullShardKey)
+	newToFullShardKey := qkcCommon.Uint32(toFullShardKey)
 	if len(data) > 0 {
 		data = common.CopyBytes(data)
 	}
@@ -155,8 +155,8 @@ type txdataUnsigned struct {
 	Amount           *big.Int           `json:"value"              gencodec:"required"`
 	Payload          []byte             `json:"input"              gencodec:"required"`
 	NetworkId        uint32             `json:"networkid"          gencodec:"required"`
-	FromFullShardKey *Uint32            `json:"fromfullshardid"    gencodec:"required"`
-	ToFullShardKey   *Uint32            `json:"tofullshardid"      gencodec:"required"`
+	FromFullShardKey *qkcCommon.Uint32            `json:"fromfullshardid"    gencodec:"required"`
+	ToFullShardKey   *qkcCommon.Uint32            `json:"tofullshardid"      gencodec:"required"`
 	GasTokenID       uint64             `json:"gasTokenID"      gencodec:"required"`
 	TransferTokenID  uint64             `json:"transferTokenID"      gencodec:"required"`
 }
