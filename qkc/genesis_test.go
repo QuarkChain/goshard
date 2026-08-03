@@ -432,6 +432,28 @@ func TestCreateMinorBlockRejectsForeignAlloc(t *testing.T) {
 	}
 }
 
+// TestCreateMinorBlockRejectsBadTokenName: an ALLOC balance key outside
+// pyquarkchain's [0-9A-Z]{1,12} token domain reaches common.TokenIDEncode, which
+// panics ("unknown character 108"). CreateMinorBlock returns errors, so it must
+// report the bad name rather than take the process down with it. The same holds
+// for GENESIS_TOKEN, which the coinbase amount is denominated in.
+func TestCreateMinorBlockRejectsBadTokenName(t *testing.T) {
+	cfg, shardCfg, root := shardEnv(t, fixtureMainnet)
+	addr := account.CreatEmptyAddress(firstShardID)
+	shardCfg.Genesis.Alloc[addr] = config.Allocation{Balances: map[string]*big.Int{"lowercase": big.NewInt(1)}}
+	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase()); err == nil ||
+		!strings.Contains(err.Error(), "illegal character") {
+		t.Fatalf("CreateMinorBlock err = %v, want an illegal-token-name rejection", err)
+	}
+
+	cfg, _, root = shardEnv(t, fixtureMainnet)
+	cfg.Quarkchain.GenesisToken = "qkc"
+	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase()); err == nil ||
+		!strings.Contains(err.Error(), "GENESIS_TOKEN") {
+		t.Fatalf("CreateMinorBlock err = %v, want a GENESIS_TOKEN rejection", err)
+	}
+}
+
 func TestCreateMinorBlockRejectsUnknownShard(t *testing.T) {
 	cfg, _, root := shardEnv(t, fixtureMainnet)
 	if _, err := CreateMinorBlock(cfg.Quarkchain, 0x00990099, root, rawdb.NewMemoryDatabase()); err == nil ||

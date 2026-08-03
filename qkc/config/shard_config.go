@@ -99,25 +99,35 @@ func (a *Allocation) UnmarshalJSON(input []byte) error {
 	}
 	_, hasBalances := fields["balances"]
 	_, hasCode := fields["code"]
-	_, hasStorage := fields["storage"]
-	if !hasBalances && !hasCode && !hasStorage {
-		var jsonConfig map[string]*big.Int
-		if err := json.Unmarshal(input, &jsonConfig); err != nil {
-			return err
-		}
-		//# backward compatible:
-		//# v1: {addr: {QKC: 1234}}
-		//# v2: {addr: {balances: {QKC: 1234}, code: 0x, storage: {0x12: 0x34}}}
-		a.Balances = jsonConfig
-		return nil
-	}
 
 	var jsonConfig AllocMarshalling
 	if err := json.Unmarshal(input, &jsonConfig); err != nil {
 		return err
 	}
-	if jsonConfig.Balances != nil {
-		a.Balances = jsonConfig.Balances
+	//# backward compatible:
+	//# v1: {addr: {QKC: 1234}}
+	//# v2: {addr: {balances: {QKC: 1234}, code: 0x, storage: {0x12: 0x34}}}
+	// pyquarkchain (quarkchain/genesis.py) reads code and storage on their own, and
+	// without a "balances" field it takes the entry itself as the balance table,
+	// skipping only those two keys. The forms therefore mix: {QKC: 7, code: 0x}
+	// funds the account *and* deploys empty code.
+	if hasBalances {
+		if jsonConfig.Balances != nil {
+			a.Balances = jsonConfig.Balances
+		}
+	} else {
+		balances := make(map[string]*big.Int, len(fields))
+		for token, raw := range fields {
+			if token == "code" || token == "storage" {
+				continue
+			}
+			value := new(big.Int)
+			if err := json.Unmarshal(raw, value); err != nil {
+				return fmt.Errorf("%s: %w", token, err)
+			}
+			balances[token] = value
+		}
+		a.Balances = balances
 	}
 	if hasCode {
 		if jsonConfig.Code == nil {

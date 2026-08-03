@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -143,7 +144,7 @@ func TestReceiptRejectsLegacyPostStateRLP(t *testing.T) {
 func TestReceiptRejectsInvalidContractAddressLength(t *testing.T) {
 	for _, size := range []int{1, common.AddressLength - 1, common.AddressLength + 1, common.HashLength} {
 		t.Run(fmt.Sprintf("%d_bytes", size), func(t *testing.T) {
-			fullShardKey := Uint32(0)
+			fullShardKey := qkcCommon.Uint32(0)
 			encoded, err := rlp.EncodeToBytes(&receiptRLP{
 				Status:               receiptStatusSuccessfulRLP,
 				ContractAddress:      make([]byte, size),

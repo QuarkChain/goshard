@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -269,6 +270,40 @@ func TestAllocationPreservesEmptyCodePresence(t *testing.T) {
 	}
 	if !roundTrip.CodePresent || len(roundTrip.Code) != 0 {
 		t.Fatalf("empty code round trip = present=%v code=%x, want present empty code", roundTrip.CodePresent, roundTrip.Code)
+	}
+}
+
+// TestAllocationMixesLegacyBalancesWithCode: pyquarkchain reads code and storage
+// on their own and, without a "balances" field, takes the entry itself as the
+// balance table (skipping just those two keys), so the two forms mix.
+func TestAllocationMixesLegacyBalancesWithCode(t *testing.T) {
+	var mixed Allocation
+	if err := json.Unmarshal([]byte(`{"QKC":7,"QI":3,"code":"0x6000","storage":{"0x01":"0x02"}}`), &mixed); err != nil {
+		t.Fatalf("decode mixed allocation: %v", err)
+	}
+	if got := mixed.Balances["QKC"]; got == nil || got.Cmp(big.NewInt(7)) != 0 {
+		t.Errorf("QKC balance = %v, want 7", got)
+	}
+	if got := mixed.Balances["QI"]; got == nil || got.Cmp(big.NewInt(3)) != 0 {
+		t.Errorf("QI balance = %v, want 3", got)
+	}
+	if len(mixed.Balances) != 2 {
+		t.Errorf("balances = %v, want only the token keys", mixed.Balances)
+	}
+	if !mixed.CodePresent || !bytes.Equal(mixed.Code, []byte{0x60, 0x00}) {
+		t.Errorf("code = %x (present=%v), want 6000 present", mixed.Code, mixed.CodePresent)
+	}
+	if got := mixed.Storage[common.HexToHash("0x01")]; got != common.HexToHash("0x02") {
+		t.Errorf("storage slot 1 = %s, want 0x02", got.Hex())
+	}
+
+	// An explicit "balances" field still wins: nothing else is read as a balance.
+	var v2 Allocation
+	if err := json.Unmarshal([]byte(`{"balances":{"QKC":7},"code":"0x"}`), &v2); err != nil {
+		t.Fatalf("decode v2 allocation: %v", err)
+	}
+	if len(v2.Balances) != 1 || v2.Balances["QKC"].Cmp(big.NewInt(7)) != 0 {
+		t.Errorf("balances = %v, want only QKC 7", v2.Balances)
 	}
 }
 
