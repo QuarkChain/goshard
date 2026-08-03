@@ -202,7 +202,7 @@ func TestShardReopenRootGenesisMismatch(t *testing.T) {
 	}
 	_, err = New(ctx, branch, root2, datadir, Options{})
 	if err == nil || !strings.Contains(err.Error(), "cluster config changed since initialization") {
-		t.Fatalf("reopen err = %v, want loud record mismatch", err)
+		t.Fatalf("reopen err = %v, want loud genesis mismatch", err)
 	}
 }
 
@@ -284,7 +284,7 @@ func (failingChainService) New(ethdb.Database, *types.MinorBlock, *params.ChainC
 	return nil, errors.New("injected chain failure")
 }
 
-// TestShardFailedFirstBootLeavesNoRecord: a boot that fails at chain
+// TestShardFailedFirstBootLeavesNoGenesis: a boot that fails at chain
 // construction stores no genesis block, so the retry takes the fresh path
 // instead of reporting a never-validated genesis as existing.
 func TestShardFailedFirstBootLeavesNoGenesis(t *testing.T) {
@@ -401,7 +401,7 @@ func TestShardReopenIncompatibleForkSchedule(t *testing.T) {
 	})
 }
 
-// withDB opens the shard's chaindb outside of a running shard, so a test can
+// withDB opens firstShardID's chaindb outside of a running shard, so a test can
 // inspect or doctor what a boot left behind.
 func withDB(t *testing.T, datadir string, fn func(ethdb.Database)) {
 	t.Helper()

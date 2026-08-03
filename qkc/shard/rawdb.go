@@ -92,8 +92,9 @@ func WriteGenesisBlock(db ethdb.KeyValueWriter, block *types.MinorBlock) error {
 // path verifies that the stored meta still hashes to the header's hash_meta — so
 // comparing hashes would accept a stored block whose meta or body had been
 // replaced, including its state root. Comparing the encoding covers header, meta
-// and body in one check; the block is decoded afterwards only to name which of the
-// three causes a difference is.
+// and body in one check; the block is decoded afterwards only to name the cause —
+// another shard's chaindb, a changed config, or a header whose meta and body no
+// longer match it.
 func ReconcileGenesisBlock(db ethdb.KeyValueStore, expected *types.MinorBlock, dbPath string) (existed bool, err error) {
 	fullShardID := expected.Header.Branch.GetFullShardID()
 	storedData, err := readGenesisBlockBytes(db)

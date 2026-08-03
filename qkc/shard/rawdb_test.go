@@ -231,6 +231,9 @@ func TestReconcileChainConfig(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid chain config") {
 		t.Fatalf("ReconcileChainConfig(fork gap) err = %v, want a fork-order rejection", err)
 	}
+	if stored := rawdb.ReadChainConfig(db, genesis.Hash()); stored == nil || stored.ByzantiumBlock == nil {
+		t.Errorf("stored chain config = %v, want the rejected change left unwritten", stored)
+	}
 }
 
 // TestReconcileChainConfigAboveGenesis: above genesis the rules the stored blocks
@@ -372,8 +375,9 @@ func TestReconcileChainConfigMissingWarnsOnlyOnAnExistingGenesis(t *testing.T) {
 	}
 }
 
-// readOnlyDB fails every write, standing in for a read-only pebble handle — or,
-// equally, for a full disk. Batches fail where a real one does, in Write.
+// readOnlyDB fails the writes this package makes — a direct Put, and a batch —
+// standing in for a read-only pebble handle or, equally, for a full disk. Batches
+// fail where a real one does, in Write.
 type readOnlyDB struct{ ethdb.Database }
 
 func (readOnlyDB) Put([]byte, []byte) error { return errors.New("read-only database") }
