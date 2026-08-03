@@ -28,8 +28,11 @@ const (
 )
 
 // firstShardID is S0's first owned shard in both singularity networks:
-// chain 0, shard size 1, shard 0.
-const firstShardID = uint32(0x00000001)
+// chain 0, shard size 1, shard 0. secondShardID is the other shard S0 owns.
+const (
+	firstShardID  = uint32(0x00000001)
+	secondShardID = uint32(0x00040001)
+)
 
 func loadFixture(t *testing.T, path string) *config.ClusterConfig {
 	t.Helper()
@@ -201,6 +204,48 @@ func TestShardReopenRootGenesisMismatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cluster config changed since initialization") {
 		t.Fatalf("reopen err = %v, want loud record mismatch", err)
 	}
+}
+
+// TestShardReopenMissingGenesisState: a datadir that kept the genesis block but
+// lost the state under it must not boot. The stored block is only an identity —
+// it passes the reconcile unchanged — so nothing but an explicit check stands
+// between a corrupt datadir and a chain that reports "existing genesis validated"
+// and then fails at its first state access.
+func TestShardReopenMissingGenesisState(t *testing.T) {
+	ctx, root := bootEnv(t, fixtureMainnet)
+	datadir := t.TempDir()
+	branch := account.NewBranch(firstShardID)
+
+	s, err := New(ctx, branch, root, datadir, Options{})
+	if err != nil {
+		t.Fatalf("shard.New: %v", err)
+	}
+	genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+	if err != nil {
+		t.Fatalf("CreateMinorBlock: %v", err)
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Drop the genesis state while leaving the stored genesis block intact.
+	withDB(t, datadir, func(db ethdb.Database) {
+		rawdb.DeleteLegacyTrieNode(db, genesis.Meta.Root)
+	})
+
+	_, err = New(ctx, branch, root, datadir, Options{})
+	if err == nil || !strings.Contains(err.Error(), "its state is missing") ||
+		!strings.Contains(err.Error(), "corrupt chaindb") ||
+		!strings.Contains(err.Error(), datadir) {
+		t.Fatalf("reopen err = %v, want a loud missing-state failure naming the db path", err)
+	}
+	// The failed boot did not quietly re-materialize what was lost: a corrupt
+	// datadir stays corrupt until an operator looks at it.
+	withDB(t, datadir, func(db ethdb.Database) {
+		if rawdb.HasLegacyTrieNode(db, genesis.Meta.Root) {
+			t.Error("the failed reopen rewrote the genesis state instead of reporting corruption")
+		}
+	})
 }
 
 func TestShardNewRejectsUnknownShard(t *testing.T) {

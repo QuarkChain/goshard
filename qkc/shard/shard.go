@@ -157,10 +157,18 @@ func initializeChain(db ethdb.Database, dbPath string, g genesisSetup, service C
 	}
 	if !existed {
 		// Materialize the genesis state into this database before the chain opens
-		// on it. On reopen it is already there.
+		// on it.
 		if err := g.commit(db); err != nil {
 			return nil, false, fmt.Errorf("shard 0x%08x: commit genesis state (db %s): %w", fullShardID, dbPath, err)
 		}
+	} else if err := qkc.CheckGenesisState(db, g.block.Meta.Root); err != nil {
+		// On reopen the state is already there — unless the datadir lost it. The
+		// stored genesis is an identity and says nothing about the trie under it, so
+		// the two are checked separately. Re-materializing here would repair a
+		// corrupt database silently and hide whatever else it dropped; geth answers
+		// a missing head state the same way, by refusing to open the chain.
+		return nil, false, fmt.Errorf("shard 0x%08x: genesis is stored but its state is missing (db %s): %w — corrupt chaindb",
+			fullShardID, dbPath, err)
 	}
 	chain, err := service.New(db, g.block, g.chainConfig)
 	if err != nil {

@@ -26,6 +26,10 @@ type ShardChain interface {
 // the shard's genesis block (whose state is already materialized in that db), and
 // the EVM rule set.
 //
+// An implementation must fail rather than open a chain whose head state is missing
+// from db, as geth's NewBlockChain does. The caller checks only the genesis state,
+// which is all it can know about; every state above genesis belongs to the chain.
+//
 // This is the seam that survives: the implementation becomes a NewBlockChain call
 // over the same arguments — qkc derives the genesis from config and root linkage,
 // geth owns the chain.

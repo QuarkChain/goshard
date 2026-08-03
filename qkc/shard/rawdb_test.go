@@ -5,11 +5,13 @@ package shard
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
@@ -23,12 +25,17 @@ import (
 // cases below rely on.
 func testGenesisBlock(t *testing.T, path string) *types.MinorBlock {
 	t.Helper()
+	return testGenesisBlockOf(t, path, firstShardID)
+}
+
+func testGenesisBlockOf(t *testing.T, path string, fullShardID uint32) *types.MinorBlock {
+	t.Helper()
 	cfg := loadFixture(t, path)
 	root, err := qkc.CreateRootBlock(cfg.Quarkchain)
 	if err != nil {
 		t.Fatalf("CreateRootBlock: %v", err)
 	}
-	block, err := qkc.CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+	block, err := qkc.CreateMinorBlock(cfg.Quarkchain, fullShardID, root, rawdb.NewMemoryDatabase())
 	if err != nil {
 		t.Fatalf("CreateMinorBlock: %v", err)
 	}
@@ -116,6 +123,55 @@ func TestReconcileGenesisBlock(t *testing.T) {
 	if _, err := ReconcileGenesisBlock(db, expected, "/tmp/x"); err == nil ||
 		!strings.Contains(err.Error(), "decode genesis block") {
 		t.Fatalf("Reconcile(corrupt) err = %v, want a decode failure", err)
+	}
+}
+
+// TestReconcileGenesisBlockTamperedMeta: a minor block's hash is its header's hash
+// alone, and nothing verifies on read that the stored meta still hashes to the
+// header's hash_meta. So a stored block whose state root was replaced under an
+// untouched header compares equal on hash — the reconcile must compare the stored
+// encoding instead, or it would hand the chain a genesis it never derived.
+func TestReconcileGenesisBlockTamperedMeta(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	expected := testGenesisBlock(t, fixtureMainnet)
+
+	meta := *expected.Meta
+	meta.Root = common.HexToHash("0xdead")
+	tampered := types.NewMinorBlock(expected.Header, &meta, nil, nil)
+	if tampered.Hash() != expected.Hash() {
+		t.Fatal("tampering with the meta moved the block hash: this test no longer covers what it claims")
+	}
+	if err := WriteGenesisBlock(db, tampered); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+
+	existed, err := ReconcileGenesisBlock(db, expected, "/tmp/x")
+	if !existed || err == nil ||
+		!strings.Contains(err.Error(), "does not match the meta and body its header commits to") ||
+		!strings.Contains(err.Error(), "corrupt chaindb") ||
+		!strings.Contains(err.Error(), "/tmp/x") {
+		t.Fatalf("Reconcile(tampered meta) = %v, %v, want a loud corruption report", existed, err)
+	}
+	// Not reported as a config change: the config never produced this block.
+	var mismatch *GenesisMismatchError
+	if errors.As(err, &mismatch) {
+		t.Errorf("Reconcile(tampered meta) reported a config change: %v", err)
+	}
+}
+
+// TestReconcileGenesisBlockMisplacedChainDB: another shard's genesis in this
+// shard's directory is a misplaced datadir, not a cluster config change, and says
+// so. Both shards below belong to S0 in the mainnet config.
+func TestReconcileGenesisBlockMisplacedChainDB(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	if err := WriteGenesisBlock(db, testGenesisBlockOf(t, fixtureMainnet, secondShardID)); err != nil {
+		t.Fatalf("WriteGenesisBlock: %v", err)
+	}
+
+	_, err := ReconcileGenesisBlock(db, testGenesisBlock(t, fixtureMainnet), "/tmp/x")
+	if err == nil || !strings.Contains(err.Error(), "misplaced chaindb") ||
+		!strings.Contains(err.Error(), fmt.Sprintf("belongs to shard 0x%08x", secondShardID)) {
+		t.Fatalf("Reconcile(other shard) err = %v, want a misplaced-chaindb report naming both shards", err)
 	}
 }
 

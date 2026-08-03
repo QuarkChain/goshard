@@ -31,6 +31,30 @@ func genesisAllocRoot(alloc map[account.Address]config.Allocation) (common.Hash,
 	return commitGenesisAlloc(rawdb.NewMemoryDatabase(), alloc)
 }
 
+// CheckGenesisState reports whether the state a genesis block's meta seals can
+// still be opened against db. It is the reopen counterpart of the commit below:
+// the genesis block is stored as an identity, separately from the state it names,
+// so a datadir can hold the block and have lost the trie underneath it.
+//
+// Only the root node is resolved, as geth's HasState does — a trie whose root
+// resolves but whose interior was truncated still reports as present, and fails
+// later when the missing node is walked into. Catching that costs a full traversal
+// of the allocation on every boot.
+//
+// An empty allocation hashes to the empty root, which is never written down; it is
+// present by definition.
+func CheckGenesisState(db ethdb.Database, root common.Hash) error {
+	if root == coretypes.EmptyRootHash {
+		return nil
+	}
+	tdb := triedb.NewDatabase(db, triedb.HashDefaults)
+	defer tdb.Close()
+	if _, err := trie.NewStateTrie(trie.StateTrieID(root), tdb); err != nil {
+		return fmt.Errorf("open genesis state %s: %w", root, err)
+	}
+	return nil
+}
+
 // commitGenesisAlloc materializes the genesis allocation into db and returns the
 // resulting state root — pyquarkchain's genesis state write
 // (quarkchain/genesis.py:55-87) over geth's trie.

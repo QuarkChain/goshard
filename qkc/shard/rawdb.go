@@ -42,9 +42,9 @@ func (e *GenesisMismatchError) Error() string {
 		e.FullShardID, e.Stored, e.New, e.DBPath)
 }
 
-// ReadGenesisBlock returns the stored genesis block, or nil if none is stored (a
-// fresh chaindb).
-func ReadGenesisBlock(db ethdb.KeyValueReader) (*types.MinorBlock, error) {
+// readGenesisBlockBytes returns the stored genesis block's encoding, or nil if
+// none is stored (a fresh chaindb).
+func readGenesisBlockBytes(db ethdb.KeyValueReader) ([]byte, error) {
 	has, err := db.Has(genesisBlockKey)
 	if err != nil {
 		return nil, err
@@ -52,8 +52,14 @@ func ReadGenesisBlock(db ethdb.KeyValueReader) (*types.MinorBlock, error) {
 	if !has {
 		return nil, nil
 	}
-	data, err := db.Get(genesisBlockKey)
-	if err != nil {
+	return db.Get(genesisBlockKey)
+}
+
+// ReadGenesisBlock returns the stored genesis block, or nil if none is stored (a
+// fresh chaindb).
+func ReadGenesisBlock(db ethdb.KeyValueReader) (*types.MinorBlock, error) {
+	data, err := readGenesisBlockBytes(db)
+	if err != nil || data == nil {
 		return nil, err
 	}
 	block := new(types.MinorBlock)
@@ -81,16 +87,39 @@ func WriteGenesisBlock(db ethdb.KeyValueWriter, block *types.MinorBlock) error {
 // hard-errors otherwise, so a cluster config change since initialization is caught
 // loudly instead of silently keeping the stored genesis.
 //
-// The block hash covers the meta too, through the header's hash_meta, so comparing
-// hashes compares the whole genesis.
+// The comparison is over the stored encoding, not the block hash. A minor block's
+// hash is its header's hash alone (types.MinorBlock.Hash), and nothing on the read
+// path verifies that the stored meta still hashes to the header's hash_meta — so
+// comparing hashes would accept a stored block whose meta or body had been
+// replaced, including its state root. Comparing the encoding covers header, meta
+// and body in one check; the block is decoded afterwards only to name which of the
+// three causes a difference is.
 func ReconcileGenesisBlock(db ethdb.KeyValueStore, expected *types.MinorBlock, dbPath string) (existed bool, err error) {
 	fullShardID := expected.Header.Branch.GetFullShardID()
-	stored, err := ReadGenesisBlock(db)
+	storedData, err := readGenesisBlockBytes(db)
 	if err != nil {
 		return false, fmt.Errorf("shard 0x%08x: read genesis block (db %s): %w", fullShardID, dbPath, err)
 	}
-	if stored == nil {
+	if storedData == nil {
 		return false, nil
+	}
+	expectedData, err := serialize.SerializeToBytes(expected)
+	if err != nil {
+		return false, fmt.Errorf("shard 0x%08x: encode genesis block: %w", fullShardID, err)
+	}
+	if bytes.Equal(storedData, expectedData) {
+		return true, nil
+	}
+
+	stored := new(types.MinorBlock)
+	if err := serialize.DeserializeFromBytes(storedData, stored); err != nil {
+		return true, fmt.Errorf("shard 0x%08x: decode genesis block (db %s): %w", fullShardID, dbPath, err)
+	}
+	// A chaindb holding another shard's genesis is a misplaced directory, not a
+	// config change — name the right cause.
+	if storedID := stored.Header.Branch.GetFullShardID(); storedID != fullShardID {
+		return true, fmt.Errorf("shard 0x%08x: stored genesis belongs to shard 0x%08x (db %s) — misplaced chaindb",
+			fullShardID, storedID, dbPath)
 	}
 	if got := stored.Hash(); got != expected.Hash() {
 		return true, &GenesisMismatchError{
@@ -100,13 +129,11 @@ func ReconcileGenesisBlock(db ethdb.KeyValueStore, expected *types.MinorBlock, d
 			DBPath:      dbPath,
 		}
 	}
-	// A chaindb holding another shard's genesis is a misplaced directory, not a
-	// config change — name the right cause.
-	if storedID := stored.Header.Branch.GetFullShardID(); storedID != fullShardID {
-		return true, fmt.Errorf("shard 0x%08x: stored genesis belongs to shard 0x%08x (db %s) — misplaced chaindb",
-			fullShardID, storedID, dbPath)
-	}
-	return true, nil
+	// The stored header is the expected one, yet the encoding differs: the meta or
+	// body no longer matches what that header commits to. No config change produces
+	// this — the header would have moved with it.
+	return true, fmt.Errorf("shard 0x%08x: stored genesis %s does not match the meta and body its header commits to (db %s) — corrupt chaindb",
+		fullShardID, expected.Hash(), dbPath)
 }
 
 // ReconcileChainConfig stores or validates the shard's EVM rule set the way geth's
