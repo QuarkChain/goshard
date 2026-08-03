@@ -99,13 +99,13 @@ func (h *MinorBlockHeader) SealHash() common.Hash {
 type MinorBlock struct {
 	Header       *MinorBlockHeader
 	Meta         *MinorBlockMeta
-	Transactions []*TypedTransaction `bytesizeofslicelen:"4"`
-	TrackingData []byte              `bytesizeofslicelen:"2"`
+	Transactions []*Transaction `bytesizeofslicelen:"4"`
+	TrackingData []byte         `bytesizeofslicelen:"2"`
 }
 
 // NewMinorBlock assembles a minor block. The block's identity is its header's
 // hash; the body is committed to through the meta's merkle root.
-func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*TypedTransaction, trackingData []byte) *MinorBlock {
+func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, trackingData []byte) *MinorBlock {
 	return &MinorBlock{Header: header, Meta: meta, Transactions: txs, TrackingData: trackingData}
 }
 
@@ -114,19 +114,3 @@ func (b *MinorBlock) Hash() common.Hash { return b.Header.Hash() }
 
 // NumberU64 returns the block height.
 func (b *MinorBlock) NumberU64() uint64 { return b.Header.Number }
-
-// TypedTransaction is the transaction envelope (quarkchain/core.py:545): a type
-// tag selecting the wrapped transaction, of which only SERIALIZED_EVM (0) exists,
-// whose payload is the RLP-encoded EVM transaction.
-//
-// Only the envelope is implemented. The shard genesis carries an empty
-// transaction list, so the element is never encoded — but the field needs a type,
-// and this is the one it will keep once transactions are ported.
-//
-// TODO: add the SERIALIZED_EVM encode/decode pair against the EVM transaction
-// type once transactions are ported. Nothing constructs or reads a
-// TypedTransaction today.
-type TypedTransaction struct {
-	Type         uint8
-	SerializedTx []byte `bytesizeofslicelen:"4"`
-}
