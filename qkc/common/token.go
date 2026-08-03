@@ -150,7 +150,7 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	case tokenBalanceTriePrefix:
 		return nil, errors.New("token balance trie encoding is unsupported")
 	default:
-		return nil, fmt.Errorf("Unknown enum byte in token_balances:%v", data[0])
+		return nil, fmt.Errorf("unknown enum byte in token_balances: %v", data[0])
 
 	}
 	return tokenBalances, nil

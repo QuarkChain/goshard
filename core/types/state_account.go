@@ -37,9 +37,8 @@ type StateAccount struct {
 	Balance      *uint256.Int
 	Root         common.Hash // merkle root of the storage trie
 	CodeHash     []byte
-	MntBalances  *qkccommon.TokenBalances `rlp:"optional"` // non-QKC MNT balances; nil = no MNT tokens
+	MntBalances  *qkccommon.TokenBalances // non-QKC MNT balances; nil = no MNT tokens
 	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
-
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -81,10 +80,9 @@ func (acct *StateAccount) Copy() *StateAccount {
 // MntBal holds TokenBalances.SerializeToBytes() output rather than the
 // *TokenBalances value directly: TokenBalances stores its balances in an
 // unexported map, so it is not RLP-struct-encodable and must go through the
-// same []byte serialization the trie account uses. The nil-vs-non-nil
-// distinction of MntBal mirrors StateAccount.MntBalances (nil TokenBalances vs
-// empty-but-present), which is what keeps the 0x80 / 0x8200c0 trie encoding
-// stable across a snapshot round-trip.
+// same []byte serialization the trie account uses. MntBal is nil when
+// MntBalances serializes to empty bytes, matching
+// pyquarkchain's canonical empty TokenBalances encoding.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
@@ -110,8 +108,7 @@ func SlimAccountRLP(account StateAccount) []byte {
 	}
 	// Serialize MNT balances through the same []byte path as the trie account
 	// (TokenBalances holds an unexported map, so it cannot be RLP-struct-encoded).
-	// nil MntBalances stays nil MntBal; an empty-but-present map serializes to a
-	// non-nil 0x00c0, preserving the nil-vs-empty distinction across the round-trip.
+	// Empty TokenBalances serializes to nil, matching pyquarkchain.
 	// Note: unlike the trie qkcAccountRLP.TokenBal, the QKC default balance is NOT
 	// merged in here — the slim format keeps it in the separate Balance field.
 	if account.MntBalances != nil {
@@ -139,8 +136,7 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	account.Nonce, account.Balance = slim.Nonce, slim.Balance
 	account.FullShardKey = slim.FullShardKey
 
-	// A non-nil MntBal decodes back to a (possibly empty) TokenBalances so the
-	// nil-vs-empty distinction survives; nil MntBal leaves MntBalances nil.
+	// A non-nil MntBal decodes back to TokenBalances; nil leaves MntBalances nil.
 	if slim.MntBal != nil {
 		tb, err := qkccommon.NewTokenBalances(slim.MntBal)
 		if err != nil {
