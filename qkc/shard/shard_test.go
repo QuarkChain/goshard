@@ -256,6 +256,26 @@ func TestShardNewRejectsUnknownShard(t *testing.T) {
 	}
 }
 
+// TestShardNewRejectsForeignShard: 0x00010001 is configured in the cluster but
+// owned by S1, so S0's context must refuse it — and refuse it before touching
+// the datadir.
+func TestShardNewRejectsForeignShard(t *testing.T) {
+	ctx, root := bootEnv(t, fixtureMainnet)
+	datadir := t.TempDir()
+	const foreignShardID = uint32(0x00010001)
+
+	_, err := New(ctx, account.NewBranch(foreignShardID), root, datadir, Options{})
+	if err == nil || !strings.Contains(err.Error(), "not assigned to slave \"S0\"") {
+		t.Fatalf("shard.New(foreign) err = %v, want a rejected assignment naming S0", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("0x%08x", firstShardID)) {
+		t.Errorf("err = %q, want the owned ids listed", err)
+	}
+	if _, err := os.Stat(filepath.Join(datadir, DBDirName(foreignShardID))); !os.IsNotExist(err) {
+		t.Errorf("stat foreign shard db dir = %v, want it never created", err)
+	}
+}
+
 // failingChainService fails every chain construction, standing in for a real
 // chain implementation that errors during boot.
 type failingChainService struct{}

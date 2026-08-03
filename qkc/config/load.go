@@ -34,6 +34,19 @@ func (c *SlaveContext) FullShardIDs() []uint32 {
 	return c.Slave.FullShardList
 }
 
+// Owns reports whether fullShardID is assigned to this slave. A shard that
+// resolves in the shared QuarkChainConfig may still belong to another slave, so
+// this — not GetShardConfigByFullShardID — is the permission boundary a
+// SlaveContext narrows to.
+func (c *SlaveContext) Owns(fullShardID uint32) bool {
+	for _, id := range c.Slave.FullShardList {
+		if id == fullShardID {
+			return true
+		}
+	}
+	return false
+}
+
 // ShardConfigs returns the resolved shard config for each owned full shard id, in
 // config order. Validate guarantees each id resolves, so no entry is nil.
 func (c *SlaveContext) ShardConfigs() []*ShardConfig {

@@ -58,6 +58,16 @@ func ParseDBDirName(name string) (fullShardID uint32, ok bool) {
 	return uint32(id), true
 }
 
+// formatShardIDs renders full shard ids the way every other message here spells
+// them, for the operator reading a rejected assignment.
+func formatShardIDs(ids []uint32) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("0x%08x", id)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Shard is one shard chain hosted by the slave: its Branch (the registry key), its
 // resolved config, an isolated chaindb, and the chain behind the ShardChain seam.
 type Shard struct {
@@ -81,6 +91,14 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 	shardCfg := ctx.Quarkchain.GetShardConfigByFullShardID(fullShardID)
 	if shardCfg == nil {
 		return nil, fmt.Errorf("shard 0x%08x is not configured in any chain", fullShardID)
+	}
+	// A shard configured somewhere in the cluster can still belong to another
+	// slave. Refuse it here, before any database is opened, so a wrong or hostile
+	// instruction cannot create or reopen a chaindb outside this slave's
+	// assignment.
+	if !ctx.Owns(fullShardID) {
+		return nil, fmt.Errorf("shard 0x%08x is not assigned to slave %q (owns %s)",
+			fullShardID, ctx.ID, formatShardIDs(ctx.FullShardIDs()))
 	}
 	chainConfig, err := qkc.ShardChainConfig(ctx.Quarkchain, shardCfg)
 	if err != nil {
