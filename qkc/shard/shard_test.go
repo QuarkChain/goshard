@@ -80,7 +80,7 @@ func TestShardNewAndReopen(t *testing.T) {
 			}
 
 			// The chain stands at the genesis block the config derives.
-			genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+			genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, firstShardID, root)
 			if err != nil {
 				t.Fatalf("CreateMinorBlock: %v", err)
 			}
@@ -92,8 +92,8 @@ func TestShardNewAndReopen(t *testing.T) {
 				t.Errorf("head/genesis hash = %s/%s, want %s", head, s.Chain().GenesisHash(), want)
 			}
 
-			// The genesis state is in the shard's own database, not just the
-			// throwaway one the block was derived against.
+			// Deriving the block persists nothing, so the state is here only
+			// because the fresh path flushed it into the shard's own database.
 			if !rawdb.HasLegacyTrieNode(s.DB(), genesis.Meta.Root) {
 				t.Errorf("genesis state root %s is missing from the shard db", genesis.Meta.Root)
 			}
@@ -220,7 +220,7 @@ func TestShardReopenMissingGenesisState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("shard.New: %v", err)
 	}
-	genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+	genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, firstShardID, root)
 	if err != nil {
 		t.Fatalf("CreateMinorBlock: %v", err)
 	}

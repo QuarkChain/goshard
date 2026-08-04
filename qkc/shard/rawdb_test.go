@@ -35,7 +35,7 @@ func testGenesisBlockOf(t *testing.T, path string, fullShardID uint32) *types.Mi
 	if err != nil {
 		t.Fatalf("CreateRootBlock: %v", err)
 	}
-	block, err := qkc.CreateMinorBlock(cfg.Quarkchain, fullShardID, root, rawdb.NewMemoryDatabase())
+	block, err := qkc.CreateMinorBlock(cfg.Quarkchain, fullShardID, root)
 	if err != nil {
 		t.Fatalf("CreateMinorBlock: %v", err)
 	}

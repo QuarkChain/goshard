@@ -88,10 +88,6 @@ type Shard struct {
 // so the datadir stays reopenable.
 func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.RootBlockHeader, datadir string, opts Options) (*Shard, error) {
 	fullShardID := branch.GetFullShardID()
-	shardCfg := ctx.Quarkchain.GetShardConfigByFullShardID(fullShardID)
-	if shardCfg == nil {
-		return nil, fmt.Errorf("shard 0x%08x is not configured in any chain", fullShardID)
-	}
 	// A shard configured somewhere in the cluster can still belong to another
 	// slave. Refuse it here, before any database is opened, so a wrong or hostile
 	// instruction cannot create or reopen a chaindb outside this slave's
@@ -100,15 +96,19 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		return nil, fmt.Errorf("shard 0x%08x is not assigned to slave %q (owns %s)",
 			fullShardID, ctx.ID, formatShardIDs(ctx.FullShardIDs()))
 	}
+	shardCfg := ctx.Quarkchain.GetShardConfigByFullShardID(fullShardID)
+	if shardCfg == nil {
+		return nil, fmt.Errorf("shard 0x%08x is not configured in any chain", fullShardID)
+	}
 	chainConfig, err := qkc.ShardChainConfig(ctx.Quarkchain, shardCfg)
 	if err != nil {
 		return nil, fmt.Errorf("shard 0x%08x: %w", fullShardID, err)
 	}
-	// Derive the genesis against a throwaway database first: this is the identity
-	// a reopened datadir is checked against, and a mismatching config must not
-	// leave its state behind. Same reason geth hashes a genesis in an ephemeral
-	// database and only writes it in Commit (core/genesis.go).
-	genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, fullShardID, rootGenesis, rawdb.NewMemoryDatabase())
+	// Derive the genesis before the database is opened: this is the identity a
+	// reopened datadir is checked against, and a mismatching config must not leave
+	// its state behind. CreateMinorBlock persists nothing; CommitGenesisState below
+	// writes the state, and only on the fresh path.
+	genesis, err := qkc.CreateMinorBlock(ctx.Quarkchain, fullShardID, rootGenesis)
 	if err != nil {
 		return nil, err
 	}
@@ -121,8 +121,17 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		block:       genesis,
 		chainConfig: chainConfig,
 		commit: func(target ethdb.Database) error {
-			_, err := qkc.CreateMinorBlock(ctx.Quarkchain, fullShardID, rootGenesis, target)
-			return err
+			stateRoot, err := qkc.CommitGenesisState(ctx.Quarkchain, fullShardID, target)
+			if err != nil {
+				return err
+			}
+			// The block was derived from a hash of the same allocation. If the
+			// flushed root disagrees, the chain would open on a genesis whose state
+			// is not the one below it.
+			if stateRoot != genesis.Meta.Root {
+				return fmt.Errorf("committed genesis state %s does not match the derived genesis root %s", stateRoot, genesis.Meta.Root)
+			}
+			return nil
 		},
 	}
 	chain, existed, err := initializeChain(db, dbPath, setup, opts.chainService())

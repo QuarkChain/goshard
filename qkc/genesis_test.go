@@ -189,7 +189,7 @@ func TestMinorGenesisGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateRootBlock: %v", err)
 			}
-			block, err := CreateMinorBlock(cfg.Quarkchain, want.FullShardID, root, rawdb.NewMemoryDatabase())
+			block, err := CreateMinorBlock(cfg.Quarkchain, want.FullShardID, root)
 			if err != nil {
 				t.Fatalf("CreateMinorBlock: %v", err)
 			}
@@ -250,7 +250,7 @@ func TestCreateMinorBlock(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			cfg, shardCfg, root := shardEnv(t, path)
 
-			block, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+			block, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root)
 			if err != nil {
 				t.Fatalf("CreateMinorBlock: %v", err)
 			}
@@ -327,6 +327,53 @@ func TestCreateMinorBlock(t *testing.T) {
 	}
 }
 
+// TestCommitGenesisState: the flush half of the hash/flush split. The root it
+// writes must be the one CreateMinorBlock already sealed into the block's meta —
+// deriving the identity and materializing the state are two passes over the same
+// allocation, and nothing else checks that they agree.
+func TestCommitGenesisState(t *testing.T) {
+	for _, path := range []string{fixtureMainnet, fixtureDevnet} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			cfg, _, root := shardEnv(t, path)
+
+			block, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root)
+			if err != nil {
+				t.Fatalf("CreateMinorBlock: %v", err)
+			}
+
+			db := rawdb.NewMemoryDatabase()
+			stateRoot, err := CommitGenesisState(cfg.Quarkchain, firstShardID, db)
+			if err != nil {
+				t.Fatalf("CommitGenesisState: %v", err)
+			}
+			if stateRoot != block.Meta.Root {
+				t.Errorf("committed state root = %s, want the derived meta root %s", stateRoot, block.Meta.Root)
+			}
+			if !rawdb.HasLegacyTrieNode(db, stateRoot) {
+				t.Errorf("state root %s was not written to the database", stateRoot)
+			}
+		})
+	}
+}
+
+// TestCommitGenesisStateRejectsUnstandableShard: both halves of the split go
+// through the same validation, so the flush cannot write state for a shard the
+// derivation would have refused.
+func TestCommitGenesisStateRejectsUnstandableShard(t *testing.T) {
+	cfg, shardCfg, _ := shardEnv(t, fixtureMainnet)
+
+	if _, err := CommitGenesisState(cfg.Quarkchain, 0x00990099, rawdb.NewMemoryDatabase()); err == nil ||
+		!strings.Contains(err.Error(), "not configured in any chain") {
+		t.Errorf("CommitGenesisState(unknown shard) err = %v, want 'not configured in any chain'", err)
+	}
+
+	shardCfg.Genesis.RootHeight = 1
+	if _, err := CommitGenesisState(cfg.Quarkchain, firstShardID, rawdb.NewMemoryDatabase()); err == nil ||
+		!strings.Contains(err.Error(), "GENESIS.ROOT_HEIGHT") {
+		t.Errorf("CommitGenesisState(ROOT_HEIGHT 1) err = %v, want a ROOT_HEIGHT rejection", err)
+	}
+}
+
 // TestCreateMinorBlockDeterministic: the same config derives the same block, and
 // any input a reopen must catch moves the block hash — that hash is the identity
 // the datadir is checked against.
@@ -334,7 +381,7 @@ func TestCreateMinorBlockDeterministic(t *testing.T) {
 	cfg, _, root := shardEnv(t, fixtureMainnet)
 	derive := func(c *config.ClusterConfig, r *types.RootBlockHeader) common.Hash {
 		t.Helper()
-		block, err := CreateMinorBlock(c.Quarkchain, firstShardID, r, rawdb.NewMemoryDatabase())
+		block, err := CreateMinorBlock(c.Quarkchain, firstShardID, r)
 		if err != nil {
 			t.Fatalf("CreateMinorBlock: %v", err)
 		}
@@ -381,7 +428,7 @@ func TestCreateMinorBlockSnapshotsExtraData(t *testing.T) {
 	if len(shardCfg.Genesis.ExtraData) == 0 {
 		t.Skip("fixture has no EXTRA_DATA")
 	}
-	block, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+	block, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root)
 	if err != nil {
 		t.Fatalf("CreateMinorBlock: %v", err)
 	}
@@ -399,7 +446,7 @@ func TestCreateMinorBlockSnapshotsExtraData(t *testing.T) {
 func TestCreateMinorBlockRejectsNonzeroRootHeight(t *testing.T) {
 	cfg, shardCfg, root := shardEnv(t, fixtureMainnet)
 	shardCfg.Genesis.RootHeight = 3
-	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase()); err == nil ||
+	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root); err == nil ||
 		!strings.Contains(err.Error(), "ROOT_HEIGHT") {
 		t.Fatalf("CreateMinorBlock err = %v, want a ROOT_HEIGHT rejection", err)
 	}
@@ -410,7 +457,7 @@ func TestCreateMinorBlockRejectsNonzeroRootHeight(t *testing.T) {
 func TestCreateMinorBlockRejectsNonzeroHeight(t *testing.T) {
 	cfg, shardCfg, root := shardEnv(t, fixtureMainnet)
 	shardCfg.Genesis.Height = 5
-	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase()); err == nil ||
+	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root); err == nil ||
 		!strings.Contains(err.Error(), "must be block 0") {
 		t.Fatalf("CreateMinorBlock err = %v, want a HEIGHT rejection", err)
 	}
@@ -425,7 +472,7 @@ func TestCreateMinorBlockRejectsForeignAlloc(t *testing.T) {
 	foreign := account.CreatEmptyAddress(foreignShardID)
 	shardCfg.Genesis.Alloc[foreign] = config.Allocation{Balances: map[string]*big.Int{"QKC": big.NewInt(1)}}
 
-	_, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase())
+	_, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root)
 	if err == nil || !strings.Contains(err.Error(), "belongs to shard") ||
 		!strings.Contains(err.Error(), "0x00010001") {
 		t.Fatalf("CreateMinorBlock err = %v, want a foreign-ALLOC rejection naming the owning shard", err)
@@ -441,14 +488,14 @@ func TestCreateMinorBlockRejectsBadTokenName(t *testing.T) {
 	cfg, shardCfg, root := shardEnv(t, fixtureMainnet)
 	addr := account.CreatEmptyAddress(firstShardID)
 	shardCfg.Genesis.Alloc[addr] = config.Allocation{Balances: map[string]*big.Int{"lowercase": big.NewInt(1)}}
-	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase()); err == nil ||
+	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root); err == nil ||
 		!strings.Contains(err.Error(), "illegal character") {
 		t.Fatalf("CreateMinorBlock err = %v, want an illegal-token-name rejection", err)
 	}
 
 	cfg, _, root = shardEnv(t, fixtureMainnet)
 	cfg.Quarkchain.GenesisToken = "qkc"
-	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root, rawdb.NewMemoryDatabase()); err == nil ||
+	if _, err := CreateMinorBlock(cfg.Quarkchain, firstShardID, root); err == nil ||
 		!strings.Contains(err.Error(), "GENESIS_TOKEN") {
 		t.Fatalf("CreateMinorBlock err = %v, want a GENESIS_TOKEN rejection", err)
 	}
@@ -456,7 +503,7 @@ func TestCreateMinorBlockRejectsBadTokenName(t *testing.T) {
 
 func TestCreateMinorBlockRejectsUnknownShard(t *testing.T) {
 	cfg, _, root := shardEnv(t, fixtureMainnet)
-	if _, err := CreateMinorBlock(cfg.Quarkchain, 0x00990099, root, rawdb.NewMemoryDatabase()); err == nil ||
+	if _, err := CreateMinorBlock(cfg.Quarkchain, 0x00990099, root); err == nil ||
 		!strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("CreateMinorBlock err = %v, want 'not configured'", err)
 	}
