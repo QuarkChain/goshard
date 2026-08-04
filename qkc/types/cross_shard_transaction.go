@@ -5,7 +5,6 @@
 package types
 
 import (
-	"encoding/binary"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,7 +31,8 @@ type CrossShardTransactionDeposit struct {
 	RefundRate      uint8
 }
 
-// CrossShardTransactionList contains deposits in the latest format.
+// CrossShardTransactionList is pyquarkchain's CrossShardTransactionList
+// version 1 wire type.
 type CrossShardTransactionList struct {
 	TXList []*CrossShardTransactionDeposit
 }
@@ -46,58 +46,34 @@ func NewCrossShardTransactionList(txList []*CrossShardTransactionDeposit) *Cross
 	}
 }
 
-// crossShardTransactionListV1 is the version 1 encoding.
-type crossShardTransactionListV1 struct {
-	TXList  []*CrossShardTransactionDeposit `bytesizeofslicelen:"4"`
-	Version uint32
-}
-
-// Serialize encodes the list using the latest version.
+// Serialize writes pyquarkchain CrossShardTransactionList.FIELDS order:
+// tx_list followed by version(uint32).
 func (c *CrossShardTransactionList) Serialize(w *[]byte) error {
 	if c == nil {
 		return fmt.Errorf("nil cross-shard transaction list")
 	}
-	return serialize.Serialize(w, crossShardTransactionListV1{
-		TXList:  c.TXList,
-		Version: crossShardTransactionListVersion,
-	})
+	if err := serialize.SerializeWithTags(w, c.TXList, serialize.Tags{ByteSizeOfSliceLen: 4}); err != nil {
+		return err
+	}
+	return serialize.Serialize(w, crossShardTransactionListVersion)
 }
 
-// Deserialize decodes a cross-shard transaction list.
+// Deserialize reads the current pyquarkchain CrossShardTransactionList version.
 func (c *CrossShardTransactionList) Deserialize(bb *serialize.ByteBuffer) error {
 	if c == nil {
 		return fmt.Errorf("nil cross-shard transaction list")
 	}
-	b, err := bb.ReadRemaining()
-	if err != nil {
+	var txList []*CrossShardTransactionDeposit
+	if err := serialize.DeserializeWithTags(bb, &txList, serialize.Tags{ByteSizeOfSliceLen: 4}); err != nil {
 		return err
 	}
-	txList, err := FromBytesToCrossShardTransactionList(b)
-	if err != nil {
+	var version uint32
+	if err := serialize.Deserialize(bb, &version); err != nil {
 		return err
+	}
+	if version != crossShardTransactionListVersion {
+		return fmt.Errorf("unsupported cross-shard transaction list version %d", version)
 	}
 	c.TXList = txList
 	return nil
-}
-
-// FromBytesToCrossShardTransactionList reads the version from the last four
-// bytes and converts the deposits to the latest format.
-func FromBytesToCrossShardTransactionList(b []byte) ([]*CrossShardTransactionDeposit, error) {
-	if len(b) < 4 {
-		return nil, fmt.Errorf("cross-shard transaction list is missing its version")
-	}
-	version := binary.BigEndian.Uint32(b[len(b)-4:])
-	switch version {
-	case crossShardTransactionListVersion:
-		var decoded crossShardTransactionListV1
-		if err := serialize.DeserializeFromBytes(b, &decoded); err != nil {
-			return nil, err
-		}
-		if decoded.Version != crossShardTransactionListVersion {
-			return nil, fmt.Errorf("unsupported cross-shard transaction list version %d", decoded.Version)
-		}
-		return decoded.TXList, nil
-	default:
-		return nil, fmt.Errorf("unsupported cross-shard transaction list version %d", version)
-	}
 }

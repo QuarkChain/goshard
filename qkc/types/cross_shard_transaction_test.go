@@ -16,7 +16,7 @@ import (
 
 func TestCrossShardTransactionList(t *testing.T) {
 	c1 := NewCrossShardTransactionList(nil)
-	for index := uint64(0); index < 3; index++ {
+	for index := uint64(0); index < 100; index++ {
 		u256 := new(serialize.Uint256)
 		u256.Value = new(big.Int).SetUint64(index)
 		c1.TXList = append(c1.TXList, &CrossShardTransactionDeposit{
@@ -44,35 +44,37 @@ func TestCrossShardTransactionList(t *testing.T) {
 	data, err := serialize.SerializeToBytes(c1)
 	assert.NoError(t, err)
 
-	d1, err := FromBytesToCrossShardTransactionList(data)
+	d1 := NewCrossShardTransactionList(nil)
+	err = serialize.DeserializeFromBytes(data, d1)
 	assert.NoError(t, err)
 	for k, v := range c1.TXList {
-		assert.Equal(t, v.TxHash, d1[k].TxHash)
-		assert.Equal(t, v.From, d1[k].From)
-		assert.Equal(t, v.To, d1[k].To)
-		assert.Equal(t, v.Value.Value.Uint64(), d1[k].Value.Value.Uint64())
-		assert.Equal(t, v.GasPrice.Value.Uint64(), d1[k].GasPrice.Value.Uint64())
-		assert.Equal(t, v.GasTokenID, d1[k].GasTokenID)
-		assert.Equal(t, v.TransferTokenID, d1[k].TransferTokenID)
-		assert.Equal(t, v.IsFromRootChain, d1[k].IsFromRootChain)
-		assert.Equal(t, v.GasRemained.Value.Uint64(), d1[k].GasRemained.Value.Uint64())
-		assert.Equal(t, v.MessageData, d1[k].MessageData)
-		assert.Equal(t, v.CreateContract, d1[k].CreateContract)
-		assert.Equal(t, uint8(k), d1[k].RefundRate)
+		assert.Equal(t, v.TxHash, (*d1).TXList[k].TxHash)
+		assert.Equal(t, v.From, (*d1).TXList[k].From)
+		assert.Equal(t, v.To, (*d1).TXList[k].To)
+		assert.Equal(t, v.Value.Value.Uint64(), (*d1).TXList[k].Value.Value.Uint64())
+		assert.Equal(t, v.GasPrice.Value.Uint64(), (*d1).TXList[k].GasPrice.Value.Uint64())
+		assert.Equal(t, v.GasTokenID, (*d1).TXList[k].GasTokenID)
+		assert.Equal(t, v.TransferTokenID, (*d1).TXList[k].TransferTokenID)
+		assert.Equal(t, v.IsFromRootChain, (*d1).TXList[k].IsFromRootChain)
+		assert.Equal(t, v.GasRemained.Value.Uint64(), (*d1).TXList[k].GasRemained.Value.Uint64())
+		assert.Equal(t, v.MessageData, (*d1).TXList[k].MessageData)
+		assert.Equal(t, v.CreateContract, (*d1).TXList[k].CreateContract)
+		assert.Equal(t, uint8(k), (*d1).TXList[k].RefundRate)
 	}
 
 }
 
-func TestCrossShardTransactionListGolden(t *testing.T) {
+func TestCrossShardTransactionListPyquarkchainGolden(t *testing.T) {
 	assertSerialized := func(t *testing.T, list *CrossShardTransactionList, expected string) {
 		t.Helper()
 		encoded, err := serialize.SerializeToBytes(list)
 		assert.NoError(t, err)
 		assert.Equal(t, expected, common.Bytes2Hex(encoded))
 
-		decoded, err := FromBytesToCrossShardTransactionList(common.FromHex(expected))
+		var decoded CrossShardTransactionList
+		err = serialize.DeserializeFromBytes(common.FromHex(expected), &decoded)
 		assert.NoError(t, err)
-		reencoded, err := serialize.SerializeToBytes(NewCrossShardTransactionList(decoded))
+		reencoded, err := serialize.SerializeToBytes(&decoded)
 		assert.NoError(t, err)
 		assert.Equal(t, expected, common.Bytes2Hex(reencoded))
 	}
@@ -98,6 +100,7 @@ func TestCrossShardTransactionListGolden(t *testing.T) {
 }
 
 func TestCrossShardTransactionListRejectsUnsupportedVersion(t *testing.T) {
-	_, err := FromBytesToCrossShardTransactionList(common.FromHex("0000000000000000"))
+	var list CrossShardTransactionList
+	err := serialize.DeserializeFromBytes(common.FromHex("0000000000000000"), &list)
 	assert.Error(t, err)
 }
