@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	comtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/params"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
@@ -24,21 +25,21 @@ var (
 
 // MinorBlockHeaderList represents a minor block header in the QuarkChain.
 type MinorBlockHeader struct {
-	Version           uint32             `json:"version"                    gencodec:"required"`
-	Branch            account.Branch     `json:"branch"                     gencodec:"required"`
-	Number            uint64             `json:"number"                     gencodec:"required"`
-	Coinbase          account.Address    `json:"miner"                      gencodec:"required"`
-	CoinbaseAmount    *TokenBalances     `json:"coinbaseAmount"             gencodec:"required"`
-	ParentHash        common.Hash        `json:"parentHash"                 gencodec:"required"`
-	PrevRootBlockHash common.Hash        `json:"prevRootBlockHash"          gencodec:"required"`
-	GasLimit          *serialize.Uint256 `json:"gasLimit"                   gencodec:"required"`
-	MetaHash          common.Hash        `json:"metaHash"                   gencodec:"required"`
-	Time              uint64             `json:"timestamp"                  gencodec:"required"`
-	Difficulty        *big.Int           `json:"difficulty"                 gencodec:"required"`
-	Nonce             uint64             `json:"nonce"`
-	Bloom             Bloom              `json:"logsBloom"                  gencodec:"required"`
-	Extra             []byte             `json:"extraData"                  gencodec:"required"   bytesizeofslicelen:"2"`
-	MixDigest         common.Hash        `json:"mixHash"`
+	Version           uint32                   `json:"version"                    gencodec:"required"`
+	Branch            account.Branch           `json:"branch"                     gencodec:"required"`
+	Number            uint64                   `json:"number"                     gencodec:"required"`
+	Coinbase          account.Address          `json:"miner"                      gencodec:"required"`
+	CoinbaseAmount    *qkcCommon.TokenBalances `json:"coinbaseAmount"             gencodec:"required"`
+	ParentHash        common.Hash              `json:"parentHash"                 gencodec:"required"`
+	PrevRootBlockHash common.Hash              `json:"prevRootBlockHash"          gencodec:"required"`
+	GasLimit          *serialize.Uint256       `json:"gasLimit"                   gencodec:"required"`
+	MetaHash          common.Hash              `json:"metaHash"                   gencodec:"required"`
+	Time              uint64                   `json:"timestamp"                  gencodec:"required"`
+	Difficulty        *big.Int                 `json:"difficulty"                 gencodec:"required"`
+	Nonce             uint64                   `json:"nonce"`
+	Bloom             Bloom                    `json:"logsBloom"                  gencodec:"required"`
+	Extra             []byte                   `json:"extraData"                  gencodec:"required"   bytesizeofslicelen:"2"`
+	MixDigest         common.Hash              `json:"mixHash"`
 }
 
 type MinorBlockMeta struct {
@@ -49,12 +50,6 @@ type MinorBlockMeta struct {
 	CrossShardGasUsed  *serialize.Uint256  `json:"crossShardGasUsed"          gencodec:"required"`
 	XShardTxCursorInfo *XShardTxCursorInfo `json:"xShardTxCursorInfo"         gencodec:"required"`
 	XShardGasLimit     *serialize.Uint256  `json:"xShardGasLimit"             gencodec:"required"`
-}
-
-type XShardTxCursorInfo struct {
-	RootBlockHeight    uint64
-	MinorBlockIndex    uint64
-	XShardDepositIndex uint64
 }
 
 func (m *MinorBlockMeta) Hash() common.Hash {
@@ -102,11 +97,11 @@ func (h *MinorBlockHeader) GetExtra() []byte {
 	return nil
 }
 
-func (h *MinorBlockHeader) GetCoinbaseAmount() *TokenBalances {
+func (h *MinorBlockHeader) GetCoinbaseAmount() *qkcCommon.TokenBalances {
 	if h.CoinbaseAmount != nil {
 		return h.CoinbaseAmount.Copy()
 	}
-	return NewEmptyTokenBalances()
+	return qkcCommon.NewEmptyTokenBalances()
 }
 
 func (h *MinorBlockHeader) SetExtra(data []byte)              { h.Extra = common.CopyBytes(data) }
@@ -206,7 +201,7 @@ func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transa
 		b.header.Bloom = CreateBloom(receipts)
 	}
 
-	if trackingdata != nil && len(trackingdata) > 0 {
+	if len(trackingdata) > 0 {
 		b.trackingdata = make([]byte, len(trackingdata))
 		copy(b.trackingdata, trackingdata)
 	}
@@ -234,7 +229,7 @@ func CopyMinorBlockHeader(h *MinorBlockHeader) *MinorBlockHeader {
 	if cpy.GasLimit = new(serialize.Uint256); h.GasLimit != nil && h.GasLimit.Value != nil {
 		cpy.GasLimit.Value = new(big.Int).Set(h.GasLimit.Value)
 	}
-	if h.Extra != nil && len(h.Extra) > 0 {
+	if len(h.Extra) > 0 {
 		cpy.Extra = make([]byte, len(h.Extra))
 		copy(cpy.Extra, h.Extra)
 	}
@@ -268,6 +263,7 @@ func (b *MinorBlock) Deserialize(bb *serialize.ByteBuffer) error {
 		return err
 	}
 	b.header, b.meta, b.transactions, b.trackingdata = eb.Header, eb.Meta, eb.Txs, eb.Trackingdata
+	b.hash = atomic.Value{}
 	b.size.Store(common.StorageSize(bb.GetOffset() - startIndex))
 	return nil
 }
@@ -305,21 +301,21 @@ func (b *MinorBlock) TrackingData() []byte { return b.trackingdata }
 func (b *MinorBlock) GetXShardGasLimit() *big.Int {
 	return new(big.Int).Set(b.meta.XShardGasLimit.Value)
 }
-func (b *MinorBlock) Version() uint32                { return b.header.Version }
-func (b *MinorBlock) Branch() account.Branch         { return b.header.Branch }
-func (b *MinorBlock) Number() uint64                 { return b.header.Number }
-func (b *MinorBlock) Coinbase() account.Address      { return b.header.Coinbase }
-func (b *MinorBlock) ParentHash() common.Hash        { return b.header.ParentHash }
-func (b *MinorBlock) PrevRootBlockHash() common.Hash { return b.header.PrevRootBlockHash }
-func (b *MinorBlock) GasLimit() *big.Int             { return new(big.Int).Set(b.header.GasLimit.Value) }
-func (b *MinorBlock) MetaHash() common.Hash          { return b.header.MetaHash }
-func (b *MinorBlock) Time() uint64                   { return b.header.Time }
-func (b *MinorBlock) Difficulty() *big.Int           { return new(big.Int).Set(b.header.Difficulty) }
-func (b *MinorBlock) Nonce() uint64                  { return b.header.Nonce }
-func (b *MinorBlock) Extra() []byte                  { return common.CopyBytes(b.header.Extra) }
-func (b *MinorBlock) Bloom() Bloom                   { return b.header.Bloom }
-func (b *MinorBlock) MixDigest() common.Hash         { return b.header.MixDigest }
-func (b *MinorBlock) CoinbaseAmount() *TokenBalances { return b.header.GetCoinbaseAmount() }
+func (b *MinorBlock) Version() uint32                          { return b.header.Version }
+func (b *MinorBlock) Branch() account.Branch                   { return b.header.Branch }
+func (b *MinorBlock) Number() uint64                           { return b.header.Number }
+func (b *MinorBlock) Coinbase() account.Address                { return b.header.Coinbase }
+func (b *MinorBlock) ParentHash() common.Hash                  { return b.header.ParentHash }
+func (b *MinorBlock) PrevRootBlockHash() common.Hash           { return b.header.PrevRootBlockHash }
+func (b *MinorBlock) GasLimit() *big.Int                       { return new(big.Int).Set(b.header.GasLimit.Value) }
+func (b *MinorBlock) MetaHash() common.Hash                    { return b.header.MetaHash }
+func (b *MinorBlock) Time() uint64                             { return b.header.Time }
+func (b *MinorBlock) Difficulty() *big.Int                     { return new(big.Int).Set(b.header.Difficulty) }
+func (b *MinorBlock) Nonce() uint64                            { return b.header.Nonce }
+func (b *MinorBlock) Extra() []byte                            { return common.CopyBytes(b.header.Extra) }
+func (b *MinorBlock) Bloom() Bloom                             { return b.header.Bloom }
+func (b *MinorBlock) MixDigest() common.Hash                   { return b.header.MixDigest }
+func (b *MinorBlock) CoinbaseAmount() *qkcCommon.TokenBalances { return b.header.GetCoinbaseAmount() }
 
 // meta properties
 func (b *MinorBlock) Root() common.Hash        { return b.meta.Root }
@@ -372,9 +368,8 @@ func (b *MinorBlock) Size() common.StorageSize {
 // WithSeal returns a new block with the data from b but the header replaced with
 // the sealed one.
 func (b *MinorBlock) WithSeal(header *MinorBlockHeader) *MinorBlock {
-	cpyheader := *header
 	return &MinorBlock{
-		header:       &cpyheader,
+		header:       CopyMinorBlockHeader(header),
 		meta:         b.meta,
 		transactions: b.transactions,
 		trackingdata: b.trackingdata,
@@ -410,7 +405,7 @@ func (b *MinorBlock) NumberU64() uint64 {
 }
 
 func (b *MinorBlock) IHeader() IHeader {
-	return b.header
+	return CopyMinorBlockHeader(b.header)
 }
 
 // WithMiningResult returns a new block with the data from b and update nonce and mixDigest.
@@ -427,7 +422,7 @@ func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signa
 }
 
 func (b *MinorBlock) Content() []IHashable {
-	items := make([]IHashable, len(b.transactions), len(b.transactions))
+	items := make([]IHashable, len(b.transactions))
 	for i, item := range b.transactions {
 		items[i] = item
 	}
@@ -450,7 +445,7 @@ func (b *MinorBlock) GetSize() common.StorageSize {
 	return b.Size()
 }
 
-func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *big.Int, xShardReceiveGasUsed *big.Int, coinbaseAmount *TokenBalances, xShardTxCursorInfo *XShardTxCursorInfo) {
+func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *big.Int, xShardReceiveGasUsed *big.Int, coinbaseAmount *qkcCommon.TokenBalances, xShardTxCursorInfo *XShardTxCursorInfo) {
 	if gasUsed == nil {
 		gasUsed = new(big.Int)
 	}
@@ -468,8 +463,10 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 	m.header.MetaHash = m.meta.Hash()
 	m.header.Bloom = CreateBloom(receipts)
 	m.hash.Store(m.header.Hash())
+	m.size = atomic.Value{}
 }
-func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int, address *account.Address, nonce *uint64, gasLimit *big.Int, xShardGasLimit *big.Int, extraData []byte, coinbaseAmount *TokenBalances, prevRootHash *common.Hash) *MinorBlock {
+
+func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int, address *account.Address, nonce *uint64, gasLimit *big.Int, xShardGasLimit *big.Int, extraData []byte, coinbaseAmount *qkcCommon.TokenBalances, prevRootHash *common.Hash) *MinorBlock {
 	if createTime == nil {
 		preTime := h.Time() + 1
 		createTime = &preTime
@@ -502,7 +499,7 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 	}
 
 	if coinbaseAmount == nil {
-		coinbaseAmount = NewEmptyTokenBalances()
+		coinbaseAmount = qkcCommon.NewEmptyTokenBalances()
 	}
 
 	if prevRootHash == nil {
@@ -542,6 +539,7 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 // refreshes the cache.
 func (h *MinorBlock) AddTx(tx *Transaction) {
 	h.transactions = append(h.transactions, tx)
+	h.size = atomic.Value{}
 }
 
 func GetEmptyMinorBlock() *MinorBlock {
@@ -550,7 +548,7 @@ func GetEmptyMinorBlock() *MinorBlock {
 
 func getDefaultMinorBlockHeader() *MinorBlockHeader {
 	return &MinorBlockHeader{
-		CoinbaseAmount: NewEmptyTokenBalances(),
+		CoinbaseAmount: qkcCommon.NewEmptyTokenBalances(),
 		Branch:         account.Branch{Value: 1},
 		GasLimit:       &serialize.Uint256{Value: params.DefaultBlockGasLimit},
 		Difficulty:     new(big.Int).SetUint64(0),

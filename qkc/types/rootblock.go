@@ -19,25 +19,26 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
 // RootBlockHeader represents a root block header in the QuarkChain.
 type RootBlockHeader struct {
-	Version         uint32          `json:"version"          gencodec:"required"`
-	Number          uint32          `json:"number"           gencodec:"required"`
-	ParentHash      common.Hash     `json:"parentHash"       gencodec:"required"`
-	MinorHeaderHash common.Hash     `json:"transactionsRoot" gencodec:"required"`
-	Root            common.Hash     `json:"root"             gencodec:"required"`
-	Coinbase        account.Address `json:"miner"            gencodec:"required"`
-	CoinbaseAmount  *TokenBalances  `json:"coinbaseAmount"   gencodec:"required"`
-	Time            uint64          `json:"timestamp"        gencodec:"required"`
-	Difficulty      *big.Int        `json:"difficulty"       gencodec:"required"`
-	TotalDifficulty *big.Int        `json:"total_difficulty" gencodec:"required"`
-	Nonce           uint64          `json:"nonce"`
-	Extra           []byte          `json:"extraData"        gencodec:"required"   bytesizeofslicelen:"2"`
-	MixDigest       common.Hash     `json:"mixHash"`
-	Signature       [65]byte        `json:"signature"        gencodec:"required"`
+	Version         uint32                   `json:"version"          gencodec:"required"`
+	Number          uint32                   `json:"number"           gencodec:"required"`
+	ParentHash      common.Hash              `json:"parentHash"       gencodec:"required"`
+	MinorHeaderHash common.Hash              `json:"transactionsRoot" gencodec:"required"`
+	Root            common.Hash              `json:"root"             gencodec:"required"`
+	Coinbase        account.Address          `json:"miner"            gencodec:"required"`
+	CoinbaseAmount  *qkcCommon.TokenBalances `json:"coinbaseAmount"   gencodec:"required"`
+	Time            uint64                   `json:"timestamp"        gencodec:"required"`
+	Difficulty      *big.Int                 `json:"difficulty"       gencodec:"required"`
+	TotalDifficulty *big.Int                 `json:"total_difficulty" gencodec:"required"`
+	Nonce           uint64                   `json:"nonce"`
+	Extra           []byte                   `json:"extraData"        gencodec:"required"   bytesizeofslicelen:"2"`
+	MixDigest       common.Hash              `json:"mixHash"`
+	Signature       [65]byte                 `json:"signature"        gencodec:"required"`
 }
 
 // Hash returns the block hash of the header, which is simply the keccak256 hash of its
@@ -73,11 +74,11 @@ func (h *RootBlockHeader) GetExtra() []byte {
 	return nil
 }
 
-func (b *RootBlockHeader) GetCoinbaseAmount() *TokenBalances {
+func (b *RootBlockHeader) GetCoinbaseAmount() *qkcCommon.TokenBalances {
 	if b.CoinbaseAmount != nil && b.CoinbaseAmount.GetBalanceMap() != nil {
-		return NewTokenBalancesWithMap(b.CoinbaseAmount.GetBalanceMap())
+		return qkcCommon.NewTokenBalancesWithMap(b.CoinbaseAmount.GetBalanceMap())
 	}
-	return NewEmptyTokenBalances()
+	return qkcCommon.NewEmptyTokenBalances()
 }
 
 func (b *RootBlockHeader) VerifySignature(key ecdsa.PublicKey) bool {
@@ -143,7 +144,7 @@ func (h *RootBlockHeader) CreateBlockToAppend(createTime *uint64, difficulty *bi
 		ParentHash:      h.Hash(),
 		MinorHeaderHash: common.Hash{},
 		Coinbase:        *address,
-		CoinbaseAmount:  NewEmptyTokenBalances(),
+		CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
 		Time:            *createTime,
 		Difficulty:      difficulty,
 		TotalDifficulty: totalDifficulty,
@@ -178,7 +179,7 @@ type RootBlock struct {
 }
 
 func (b *RootBlock) IHeader() IHeader {
-	return b.header
+	return CopyRootBlockHeader(b.header)
 }
 
 // "external" block encoding. used for eth protocol, etc.
@@ -251,6 +252,7 @@ func (b *RootBlock) Deserialize(bb *serialize.ByteBuffer) error {
 		return err
 	}
 	b.header, b.minorBlockHeaders, b.trackingdata = eb.Header, eb.MinorBlockHeaders, eb.Trackingdata
+	b.hash = atomic.Value{}
 	b.size.Store(common.StorageSize(bb.GetOffset() - startIndex))
 	return nil
 }
@@ -282,20 +284,20 @@ func (b *RootBlock) MinorBlockHeader(hash common.Hash) *MinorBlockHeader {
 
 func (b *RootBlock) TrackingData() []byte { return b.trackingdata }
 
-func (b *RootBlock) Version() uint32                { return b.header.Version }
-func (b *RootBlock) Number() uint32                 { return b.header.Number }
-func (b *RootBlock) NumberU64() uint64              { return uint64(b.header.Number) }
-func (b *RootBlock) ParentHash() common.Hash        { return b.header.ParentHash }
-func (b *RootBlock) MinorHeaderHash() common.Hash   { return b.header.MinorHeaderHash }
-func (b *RootBlock) Coinbase() account.Address      { return b.header.Coinbase }
-func (b *RootBlock) CoinbaseAmount() *TokenBalances { return b.header.GetCoinbaseAmount() }
-func (b *RootBlock) Time() uint64                   { return b.header.Time }
-func (b *RootBlock) Difficulty() *big.Int           { return new(big.Int).Set(b.header.Difficulty) }
-func (b *RootBlock) TotalDifficulty() *big.Int      { return new(big.Int).Set(b.header.TotalDifficulty) }
-func (b *RootBlock) Nonce() uint64                  { return b.header.Nonce }
-func (b *RootBlock) Extra() []byte                  { return common.CopyBytes(b.header.Extra) }
-func (b *RootBlock) MixDigest() common.Hash         { return b.header.MixDigest }
-func (b *RootBlock) Signature() [65]byte            { return b.header.Signature }
+func (b *RootBlock) Version() uint32                          { return b.header.Version }
+func (b *RootBlock) Number() uint32                           { return b.header.Number }
+func (b *RootBlock) NumberU64() uint64                        { return uint64(b.header.Number) }
+func (b *RootBlock) ParentHash() common.Hash                  { return b.header.ParentHash }
+func (b *RootBlock) MinorHeaderHash() common.Hash             { return b.header.MinorHeaderHash }
+func (b *RootBlock) Coinbase() account.Address                { return b.header.Coinbase }
+func (b *RootBlock) CoinbaseAmount() *qkcCommon.TokenBalances { return b.header.GetCoinbaseAmount() }
+func (b *RootBlock) Time() uint64                             { return b.header.Time }
+func (b *RootBlock) Difficulty() *big.Int                     { return new(big.Int).Set(b.header.Difficulty) }
+func (b *RootBlock) TotalDifficulty() *big.Int                { return new(big.Int).Set(b.header.TotalDifficulty) }
+func (b *RootBlock) Nonce() uint64                            { return b.header.Nonce }
+func (b *RootBlock) Extra() []byte                            { return common.CopyBytes(b.header.Extra) }
+func (b *RootBlock) MixDigest() common.Hash                   { return b.header.MixDigest }
+func (b *RootBlock) Signature() [65]byte                      { return b.header.Signature }
 
 func (b *RootBlock) Header() *RootBlockHeader { return CopyRootBlockHeader(b.header) }
 func (b *RootBlock) Content() []IHashable {
@@ -345,10 +347,8 @@ func (b *RootBlock) SignWithPrivateKey(prv *ecdsa.PrivateKey) error {
 // WithSeal returns a new block with the data from b but the header replaced with
 // the sealed one.
 func (b *RootBlock) WithSeal(header *RootBlockHeader) *RootBlock {
-	cpy := *header
-
 	return &RootBlock{
-		header:            &cpy,
+		header:            CopyRootBlockHeader(header),
 		minorBlockHeaders: b.minorBlockHeaders,
 		trackingdata:      b.trackingdata,
 	}
@@ -386,9 +386,9 @@ func (b *RootBlock) GetSize() common.StorageSize {
 	return b.Size()
 }
 
-func (b *RootBlock) Finalize(coinbaseAmount *TokenBalances, coinbaseAddress *account.Address, root common.Hash) *RootBlock {
+func (b *RootBlock) Finalize(coinbaseAmount *qkcCommon.TokenBalances, coinbaseAddress *account.Address, root common.Hash) *RootBlock {
 	if coinbaseAmount == nil {
-		coinbaseAmount = NewEmptyTokenBalances()
+		coinbaseAmount = qkcCommon.NewEmptyTokenBalances()
 	}
 
 	if coinbaseAddress == nil {
@@ -404,6 +404,7 @@ func (b *RootBlock) Finalize(coinbaseAmount *TokenBalances, coinbaseAddress *acc
 		b.header.Root = EmptyTrieHash
 	}
 	b.hash.Store(b.header.Hash())
+	b.size = atomic.Value{}
 	return b
 }
 
@@ -413,6 +414,7 @@ func (b *RootBlock) Finalize(coinbaseAmount *TokenBalances, coinbaseAddress *acc
 // merkle root and refreshes the cache.
 func (b *RootBlock) AddMinorBlockHeader(header *MinorBlockHeader) {
 	b.minorBlockHeaders = append(b.minorBlockHeaders, header)
+	b.size = atomic.Value{}
 }
 
 func (b *RootBlock) ExtendMinorBlockHeaderList(headers []*MinorBlockHeader, createTime uint64) {
@@ -421,4 +423,5 @@ func (b *RootBlock) ExtendMinorBlockHeaderList(headers []*MinorBlockHeader, crea
 			b.minorBlockHeaders = append(b.minorBlockHeaders, header)
 		}
 	}
+	b.size = atomic.Value{}
 }

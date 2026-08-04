@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 type IHeader interface {
@@ -19,7 +20,7 @@ type IHeader interface {
 	GetParentHash() common.Hash
 	GetCoinbase() account.Address
 	GetTime() uint64
-	GetCoinbaseAmount() *TokenBalances
+	GetCoinbaseAmount() *qkcCommon.TokenBalances
 	GetDifficulty() *big.Int
 	GetNonce() uint64
 	GetExtra() []byte
