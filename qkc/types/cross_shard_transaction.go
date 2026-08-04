@@ -1,10 +1,11 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Cross-shard transactions use versioned QKC wire encoding.
+// Cross-shard transactions follow pyquarkchain-compatible QKC wire encoding.
 
 package types
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -12,7 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-const crossShardTransactionListVersion = uint32(0)
+const crossShardTransactionListVersion = uint32(1)
 
 // CrossShardTransactionDeposit matches pyquarkchain's current
 // CrossShardTransactionDeposit.FIELDS order.
@@ -31,18 +32,9 @@ type CrossShardTransactionDeposit struct {
 	RefundRate      uint8
 }
 
-// CrossShardTransactionList contains decoded cross-shard transaction deposits.
+// CrossShardTransactionList contains deposits in the latest format.
 type CrossShardTransactionList struct {
 	TXList []*CrossShardTransactionDeposit
-}
-
-type crossShardTransactionListEnvelope struct {
-	Version uint32
-	Payload []byte `bytesizeofslicelen:"4"`
-}
-
-type crossShardTransactionListV0 struct {
-	TXList []*CrossShardTransactionDeposit `bytesizeofslicelen:"4"`
 }
 
 func NewCrossShardTransactionList(txList []*CrossShardTransactionDeposit) *CrossShardTransactionList {
@@ -54,39 +46,58 @@ func NewCrossShardTransactionList(txList []*CrossShardTransactionDeposit) *Cross
 	}
 }
 
-// Serialize writes a versioned cross-shard transaction list envelope.
+// crossShardTransactionListV1 is the version 1 encoding.
+type crossShardTransactionListV1 struct {
+	TXList  []*CrossShardTransactionDeposit `bytesizeofslicelen:"4"`
+	Version uint32
+}
+
+// Serialize encodes the list using the latest version.
 func (c *CrossShardTransactionList) Serialize(w *[]byte) error {
 	if c == nil {
 		return fmt.Errorf("nil cross-shard transaction list")
 	}
-	payload, err := serialize.SerializeToBytes(crossShardTransactionListV0{TXList: c.TXList})
-	if err != nil {
-		return err
-	}
-	return serialize.Serialize(w, crossShardTransactionListEnvelope{
+	return serialize.Serialize(w, crossShardTransactionListV1{
+		TXList:  c.TXList,
 		Version: crossShardTransactionListVersion,
-		Payload: payload,
 	})
 }
 
-// Deserialize reads a versioned envelope and normalizes its payload.
+// Deserialize decodes a cross-shard transaction list.
 func (c *CrossShardTransactionList) Deserialize(bb *serialize.ByteBuffer) error {
 	if c == nil {
 		return fmt.Errorf("nil cross-shard transaction list")
 	}
-	var envelope crossShardTransactionListEnvelope
-	if err := serialize.Deserialize(bb, &envelope); err != nil {
+	b, err := bb.ReadRemaining()
+	if err != nil {
 		return err
 	}
-	switch envelope.Version {
+	txList, err := FromBytesToCrossShardTransactionList(b)
+	if err != nil {
+		return err
+	}
+	c.TXList = txList
+	return nil
+}
+
+// FromBytesToCrossShardTransactionList reads the version from the last four
+// bytes and converts the deposits to the latest format.
+func FromBytesToCrossShardTransactionList(b []byte) ([]*CrossShardTransactionDeposit, error) {
+	if len(b) < 4 {
+		return nil, fmt.Errorf("cross-shard transaction list is missing its version")
+	}
+	version := binary.BigEndian.Uint32(b[len(b)-4:])
+	switch version {
 	case crossShardTransactionListVersion:
-		var payload crossShardTransactionListV0
-		if err := serialize.DeserializeFromBytes(envelope.Payload, &payload); err != nil {
-			return err
+		var decoded crossShardTransactionListV1
+		if err := serialize.DeserializeFromBytes(b, &decoded); err != nil {
+			return nil, err
 		}
-		c.TXList = payload.TXList
-		return nil
+		if decoded.Version != crossShardTransactionListVersion {
+			return nil, fmt.Errorf("unsupported cross-shard transaction list version %d", decoded.Version)
+		}
+		return decoded.TXList, nil
 	default:
-		return fmt.Errorf("unsupported cross-shard transaction list version %d", envelope.Version)
+		return nil, fmt.Errorf("unsupported cross-shard transaction list version %d", version)
 	}
 }
