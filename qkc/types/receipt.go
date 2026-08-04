@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -51,7 +52,7 @@ type receiptRLP struct {
 	Bloom                Bloom
 	Logs                 []*coretypes.Log
 	ContractAddress      []byte
-	ContractFullShardKey *Uint32
+	ContractFullShardKey *qkcCommon.Uint32
 }
 
 // NewReceipt creates a barebone transaction receipt.
@@ -88,7 +89,7 @@ func (r *Receipt) EncodeRLP(w io.Writer) error {
 	if account.IsSameReceipt(common.Address{}, r.ContractAddress) {
 		contractAddress = make([]byte, 0)
 	}
-	contractFullShardKey := Uint32(r.ContractFullShardKey)
+	contractFullShardKey := qkcCommon.Uint32(r.ContractFullShardKey)
 	data := &receiptRLP{
 		status,
 		r.CumulativeGasUsed,

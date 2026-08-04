@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package types
+package common
 
 import (
 	"encoding/hex"

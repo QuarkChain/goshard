@@ -35,6 +35,29 @@ func TestDefaultTokenID(t *testing.T) {
 	assert.Equal(t, TokenIDEncode("QKC"), DefaultTokenID)
 }
 
+// TestValidateTokenName pins the domain to pyquarkchain's [0-9A-Z]{1,12}: the names
+// TokenIDEncode accepts pass and encode identically through the checked form, and
+// everything it would panic on comes back as an error.
+func TestValidateTokenName(t *testing.T) {
+	for _, name := range []string{"QKC", "0", "QETC", "TOKEN123", TOKENMAX} {
+		assert.NoError(t, ValidateTokenName(name))
+		id, err := TokenIDEncodeChecked(name)
+		assert.NoError(t, err)
+		assert.Equal(t, TokenIDEncode(name), id)
+	}
+	for _, name := range []string{
+		"",              // TokenIDEncode indexes str[len-1] and panics
+		"lowercase",     // the reported case: "unknown character 108"
+		"QKC-2",         // punctuation
+		"QKÇ",           // non-ASCII, checked byte-wise like the encoder
+		"ZZZZZZZZZZZZZ", // 13 characters
+	} {
+		assert.Error(t, ValidateTokenName(name), "name %q", name)
+		_, err := TokenIDEncodeChecked(name)
+		assert.Error(t, err, "name %q", name)
+	}
+}
+
 func TestNewTokenBalanceMap(t *testing.T) {
 	m0 := make(map[uint64]*uint256.Int)
 	m0[3234] = testU256(1000)

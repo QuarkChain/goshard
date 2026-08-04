@@ -2,7 +2,7 @@
 
 // Uint32 uses pyquarkchain's fixed-width uint32 RLP form.
 
-package types
+package common
 
 import (
 	"encoding/binary"

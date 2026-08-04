@@ -26,6 +26,40 @@ import (
 // set when merging into the QuarkChain account trie encoding.
 const DefaultTokenID = uint64(35760)
 
+// TokenNameMaxLen is the longest encodable token name: TokenIDEncode(TOKENMAX)
+// is TOKENIDMAX, the largest id a uint64 holds.
+const TokenNameMaxLen = 12
+
+// ValidateTokenName checks name against pyquarkchain's token-name domain,
+// [0-9A-Z]{1,12} (quarkchain/utils.py token_id_encode). TokenIDEncode is a
+// verbatim port and panics outside that domain, so anything derived from parsed
+// config or a peer message has to come through here first.
+func ValidateTokenName(name string) error {
+	if name == "" {
+		return errors.New("token name is empty")
+	}
+	if len(name) > TokenNameMaxLen {
+		return fmt.Errorf("token name %q is longer than %d characters", name, TokenNameMaxLen)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') {
+			continue
+		}
+		return fmt.Errorf("token name %q has illegal character %q: only 0-9 and A-Z are allowed", name, c)
+	}
+	return nil
+}
+
+// TokenIDEncodeChecked is TokenIDEncode with the domain check reported as an
+// error instead of a panic.
+func TokenIDEncodeChecked(name string) (uint64, error) {
+	if err := ValidateTokenName(name); err != nil {
+		return 0, err
+	}
+	return TokenIDEncode(name), nil
+}
+
 // TokenTrieThreshold is the maximum number of non-zero token balances supported
 // by this list-only implementation. Accounts with > 16 MNT tokens (goquarkchain's
 // 0x01 trie format) are not implemented; supporting them would require a
