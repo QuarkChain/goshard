@@ -280,12 +280,10 @@ func (tx *EvmTx) toShardKey() uint32 {
 }
 
 func (tx *EvmTx) fromShardID() uint32 {
-	shardMask := uint32(qkcShardSize - 1)
-	return tx.fromFullShardKey() & shardMask
+	return uint32(0)
 }
 func (tx *EvmTx) toShardID() uint32 {
-	shardMask := uint32(qkcShardSize - 1)
-	return tx.toFullShardKey() & shardMask
+	return uint32(0)
 }
 
 // to returns the recipient address of the transaction.

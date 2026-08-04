@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -177,7 +178,7 @@ func TestWithSignatureDeepCopiesTransaction(t *testing.T) {
 }
 
 func TestNewTransactionInitializesNilBigInts(t *testing.T) {
-	fromFullShardKey, toFullShardKey := Uint32(0), Uint32(0)
+	fromFullShardKey, toFullShardKey := qkcCommon.Uint32(0), qkcCommon.Uint32(0)
 	tx := NewTransaction(&EvmTx{
 		NetworkID:        1,
 		FromFullShardKey: &fromFullShardKey,
