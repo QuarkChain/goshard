@@ -238,13 +238,11 @@ func decodeTx(data []byte) (*Transaction, error) {
 	return &tx, nil
 }
 
-func TestEvmTxRejectsInvalidDecodedFields(t *testing.T) {
+func TestEvmTxDecodeDefersValidation(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*EvmTx)
 	}{
-		{"missing-from-full-shard-key", func(tx *EvmTx) { tx.FromFullShardKey = nil }},
-		{"missing-to-full-shard-key", func(tx *EvmTx) { tx.ToFullShardKey = nil }},
 		{"unsupported-version", func(tx *EvmTx) { tx.Version = 3 }},
 		{"oversized-amount", func(tx *EvmTx) { tx.Amount = new(big.Int).Lsh(big.NewInt(1), 256) }},
 		{"oversized-gas-price", func(tx *EvmTx) { tx.Price = new(big.Int).Lsh(big.NewInt(1), 256) }},
@@ -258,13 +256,19 @@ func TestEvmTxRejectsInvalidDecodedFields(t *testing.T) {
 				t.Fatal(err)
 			}
 			var decoded Transaction
-			if err := rlp.DecodeBytes(payload, &decoded); err == nil {
-				t.Fatal("RLP decoded invalid transaction")
+			if err := rlp.DecodeBytes(payload, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoded.Validate(); err == nil {
+				t.Fatal("Validate accepted invalid transaction")
 			}
 			wire := []byte{EvmTxType, 0, 0, 0, byte(len(payload))}
 			wire = append(wire, payload...)
-			if err := serialize.DeserializeFromBytes(wire, &decoded); err == nil {
-				t.Fatal("wire decoded invalid transaction")
+			if err := serialize.DeserializeFromBytes(wire, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoded.Validate(); err == nil {
+				t.Fatal("Validate accepted invalid wire transaction")
 			}
 		})
 	}

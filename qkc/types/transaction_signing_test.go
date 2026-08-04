@@ -90,9 +90,10 @@ func TestSignTxVersionsRecoverSender(t *testing.T) {
 
 	for _, version := range []uint32{0, 1, 2} {
 		t.Run(string(rune('0'+version)), func(t *testing.T) {
-			toFullShardKey, gasTokenID, transferTokenID := uint32(0xc49c1950), uint64(0x111), uint64(0x222)
+			fromFullShardKey, toFullShardKey := uint32(0xc47decfd), uint32(0xc49c1950)
+			gasTokenID, transferTokenID := uint64(0x111), uint64(0x222)
 			if version == 2 {
-				toFullShardKey = 0xc47decfd
+				fromFullShardKey, toFullShardKey = 0xc47d0000, 0xc47d0000
 				gasTokenID = qkccommon.TokenIDEncode("QKC")
 				transferTokenID = gasTokenID
 			}
@@ -102,7 +103,7 @@ func TestSignTxVersionsRecoverSender(t *testing.T) {
 				big.NewInt(1000),
 				30000,
 				big.NewInt(10_000_000_000),
-				0xc47decfd,
+				fromFullShardKey,
 				toFullShardKey,
 				networkID,
 				version,
@@ -140,14 +141,22 @@ func TestQKCSignerRejectsInvalidFields(t *testing.T) {
 		wantErr          error
 	}{
 		{"cross-shard", 0xc47d0000, 0xc49c0000, defaultTokenID, defaultTokenID, ErrV2CrossShard},
+		{"non-zero-from-shard-key", 0xc47d0001, 0xc47d0000, defaultTokenID, defaultTokenID, ErrV2CrossShard},
+		{"non-zero-to-shard-key", 0xc47d0000, 0xc47d0001, defaultTokenID, defaultTokenID, ErrV2CrossShard},
 		{"non-default-gas-token", 0xc47d0000, 0xc47d0000, 1, defaultTokenID, ErrV2NonDefaultToken},
 		{"non-default-transfer-token", 0xc47d0000, 0xc47d0000, defaultTokenID, 1, ErrV2NonDefaultToken},
+		{"oversized-gas-token", 0xc47d0000, 0xc47d0000, qkccommon.TOKENIDMAX + 1, defaultTokenID, nil},
+		{"oversized-transfer-token", 0xc47d0000, 0xc47d0000, defaultTokenID, qkccommon.TOKENIDMAX + 1, nil},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			tx := NewEvmTransaction(0, account.Recipient{}, nil, 0, nil, test.fromFullShardKey, test.toFullShardKey, 3, 2, nil, test.gasTokenID, test.transferTokenID)
 			_, err := SignTx(tx, signer, key)
-			require.ErrorIs(t, err, test.wantErr)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+			} else {
+				require.Error(t, err)
+			}
 		})
 	}
 
@@ -171,4 +180,17 @@ func TestQKCSignerRejectsInvalidFields(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvalidNetworkID)
 		})
 	}
+}
+
+func TestSetSenderUsesMatchingSigner(t *testing.T) {
+	tx := NewEvmTransaction(0, account.Recipient{}, nil, 0, nil, 0, 0, 1, 0, nil, 0, 0)
+	want := account.BytesToIdentityRecipient([]byte{1})
+	signer := NewQKCSigner(1, 1)
+	tx.SetSender(signer, want)
+
+	got, err := Sender(signer, tx)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	_, err = Sender(NewQKCSigner(2, 1), tx)
+	require.Error(t, err)
 }

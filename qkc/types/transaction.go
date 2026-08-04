@@ -146,15 +146,10 @@ func newEvmTransaction(nonce uint64, to *account.Recipient, amount *big.Int, gas
 
 func (tx *EvmTx) encode(w io.Writer) error { return rlp.Encode(w, tx) }
 func (tx *EvmTx) decode(s *rlp.Stream) error {
-	if err := s.Decode(tx); err != nil {
-		return err
-	}
-	return tx.validate()
+	return s.Decode(tx)
 }
 
-// validate enforces intrinsic transaction-type rules on every decode path.
-// Inputs that break them are rejected at decode time, so an invalid version 2
-// transaction (cross-shard or non-default token) cannot be deserialized at all.
+// validate enforces transaction rules before signing or execution.
 func (tx *EvmTx) validate() error {
 	if tx.FromFullShardKey == nil {
 		return errors.New("missing from full shard key")
@@ -177,12 +172,18 @@ func (tx *EvmTx) validate() error {
 	if tx.Price != nil && tx.Price.Sign() < 0 {
 		return errors.New("gas price must not be negative")
 	}
+	if tx.GasTokenID > qkcCommon.TOKENIDMAX {
+		return errors.New("gas token ID exceeds maximum")
+	}
+	if tx.TransferTokenID > qkcCommon.TOKENIDMAX {
+		return errors.New("transfer token ID exceeds maximum")
+	}
 	if tx.Version == 2 {
 		defaultTokenID := qkcCommon.TokenIDEncode("QKC")
 		if tx.GasTokenID != defaultTokenID || tx.TransferTokenID != defaultTokenID {
 			return ErrV2NonDefaultToken
 		}
-		if tx.isCrossShard() {
+		if tx.fromChainID() != tx.toChainID() || tx.fromShardKey() != 0 || tx.toShardKey() != 0 {
 			return ErrV2CrossShard
 		}
 	}
@@ -517,6 +518,11 @@ func (tx *Transaction) SetVRS(v, r, s *big.Int) {
 	tx.clearCaches()
 }
 
+// SetSender caches addr for the given signing domain.
+func (tx *Transaction) SetSender(signer Signer, addr account.Recipient) {
+	tx.from.Store(sigCache{signer: signer, from: addr})
+}
+
 func (tx *Transaction) CopyEvmTx() (*Transaction, error) {
 	data, err := serialize.SerializeToBytes(tx)
 	if err != nil {
@@ -572,9 +578,6 @@ func (tx *Transaction) Deserialize(bb *serialize.ByteBuffer) error {
 			return err
 		}
 		if err := rlp.DecodeBytes(payload, inner); err != nil {
-			return err
-		}
-		if err := inner.validate(); err != nil {
 			return err
 		}
 		tx.inner = inner
