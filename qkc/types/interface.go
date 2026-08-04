@@ -21,7 +21,6 @@ type IHeader interface {
 	GetTime() uint64
 	GetCoinbaseAmount() *TokenBalances
 	GetDifficulty() *big.Int
-	GetTotalDifficulty() *big.Int
 	GetNonce() uint64
 	GetExtra() []byte
 	SetCoinbase(account.Address)
@@ -35,7 +34,7 @@ type IBlock interface {
 	Hash() common.Hash
 	NumberU64() uint64
 	IHeader() IHeader
-	WithMingResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock
+	WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock
 	Content() []IHashable
 	GetTrackingData() []byte
 	GetSize() common.StorageSize

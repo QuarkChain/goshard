@@ -95,6 +95,38 @@ func TestRootBlockEncoding(t *testing.T) {
 
 }
 
+func TestRootBlockSignRefreshesHash(t *testing.T) {
+	block := NewRootBlockWithHeader(&RootBlockHeader{
+		CoinbaseAmount:  NewEmptyTokenBalances(),
+		Difficulty:      big.NewInt(1),
+		TotalDifficulty: big.NewInt(1),
+	})
+	unsignedHash := block.Hash()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := block.SignWithPrivateKey(key); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := block.Hash(), block.Header().Hash(); got != want {
+		t.Fatalf("cached hash mismatch: got %x, want %x", got, want)
+	}
+	if block.Hash() == unsignedHash {
+		t.Fatal("signing did not refresh the cached hash")
+	}
+	if !block.header.VerifySignature(key.PublicKey) {
+		t.Fatal("generated signature did not verify")
+	}
+}
+
+func TestRootBlockWithBodyTrackingData(t *testing.T) {
+	block := NewRootBlockWithHeader(&RootBlockHeader{}).WithBody(nil, []byte{1, 2, 3})
+	if got, want := block.TrackingData(), []byte{1, 2, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tracking data mismatch: got %x, want %x", got, want)
+	}
+}
+
 func TestDataSize(t *testing.T) {
 	check := func(f string, got, want interface{}) {
 		if !reflect.DeepEqual(got, want) {

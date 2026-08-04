@@ -18,8 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-//go:generate gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
-
 var (
 	EmptyUncleHash = rlpHash([]*comtypes.Header(nil))
 )
@@ -88,7 +86,6 @@ func (h *MinorBlockHeader) GetPrevRootBlockHash() common.Hash { return h.PrevRoo
 func (h *MinorBlockHeader) GetCoinbase() account.Address      { return h.Coinbase }
 func (h *MinorBlockHeader) GetTime() uint64                   { return h.Time }
 func (h *MinorBlockHeader) GetDifficulty() *big.Int           { return new(big.Int).Set(h.Difficulty) }
-func (h *MinorBlockHeader) GetTotalDifficulty() *big.Int      { panic(-1) }
 func (h *MinorBlockHeader) GetNonce() uint64                  { return h.Nonce }
 func (h *MinorBlockHeader) GetGasLimit() *big.Int             { return h.GasLimit.Value }
 func (h *MinorBlockHeader) GetBranch() account.Branch         { return h.Branch }
@@ -256,6 +253,10 @@ func CopyMinorBlockMeta(m *MinorBlockMeta) *MinorBlockMeta {
 	if cpy.XShardGasLimit = new(serialize.Uint256); m.XShardGasLimit != nil && m.XShardGasLimit.Value != nil {
 		cpy.XShardGasLimit.Value = new(big.Int).Set(m.XShardGasLimit.Value)
 	}
+	if m.XShardTxCursorInfo != nil {
+		cursor := *m.XShardTxCursorInfo
+		cpy.XShardTxCursorInfo = &cursor
+	}
 	return &cpy
 }
 
@@ -276,8 +277,8 @@ func (b *MinorBlock) Serialize(w *[]byte) error {
 	offset := len(*w)
 	err := serialize.Serialize(w, extminorblock{
 		Header:       b.header,
-		Txs:          b.transactions,
 		Meta:         b.meta,
+		Txs:          b.transactions,
 		Trackingdata: b.trackingdata,
 	})
 
@@ -412,8 +413,12 @@ func (b *MinorBlock) IHeader() IHeader {
 	return b.header
 }
 
-// WithMingResult returns a new block with the data from b and update nonce and mixDigest
-func (b *MinorBlock) WithMingResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
+// WithMiningResult returns a new block with the data from b and update nonce and mixDigest.
+//
+// signature is ignored: minor block headers carry no signature field (only
+// RootBlockHeader does), so there is nowhere to put it. The parameter exists
+// because IBlock is shared with RootBlock.
+func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
 	cpy := CopyMinorBlockHeader(b.header)
 	cpy.Nonce = nonce
 	cpy.MixDigest = mixDigest
@@ -530,12 +535,17 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 		trackingdata: []byte{},
 	}
 }
+
+// AddTx appends to the body without touching meta or header, so it leaves
+// meta.TxHash, header.MetaHash, and any Hash() already cached stale. Callers
+// must Finalize before relying on Hash(); Finalize recomputes both hashes and
+// refreshes the cache.
 func (h *MinorBlock) AddTx(tx *Transaction) {
 	h.transactions = append(h.transactions, tx)
 }
 
 func GetEmptyMinorBlock() *MinorBlock {
-	return NewMinorBlock(getDefaultMinorBlockHeader(), getDefauleMinorBlockMeta(), nil, nil, nil)
+	return NewMinorBlock(getDefaultMinorBlockHeader(), getDefaultMinorBlockMeta(), nil, nil, nil)
 }
 
 func getDefaultMinorBlockHeader() *MinorBlockHeader {
@@ -547,7 +557,7 @@ func getDefaultMinorBlockHeader() *MinorBlockHeader {
 	}
 }
 
-func getDefauleMinorBlockMeta() *MinorBlockMeta {
+func getDefaultMinorBlockMeta() *MinorBlockMeta {
 	return &MinorBlockMeta{
 		XShardGasLimit: &serialize.Uint256{Value: params.DefaultBlockGasLimit},
 	}

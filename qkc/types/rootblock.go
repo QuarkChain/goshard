@@ -319,8 +319,8 @@ func (b *RootBlock) Size() common.StorageSize {
 	return common.StorageSize(len(bytes))
 }
 
-// WithMingResult returns a new block with the data from b and update nonce and mixDigest
-func (b *RootBlock) WithMingResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
+// WithMiningResult returns a new block with the data from b and update nonce and mixDigest
+func (b *RootBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
 	cpy := CopyRootBlockHeader(b.header)
 	cpy.Nonce = nonce
 	cpy.MixDigest = mixDigest
@@ -338,6 +338,7 @@ func (b *RootBlock) SignWithPrivateKey(prv *ecdsa.PrivateKey) error {
 	}
 
 	copy(b.header.Signature[:], sig)
+	b.hash.Store(b.header.Hash())
 	return nil
 }
 
@@ -358,7 +359,7 @@ func (b *RootBlock) WithBody(minorBlockHeaders MinorBlockHeaders, trackingdata [
 	block := &RootBlock{
 		header:            CopyRootBlockHeader(b.header),
 		minorBlockHeaders: make(MinorBlockHeaders, len(minorBlockHeaders)),
-		trackingdata:      make([]byte, len(b.trackingdata)),
+		trackingdata:      make([]byte, len(trackingdata)),
 	}
 
 	copy(block.minorBlockHeaders, minorBlockHeaders)
@@ -406,6 +407,10 @@ func (b *RootBlock) Finalize(coinbaseAmount *TokenBalances, coinbaseAddress *acc
 	return b
 }
 
+// AddMinorBlockHeader appends to the body without touching the header, so it
+// leaves header.MinorHeaderHash — and therefore any Hash() already cached —
+// stale. Callers must Finalize before relying on Hash(); Finalize recomputes the
+// merkle root and refreshes the cache.
 func (b *RootBlock) AddMinorBlockHeader(header *MinorBlockHeader) {
 	b.minorBlockHeaders = append(b.minorBlockHeaders, header)
 }
