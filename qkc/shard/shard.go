@@ -96,10 +96,10 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		return nil, fmt.Errorf("shard 0x%08x is not assigned to slave %q (owns %s)",
 			fullShardID, ctx.ID, formatShardIDs(ctx.FullShardIDs()))
 	}
+	// Non-nil for every owned id: Validate resolves each entry of the slave's
+	// FULL_SHARD_ID_LIST before the config is accepted. A nil here would still be
+	// caught by ShardChainConfig below, before any database is opened.
 	shardCfg := ctx.Quarkchain.GetShardConfigByFullShardID(fullShardID)
-	if shardCfg == nil {
-		return nil, fmt.Errorf("shard 0x%08x is not configured in any chain", fullShardID)
-	}
 	chainConfig, err := qkc.ShardChainConfig(ctx.Quarkchain, shardCfg)
 	if err != nil {
 		return nil, fmt.Errorf("shard 0x%08x: %w", fullShardID, err)

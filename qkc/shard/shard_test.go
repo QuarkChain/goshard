@@ -248,11 +248,45 @@ func TestShardReopenMissingGenesisState(t *testing.T) {
 	})
 }
 
+// TestShardNewRejectsUnknownShard: a full shard id that no chain configures is
+// refused, and refused before a datadir is written. Ownership is the first gate,
+// so the normal path reports the assignment; the second case forces the id into
+// the slave's own list — a state Validate rejects at load — to pin that a shard
+// config that fails to resolve still fails loudly ahead of any database.
 func TestShardNewRejectsUnknownShard(t *testing.T) {
-	ctx, root := bootEnv(t, fixtureMainnet)
-	_, err := New(ctx, account.NewBranch(0x00990099), root, t.TempDir(), Options{})
-	if err == nil || !strings.Contains(err.Error(), "not configured") {
-		t.Fatalf("shard.New(unknown) err = %v, want 'not configured'", err)
+	const unknownShardID = uint32(0x00990099)
+
+	for _, tc := range []struct {
+		name  string
+		owned bool
+		want  string
+	}{
+		{name: "unowned", want: "not assigned to slave \"S0\""},
+		{name: "forced into the owned list", owned: true, want: "shard config is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, root := bootEnv(t, fixtureMainnet)
+			datadir := t.TempDir()
+			if ctx.Quarkchain.GetShardConfigByFullShardID(unknownShardID) != nil {
+				t.Fatalf("0x%08x resolves in the fixture, pick an id no chain configures", unknownShardID)
+			}
+			if tc.owned {
+				ctx.Slave.FullShardList = append(ctx.Slave.FullShardList, unknownShardID)
+			}
+
+			_, err := New(ctx, account.NewBranch(unknownShardID), root, datadir, Options{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("shard.New(unknown) err = %v, want %q", err, tc.want)
+			}
+			// Whichever gate rejected it, the operator gets the shard id and the
+			// datadir is untouched.
+			if !strings.Contains(err.Error(), fmt.Sprintf("0x%08x", unknownShardID)) {
+				t.Errorf("err = %q, want the rejected shard id named", err)
+			}
+			if _, err := os.Stat(filepath.Join(datadir, DBDirName(unknownShardID))); !os.IsNotExist(err) {
+				t.Errorf("stat unknown shard db dir = %v, want it never created", err)
+			}
+		})
 	}
 }
 
