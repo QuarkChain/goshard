@@ -14,4 +14,8 @@ var (
 	// ErrNotActive is returned when an RPC is attempted on a connection that
 	// has not been started (state != ACTIVE).
 	ErrNotActive = errors.New("connection not active")
+
+	// ErrHandlerNotImplemented indicates that the protocol handler exists but
+	// the corresponding business logic has not been migrated yet.
+	ErrHandlerNotImplemented = errors.New("handler not implemented")
 )

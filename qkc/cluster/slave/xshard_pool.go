@@ -190,8 +190,7 @@ func (p *XshardPool) RemoveTarget(fullShardID uint32) {
 }
 
 // SendXshardTx broadcasts xshard transactions to all active connections for the
-// target shard via RPC. Returns the first successful response or an error if no
-// connection exists or all connections fail.
+// target shard via RPC. Returns a successful protocol response or an error if all attempts fail.
 //
 // This matches Python's broadcast_xshard_tx_list behavior: sends to ALL connections
 // concurrently and checks that all responses have error_code == 0.
@@ -231,13 +230,20 @@ func (p *XshardPool) SendXshardTx(ctx context.Context, fullShardID uint32, paylo
 	}
 	wg.Wait()
 
-	// Check all responses (matches Python's check(all([response.error_code == 0 ...])))
+	// Validate every response: decode as AddXshardTxListResponse, check opcode
+	// and error_code == 0 (matches Python's check(all([response.error_code == 0 for _, response, _ in responses]))).
 	var firstErr error
 	var firstResp *wire.Frame
 	for _, r := range results {
 		if r.err != nil {
 			if firstErr == nil {
 				firstErr = r.err
+			}
+			continue
+		}
+		if _, err := ParseAddXshardTxListResponse(r.resp); err != nil {
+			if firstErr == nil {
+				firstErr = err
 			}
 			continue
 		}

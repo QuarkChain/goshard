@@ -21,9 +21,10 @@ func serializeBytes(v any) ([]byte, error) {
 	return serialize.SerializeToBytes(v)
 }
 
-// deserializeBytes deserializes a wire message from payload bytes.
+// deserializeBytes deserializes a complete wire message from a frame payload.
+// Trailing bytes are rejected to ensure one network frame maps to one message.
 func deserializeBytes(p []byte, v any) error {
-	return serialize.Deserialize(serialize.NewByteBuffer(p), v)
+	return serialize.DeserializeFromBytes(p, v)
 }
 
 // TypedHandler processes a deserialized request and returns a deserialized
@@ -492,12 +493,9 @@ func (c *baseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeri
 
 	resp, err := handler(req)
 	if err != nil {
-		// NOTE: All handler errors close the connection. This matches Python's
-		// close_with_error pattern and is intentional for protocol safety.
-		// The QuarkChain cluster protocol treats handler errors as fatal because
-		// there's no error response mechanism — the only way to signal failure
-		// is to close the connection. If recoverable errors are needed in the
-		// future, the protocol would need to be extended with error responses.
+		// Handler errors are fatal: the protocol has no error-response
+		// mechanism, so closing the connection is the only way to signal
+		// failure (matches Python's close_with_error).
 		c.log.Error("handler error", "opcode", frame.Opcode, "err", err)
 		c.Close()
 		return

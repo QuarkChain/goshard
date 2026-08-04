@@ -88,10 +88,10 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 
 		byte(wire.ClusterOpPing): xc.handlePing,
 
-		// ── Migration stubs ─────────────────────────────────────────────
-		// These handlers exist only to preserve protocol compatibility.
-		// Real implementations must be added outside the connection layer.
-		// After migration, remove these stub registrations and handlers.
+		// ── Migration stubs ─────────────────────────────────────────────────
+		// Wire messages are registered for protocol opcode coverage.
+		// Business logic is out of scope for this migration; handlers return
+		// ErrHandlerNotImplemented until the corresponding implementation is migrated.
 
 		byte(wire.ClusterOpAddXshardTxListRequest):      xc.handleAddXshardTxList,
 		byte(wire.ClusterOpBatchAddXshardTxListRequest): xc.handleBatchAddXshardTxList,
@@ -131,27 +131,28 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 	}, nil
 }
 
-// handleAddXshardTxList is the built-in ADD_XSHARD_TX_LIST_REQUEST stub.
-// It returns error_code=0 so the protocol response is compatible with Python's
-// AddXshardTxListResponse wire format.
+// handleAddXshardTxList is the ADD_XSHARD_TX_LIST_REQUEST stub.
+//
+// The wire message is registered for protocol coverage, but xshard transaction
+// processing is not part of this migration.
 func (x *XshardConn) handleAddXshardTxList(req any) (any, error) {
 	_ = req.(*wire.AddXshardTxListRequest)
 
-	// TODO: implement xshard transaction processing.
-	// Current implementation is a protocol compatibility stub only.
+	// TODO(xshard): implement xshard transaction processing.
 	x.log.Warn("AddXshardTxList stub invoked — transaction will be discarded", "remote", x.RemoteAddr())
-	return &wire.AddXshardTxListResponse{ErrorCode: 0}, nil
+	return nil, ErrHandlerNotImplemented
 }
 
-// handleBatchAddXshardTxList is the built-in BATCH_ADD_XSHARD_TX_LIST_REQUEST
-// stub. It returns error_code=0 matching Python's response format.
+// handleBatchAddXshardTxList is the BATCH_ADD_XSHARD_TX_LIST_REQUEST stub.
+//
+// The wire message is registered for protocol coverage, but batch xshard
+// processing is not part of this migration.
 func (x *XshardConn) handleBatchAddXshardTxList(req any) (any, error) {
 	_ = req.(*wire.BatchAddXshardTxListRequest)
 
-	// TODO: implement xshard transaction processing.
-	// Current implementation is a protocol compatibility stub only.
+	// TODO(xshard): implement batch xshard transaction processing.
 	x.log.Warn("BatchAddXshardTxList stub invoked — transactions will be discarded", "remote", x.RemoteAddr())
-	return &wire.BatchAddXshardTxListResponse{ErrorCode: 0}, nil
+	return nil, ErrHandlerNotImplemented
 }
 
 // SetRemoteIdentity sets the peer identity for outbound xshard connections that
@@ -229,4 +230,27 @@ func (x *XshardConn) SendXshardTxList(ctx context.Context, payload []byte) (*wir
 // Python's BATCH_ADD_XSHARD_TX_LIST_REQUEST is an RPC (in SLAVE_OP_RPC_MAP).
 func (x *XshardConn) SendBatchXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
 	return x.baseConn.SendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), payload)
+}
+
+// ParseAddXshardTxListResponse decodes and validates an
+// AddXshardTxListResponse frame.
+//
+// A non-zero error_code indicates that the remote side rejected the
+// operation and is returned as an error.
+func ParseAddXshardTxListResponse(frame *wire.Frame) (*wire.AddXshardTxListResponse, error) {
+	if frame == nil {
+		return nil, fmt.Errorf("nil xshard response frame")
+	}
+	if frame.Opcode != byte(wire.ClusterOpAddXshardTxListResponse) {
+		return nil, fmt.Errorf("unexpected xshard response opcode: got 0x%x, want 0x%x",
+			frame.Opcode, byte(wire.ClusterOpAddXshardTxListResponse))
+	}
+	var resp wire.AddXshardTxListResponse
+	if err := deserializeBytes(frame.Payload, &resp); err != nil {
+		return nil, fmt.Errorf("deserialize AddXshardTxListResponse: %w", err)
+	}
+	if resp.ErrorCode != 0 {
+		return &resp, fmt.Errorf("AddXshardTxList failed: error_code=%d", resp.ErrorCode)
+	}
+	return &resp, nil
 }

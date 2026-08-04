@@ -256,83 +256,6 @@ func TestXshardConn_CloseWakesPendingRPC(t *testing.T) {
 	}
 }
 
-// TestXshardConn_SendXshardTxList verifies RPC mode for AddXshardTxListRequest.
-// The handler must return a proper response (AddXshardTxListResponse).
-func TestXshardConn_SendXshardTxList(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	txList := wire.RawBytes([]byte("tx-list"))
-	req := &wire.AddXshardTxListRequest{
-		Branch:         0x00010001,
-		MinorBlockHash: [32]byte{1, 2, 3},
-		TxList:         &txList,
-	}
-	payload, err := serialize.SerializeToBytes(req)
-	if err != nil {
-		t.Fatalf("serialize request: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.SendXshardTxList(ctx, payload)
-	if err != nil {
-		t.Fatalf("send xshard tx list: %v", err)
-	}
-	if resp.Opcode != byte(wire.ClusterOpAddXshardTxListResponse) {
-		t.Fatalf("unexpected response opcode 0x%x", resp.Opcode)
-	}
-
-	var xshardResp wire.AddXshardTxListResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &xshardResp); err != nil {
-		t.Fatalf("deserialize response: %v", err)
-	}
-	if xshardResp.ErrorCode != 0 {
-		t.Fatalf("expected error_code 0, got %d", xshardResp.ErrorCode)
-	}
-}
-
-// TestXshardConn_SendBatchXshardTxList verifies RPC mode for BatchAddXshardTxListRequest.
-func TestXshardConn_SendBatchXshardTxList(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	txList := wire.RawBytes([]byte("tx1"))
-	req := &wire.BatchAddXshardTxListRequest{
-		AddXshardTxListRequestList: []wire.AddXshardTxListRequest{
-			{Branch: 0x00010001, MinorBlockHash: [32]byte{1, 2, 3}, TxList: &txList},
-		},
-	}
-	payload, err := serialize.SerializeToBytes(req)
-	if err != nil {
-		t.Fatalf("serialize request: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.SendBatchXshardTxList(ctx, payload)
-	if err != nil {
-		t.Fatalf("send batch xshard tx list: %v", err)
-	}
-	if resp.Opcode != byte(wire.ClusterOpBatchAddXshardTxListResponse) {
-		t.Fatalf("unexpected response opcode 0x%x", resp.Opcode)
-	}
-
-	var batchResp wire.BatchAddXshardTxListResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &batchResp); err != nil {
-		t.Fatalf("deserialize response: %v", err)
-	}
-	if batchResp.ErrorCode != 0 {
-		t.Fatalf("expected error_code 0, got %d", batchResp.ErrorCode)
-	}
-}
-
 func TestXshardPool_AddGetRemove(t *testing.T) {
 	pool := NewXshardPool(log.New())
 	defer pool.Close()
@@ -583,5 +506,123 @@ func TestXshardConn_RecordPingOnlyOnce(t *testing.T) {
 	}
 	if len(server.RemoteFullShardIDList()) != len(firstShards) {
 		t.Fatalf("remote shard list changed: got %v, expected %v", server.RemoteFullShardIDList(), firstShards)
+	}
+}
+
+// TestParseAddXshardTxListResponse_NonZeroErrorCode verifies that a non-zero
+// error_code in an AddXshardTxListResponse is treated as an operation failure.
+func TestParseAddXshardTxListResponse_NonZeroErrorCode(t *testing.T) {
+	const errCode uint32 = 2
+	payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: errCode})
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	frame := &wire.Frame{
+		Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
+		Payload: payload,
+	}
+	resp, err := ParseAddXshardTxListResponse(frame)
+	if err == nil {
+		t.Fatal("expected error for non-zero error_code, got nil")
+	}
+	if resp == nil || resp.ErrorCode != errCode {
+		t.Fatalf("expected decoded response with error_code %d, got resp=%v err=%v", errCode, resp, err)
+	}
+}
+
+// TestParseAddXshardTxListResponse_ZeroErrorCode verifies that a zero
+// error_code is accepted as success.
+func TestParseAddXshardTxListResponse_ZeroErrorCode(t *testing.T) {
+	payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: 0})
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	frame := &wire.Frame{
+		Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
+		Payload: payload,
+	}
+	resp, err := ParseAddXshardTxListResponse(frame)
+	if err != nil {
+		t.Fatalf("expected success for error_code 0, got: %v", err)
+	}
+	if resp.ErrorCode != 0 {
+		t.Fatalf("expected error_code 0, got %d", resp.ErrorCode)
+	}
+}
+
+// TestParseAddXshardTxListResponse_WrongOpcode verifies that a response frame
+// with an unexpected opcode is rejected.
+func TestParseAddXshardTxListResponse_WrongOpcode(t *testing.T) {
+	payload, _ := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: 0})
+	frame := &wire.Frame{
+		Opcode:  byte(wire.ClusterOpPong),
+		Payload: payload,
+	}
+	if _, err := ParseAddXshardTxListResponse(frame); err == nil {
+		t.Fatal("expected error for wrong opcode, got nil")
+	}
+}
+
+// TestDispatch_TrailingBytesClosesConnection verifies that a frame payload with
+// trailing bytes after a valid message causes the connection to close. The
+// deserializer must consume exactly the payload length — no more, no less.
+func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
+	client, server, cleanup := newTestConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("client"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+	malformedPayload := append(pingPayload, 0xFF)
+
+	writeRawFrame(t, client.conn, &wire.Frame{
+		Opcode:  byte(wire.ClusterOpPing),
+		RPCID:   1,
+		Payload: malformedPayload,
+	})
+
+	select {
+	case <-server.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not close connection after trailing-bytes payload")
+	}
+}
+
+// TestDispatch_ExactPayloadProcessesNormally verifies that a well-formed
+// payload with no trailing bytes is processed and the connection stays open.
+func TestDispatch_ExactPayloadProcessesNormally(t *testing.T) {
+	client, server, cleanup := newTestConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("client"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
+	if err != nil {
+		t.Fatalf("send ping rpc: %v", err)
+	}
+	if resp.Opcode != byte(wire.ClusterOpPong) {
+		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.ClusterOpPong, resp.Opcode)
+	}
+	if server.IsClosed() {
+		t.Fatal("server should remain open after well-formed exchange")
 	}
 }
