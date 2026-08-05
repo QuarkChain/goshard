@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package slave
+package conn
 
 import (
 	"context"
@@ -16,13 +16,21 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
+// ── fake transport ────────────────────────────────────────────────────────────
+
 type fakeFrameTransport struct {
-	frames     chan *wire.Frame
-	writes     chan *wire.Frame
-	closed     chan struct{}
-	closeOnce  sync.Once
-	closeMu    sync.Mutex
-	closeCount int
+	frames            chan *wire.Frame
+	writes            chan *wire.Frame
+	closed            chan struct{}
+	closeOnce         sync.Once
+	closeMu           sync.Mutex
+	closeCount        int
+	writeMu           sync.Mutex
+	writing           bool
+	closeWhileWriting bool
+	writeStarted      chan struct{}
+	writeOnce         sync.Once
+	releaseWrite      chan struct{}
 }
 
 func newFakeFrameTransport() *fakeFrameTransport {
@@ -45,6 +53,16 @@ func (t *fakeFrameTransport) readFrame() (*wire.Frame, error) {
 func (t *fakeFrameTransport) writeFrame(frame *wire.Frame) error {
 	select {
 	case t.writes <- frame:
+		if t.releaseWrite != nil {
+			t.writeMu.Lock()
+			t.writing = true
+			t.writeMu.Unlock()
+			t.writeOnce.Do(func() { close(t.writeStarted) })
+			<-t.releaseWrite
+			t.writeMu.Lock()
+			t.writing = false
+			t.writeMu.Unlock()
+		}
 		return nil
 	case <-t.closed:
 		return errors.New("fake transport closed")
@@ -53,6 +71,9 @@ func (t *fakeFrameTransport) writeFrame(frame *wire.Frame) error {
 
 func (t *fakeFrameTransport) close() error {
 	t.closeOnce.Do(func() {
+		t.writeMu.Lock()
+		t.closeWhileWriting = t.writing
+		t.writeMu.Unlock()
 		t.closeMu.Lock()
 		t.closeCount++
 		t.closeMu.Unlock()
@@ -71,6 +92,8 @@ func (t *fakeFrameTransport) closes() int {
 	return t.closeCount
 }
 
+// ── TCP test pair helper ──────────────────────────────────────────────────────
+
 // writeRawFrame writes a raw frame directly to the underlying TCP connection,
 // bypassing the connection's frame writer. Used to craft malformed/invalid frames
 // for protocol-validation tests.
@@ -81,9 +104,109 @@ func writeRawFrame(t *testing.T, conn net.Conn, frame *wire.Frame) {
 	}
 }
 
+// newTestBaseConnPair creates a pair of BaseConns connected over a local TCP
+// socket, with PING/PONG serializer and a minimal PING handler registered on the
+// server side. The caller is responsible for calling cleanup.
+func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	var serverConn net.Conn
+	var acceptErr error
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		serverConn, acceptErr = ln.Accept()
+		ln.Close()
+	}()
+
+	clientConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	<-accepted
+	if acceptErr != nil {
+		t.Fatalf("accept: %v", acceptErr)
+	}
+
+	logger := log.New()
+	readFrame := func(r io.Reader) (*wire.Frame, error) {
+		return wire.ReadFrameNoMeta(r, 0)
+	}
+	client = NewBaseConnFromConn(clientConn, readFrame, wire.WriteFrameNoMeta, logger)
+	server = NewBaseConnFromConn(serverConn, readFrame, wire.WriteFrameNoMeta, logger)
+
+	// Register PING serializer and a minimal handler on the server so it can
+	// deserialize PING requests and produce PONG responses.
+	server.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](),
+	})
+	server.RegisterTypedHandlers(map[byte]TypedHandler{
+		byte(wire.ClusterOpPing): func(req any) (any, error) {
+			return &wire.PongResponse{}, nil
+		},
+	})
+
+	cleanup = func() {
+		client.Close()
+		server.Close()
+	}
+	return
+}
+
+// ── baseConn unit tests (fake transport) ──────────────────────────────────────
+
+func TestBaseConn_CloseWaitsForOutboundWrite(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writeStarted = make(chan struct{})
+	tr.releaseWrite = make(chan struct{})
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+
+	select {
+	case <-tr.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fake transport did not start writing")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while write was blocked")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(tr.releaseWrite)
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after write completed")
+	}
+	if tr.closeWhileWriting {
+		t.Fatal("transport close ran concurrently with write")
+	}
+	if err := <-result; err != ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
+	}
+}
+
 func TestBaseConn_ConcurrentSendRPCMetaAndClose(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := newBaseConn(tr, log.New())
+	conn := NewBaseConn(tr, log.New())
 	conn.Start()
 
 	const senders = 64
@@ -116,9 +239,9 @@ func TestBaseConn_ConcurrentSendRPCMetaAndClose(t *testing.T) {
 	}
 }
 
-func TestBaseConn_LateResponseAfterTimeoutKeepsConnectionActive(t *testing.T) {
+func TestBaseConn_LateResponseAfterTimeoutClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := newBaseConn(tr, log.New())
+	conn := NewBaseConn(tr, log.New())
 	conn.Start()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -136,14 +259,10 @@ func TestBaseConn_LateResponseAfterTimeoutKeepsConnectionActive(t *testing.T) {
 	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 1}
 
 	select {
-	case <-time.After(20 * time.Millisecond):
-		if !conn.IsActive() {
-			t.Fatal("late response closed the connection")
-		}
 	case <-conn.WaitUntilClosed():
-		t.Fatal("late response closed the connection")
+	case <-time.After(time.Second):
+		t.Fatal("late response did not close the connection")
 	}
-	defer conn.Close()
 
 	conn.pendingMu.Lock()
 	pending := len(conn.pending)
@@ -155,7 +274,7 @@ func TestBaseConn_LateResponseAfterTimeoutKeepsConnectionActive(t *testing.T) {
 
 func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := newBaseConn(tr, log.New())
+	conn := NewBaseConn(tr, log.New())
 	conn.Start()
 	defer conn.Close()
 
@@ -185,7 +304,7 @@ func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 
 func TestBaseConn_DoubleClose(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := newBaseConn(tr, log.New())
+	conn := NewBaseConn(tr, log.New())
 
 	if err := conn.Close(); err != nil {
 		t.Fatalf("first Close failed: %v", err)
@@ -198,70 +317,11 @@ func TestBaseConn_DoubleClose(t *testing.T) {
 	}
 }
 
-// newTestConnPair creates a pair of XshardConns connected over a local TCP
-// socket. The caller is responsible for calling cleanup.
-func newTestConnPair(t *testing.T) (client, server *XshardConn, cleanup func()) {
-	t.Helper()
-	return newTestConnPairWithIdentity(t, []byte("client-slave"), []uint32{0x00010001}, []byte("server-slave"), []uint32{0x00030004})
-}
-
-func newTestConnPairWithIdentity(t *testing.T, clientID []byte, clientShards []uint32, serverID []byte, serverShards []uint32) (client, server *XshardConn, cleanup func()) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-
-	var serverConn net.Conn
-	var acceptErr error
-	accepted := make(chan struct{})
-	go func() {
-		defer close(accepted)
-		serverConn, acceptErr = ln.Accept()
-		ln.Close()
-	}()
-
-	clientConn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	<-accepted
-	if acceptErr != nil {
-		t.Fatalf("accept: %v", acceptErr)
-	}
-
-	logger := log.New()
-	client = NewXshardConnFromConn(clientConn, 0, clientID, clientShards, logger) // 0 = no limit (matches Python)
-	server = NewXshardConnFromConn(serverConn, 0, serverID, serverShards, logger)
-	cleanup = func() {
-		client.Close()
-		server.Close()
-	}
-	return
-}
-
-// TestDispatch_UnsupportedOpcodeClosesConnection verifies that receiving a
-// frame for an opcode with no registered handler causes the connection to close.
-func TestDispatch_UnsupportedOpcodeClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := client.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), []byte("payload"))
-	if err == nil {
-		t.Fatal("expected error due to connection close, got nil")
-	}
-}
+// ── baseConn integration tests (TCP pair) ─────────────────────────────────────
 
 // TestBaseConn_CloseWakesPendingRPC verifies that Close wakes all pending RPCs.
 func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {
-	client, _, cleanup := newTestConnPair(t)
+	client, _, cleanup := newTestBaseConnPair(t)
 	defer cleanup()
 
 	// Server intentionally left unstarted so it never replies.
@@ -292,7 +352,7 @@ func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {
 // TestBaseConn_RPCIDMonotonic verifies RPC ID monotonic validation.
 // Sending a duplicate RPC ID causes the server to close the connection.
 func TestBaseConn_RPCIDMonotonic(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
+	client, server, cleanup := newTestBaseConnPair(t)
 	defer cleanup()
 
 	server.Start()
@@ -329,7 +389,7 @@ func TestBaseConn_RPCIDMonotonic(t *testing.T) {
 // TestBaseConn_RPCIDDecreasing verifies that a decreasing RPC ID closes the
 // connection.
 func TestBaseConn_RPCIDDecreasing(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
+	client, server, cleanup := newTestBaseConnPair(t)
 	defer cleanup()
 
 	server.Start()
@@ -362,7 +422,7 @@ func TestBaseConn_RPCIDDecreasing(t *testing.T) {
 // TestBaseConn_SequentialRPCs verifies that multiple sequential RPCs work
 // correctly.
 func TestBaseConn_SequentialRPCs(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
+	client, server, cleanup := newTestBaseConnPair(t)
 	defer cleanup()
 
 	server.Start()
@@ -382,9 +442,23 @@ func TestBaseConn_SequentialRPCs(t *testing.T) {
 			t.Fatalf("rpc %d failed: %v", i+1, err)
 		}
 	}
+}
 
-	if !server.WaitUntilPingReceived() {
-		t.Fatal("server did not receive ping")
+// TestDispatch_UnsupportedOpcodeClosesConnection verifies that receiving a
+// frame for an opcode with no registered handler causes the connection to close.
+func TestDispatch_UnsupportedOpcodeClosesConnection(t *testing.T) {
+	client, server, cleanup := newTestBaseConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := client.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), []byte("payload"))
+	if err == nil {
+		t.Fatal("expected error due to connection close, got nil")
 	}
 }
 
@@ -392,7 +466,7 @@ func TestBaseConn_SequentialRPCs(t *testing.T) {
 // trailing bytes after a valid message causes the connection to close. The
 // deserializer must consume exactly the payload length — no more, no less.
 func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
+	client, server, cleanup := newTestBaseConnPair(t)
 	defer cleanup()
 
 	server.Start()
@@ -423,7 +497,7 @@ func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
 // TestDispatch_ExactPayloadProcessesNormally verifies that a well-formed
 // payload with no trailing bytes is processed and the connection stays open.
 func TestDispatch_ExactPayloadProcessesNormally(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
+	client, server, cleanup := newTestBaseConnPair(t)
 	defer cleanup()
 
 	server.Start()
