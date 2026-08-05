@@ -215,8 +215,8 @@ func TestXshardPool_AddGetRemove(t *testing.T) {
 	}
 
 	pool.Remove(0x00010001, conn1)
-	if got := pool.OutboundSize(); got != 2 {
-		t.Fatalf("expected pool outbound size 2 after remove, got %d", got)
+	if got := pool.OutboundSize(); got != 1 {
+		t.Fatalf("expected pool outbound size 1 after remove, got %d", got)
 	}
 	conns = pool.Get(0x00010001)
 	if len(conns) != 1 || conns[0] != conn2 {
@@ -224,9 +224,150 @@ func TestXshardPool_AddGetRemove(t *testing.T) {
 	}
 
 	targets := pool.Targets()
-	if len(targets) != 2 {
-		t.Fatalf("expected 2 targets, got %d", len(targets))
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
 	}
+}
+
+func TestXshardPool_RemoveRemovesAllRoutes(t *testing.T) {
+	client, server, cleanup := newTestConnPairWithIdentity(
+		t,
+		[]byte("client-slave"),
+		[]uint32{0x00010001},
+		[]byte("server-slave"),
+		[]uint32{0x00030004, 0x00030005},
+	)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+	pool := NewXshardPool(log.New())
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
+		t.Fatalf("verify and add: %v", err)
+	}
+
+	pool.Remove(0x00030004, client)
+	for _, shardID := range []uint32{0x00030004, 0x00030005} {
+		if conns := pool.Get(shardID); len(conns) != 0 {
+			t.Fatalf("route 0x%x still contains %d connections", shardID, len(conns))
+		}
+	}
+	if pool.HasSlaveID([]byte("server-slave")) {
+		t.Fatal("slave ID remains after removing all routes")
+	}
+}
+
+func TestXshardPool_RemoveTargetRemovesAllRoutes(t *testing.T) {
+	client, server, cleanup := newTestConnPairWithIdentity(
+		t,
+		[]byte("client-slave"),
+		[]uint32{0x00010001},
+		[]byte("server-slave"),
+		[]uint32{0x00030004, 0x00030005},
+	)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+	pool := NewXshardPool(log.New())
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
+		t.Fatalf("verify and add: %v", err)
+	}
+
+	pool.RemoveTarget(0x00030004)
+	for _, shardID := range []uint32{0x00030004, 0x00030005} {
+		if conns := pool.Get(shardID); len(conns) != 0 {
+			t.Fatalf("route 0x%x still contains %d connections", shardID, len(conns))
+		}
+	}
+	if pool.HasSlaveID([]byte("server-slave")) {
+		t.Fatal("slave ID remains after removing target")
+	}
+}
+
+func TestXshardPool_ClosedConnectionEvictedFromAllRoutes(t *testing.T) {
+	client, server, cleanup := newTestConnPairWithIdentity(
+		t,
+		[]byte("client-slave"),
+		[]uint32{0x00010001},
+		[]byte("server-slave"),
+		[]uint32{0x00030004, 0x00030005},
+	)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+	pool := NewXshardPool(log.New())
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
+		t.Fatalf("verify and add: %v", err)
+	}
+
+	client.Close()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(pool.Targets()) == 0 && !pool.HasSlaveID([]byte("server-slave")) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("closed connection was not evicted: targets=%v has_slave_id=%v",
+		pool.Targets(), pool.HasSlaveID([]byte("server-slave")))
+}
+
+func TestXshardPool_DelayedWatcherDoesNotDeleteReusedSlaveID(t *testing.T) {
+	connA, connB, cleanup := newTestConnPair(t)
+	defer cleanup()
+
+	const remoteID = "same-slave"
+	connA.SetRemoteIdentity([]byte(remoteID), []uint32{0x00030004})
+	connB.SetRemoteIdentity([]byte(remoteID), []uint32{0x00030005})
+	pool := NewXshardPool(log.New())
+	defer pool.Close()
+
+	pool.mu.Lock()
+	pool.conns[0x00030004] = []*XshardConn{connA}
+	pool.slaveIDs[remoteID] = true
+	pool.watchConnectionLocked(connA)
+
+	// Simulate RemoveTarget completing before the old connection's watcher runs.
+	pool.removeConnectionLocked(connA)
+	pool.conns[0x00030005] = []*XshardConn{connB}
+	pool.slaveIDs[remoteID] = true
+	pool.watchConnectionLocked(connB)
+	connA.Close()
+	pool.mu.Unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		pool.mu.RLock()
+		_, watcherPending := pool.watched[connA]
+		slaveIDTracked := pool.slaveIDs[remoteID]
+		connBIndexed := len(pool.conns[0x00030005]) == 1 && pool.conns[0x00030005][0] == connB
+		pool.mu.RUnlock()
+		if !watcherPending {
+			if !slaveIDTracked {
+				t.Fatal("delayed connA watcher deleted connB's slave ID")
+			}
+			if !connBIndexed {
+				t.Fatal("connB route was removed unexpectedly")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("connA watcher did not finish")
 }
 
 func TestXshardPool_RemoveTargetClosesConnections(t *testing.T) {
