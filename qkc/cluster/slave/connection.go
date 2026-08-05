@@ -147,12 +147,10 @@ type rpcResult struct {
 // The forwarder hook is an extension point for MasterConn to route peer traffic
 // to PeerShardConn. For XshardConn it remains nil.
 //
-// Lock ordering (must be maintained to avoid deadlocks):
-//
-// closeMu → pendingMu     (SendRPCMeta, Close)
-// closeMu → stateMu       (Close)
-//
-// pendingMu and stateMu are never held together; readLoop only holds pendingMu.
+// lifecycleMu is the authoritative lock for the connection state machine.
+// When lifecycleMu and pendingMu are both needed, lifecycleMu is acquired first.
+// outboundMu serializes all frame writes with transport close.
+// Transport I/O is never performed while lifecycleMu or pendingMu is held.
 type baseConn struct {
 	frameTransport
 
@@ -160,10 +158,11 @@ type baseConn struct {
 	// It is nil for virtual transports (PeerConn).
 	conn net.Conn
 
-	stateMu    sync.Mutex
-	state      ConnectionState
-	activeChan chan struct{}
-	closedChan chan struct{}
+	lifecycleMu sync.Mutex
+	state       ConnectionState
+	activeChan  chan struct{}
+	closedChan  chan struct{}
+	outboundMu  sync.Mutex
 
 	errChan   chan error
 	startOnce sync.Once
@@ -196,9 +195,6 @@ type baseConn struct {
 	// Once the readLoop begins, it is never modified.
 	// It is nil for XshardConn; MasterConn sets it via SetDispatcher.
 	forwarder func(*wire.Frame) bool
-
-	closeMu sync.Mutex
-	closed  bool
 
 	log log.Logger
 }
@@ -239,43 +235,38 @@ func newBaseConnFromConn(
 // If the connection is already closed, Start is a no-op.
 func (c *baseConn) Start() {
 	c.startOnce.Do(func() {
-		c.stateMu.Lock()
+		c.lifecycleMu.Lock()
 		if c.state == ConnectionStateClosed {
-			c.stateMu.Unlock()
+			c.lifecycleMu.Unlock()
 			return
 		}
 		c.state = ConnectionStateActive
 		close(c.activeChan)
-		c.stateMu.Unlock()
+		c.lifecycleMu.Unlock()
 		go c.readLoop()
 	})
 }
 
 // Close closes the connection and wakes all pending RPCs.
 func (c *baseConn) Close() error {
-	c.closeMu.Lock()
-	if c.closed {
-		c.closeMu.Unlock()
+	c.lifecycleMu.Lock()
+	if c.state == ConnectionStateClosed {
+		c.lifecycleMu.Unlock()
 		return nil
 	}
-	c.closed = true
-	c.closeMu.Unlock()
-
-	c.stateMu.Lock()
-	if c.state != ConnectionStateClosed {
-		c.state = ConnectionStateClosed
-		close(c.closedChan)
-		// Wake up any goroutines waiting on WaitUntilActive().
-		// Matches Python's finally block in active_and_loop_forever that sets active_event.
-		select {
-		case <-c.activeChan:
-			// Already closed (Start was called)
-		default:
-			close(c.activeChan)
-		}
+	c.state = ConnectionStateClosed
+	close(c.closedChan)
+	// Wake up any goroutines waiting on WaitUntilActive().
+	// Matches Python's finally block in active_and_loop_forever that sets active_event.
+	select {
+	case <-c.activeChan:
+		// Already closed (Start was called)
+	default:
+		close(c.activeChan)
 	}
-	c.stateMu.Unlock()
 
+	// Admission and close are serialized by lifecycleMu, so no sender can add
+	// another waiter after this drain begins.
 	c.pendingMu.Lock()
 	for rpcID, ch := range c.pending {
 		select {
@@ -285,8 +276,11 @@ func (c *baseConn) Close() error {
 		delete(c.pending, rpcID)
 	}
 	c.pendingMu.Unlock()
+	c.lifecycleMu.Unlock()
 
-	return c.close()
+	c.outboundMu.Lock()
+	defer c.outboundMu.Unlock()
+	return c.frameTransport.close()
 }
 
 func (c *baseConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool {
@@ -347,21 +341,17 @@ func (c *baseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*w
 // XshardConn uses zero metadata (0-byte wire format).
 // MasterConn uses ClusterMetadata{Branch, ClusterPeerID} (12-byte wire format).
 func (c *baseConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, meta wire.ClusterMetadata) (*wire.Frame, error) {
-	c.stateMu.Lock()
-	state := c.state
-	c.stateMu.Unlock()
+	c.outboundMu.Lock()
+	defer c.outboundMu.Unlock()
 
-	switch state {
+	c.lifecycleMu.Lock()
+	switch c.state {
 	case ConnectionStateClosed:
+		c.lifecycleMu.Unlock()
 		return nil, ErrConnectionClosed
 	case ConnectionStateConnecting:
+		c.lifecycleMu.Unlock()
 		return nil, ErrNotActive
-	}
-
-	c.closeMu.Lock()
-	if c.closed {
-		c.closeMu.Unlock()
-		return nil, ErrConnectionClosed
 	}
 
 	rpcID := atomic.AddUint64(&c.nextRPCID, 1)
@@ -369,7 +359,7 @@ func (c *baseConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte,
 	c.pendingMu.Lock()
 	c.pending[rpcID] = respChan
 	c.pendingMu.Unlock()
-	c.closeMu.Unlock()
+	c.lifecycleMu.Unlock()
 
 	defer func() {
 		c.pendingMu.Lock()
@@ -383,7 +373,7 @@ func (c *baseConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte,
 		RPCID:   rpcID,
 		Payload: payload,
 	}
-	if err := c.writeFrame(frame); err != nil {
+	if err := c.frameTransport.writeFrame(frame); err != nil {
 		return nil, err
 	}
 
@@ -521,7 +511,10 @@ func (c *baseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeri
 		RPCID:   frame.RPCID,
 		Payload: respPayload,
 	}
-	if err := c.writeFrame(respFrame); err != nil {
+	c.outboundMu.Lock()
+	err = c.frameTransport.writeFrame(respFrame)
+	c.outboundMu.Unlock()
+	if err != nil {
 		c.log.Error("write response failed", "opcode", respFrame.Opcode, "err", err)
 		c.Close()
 	}
@@ -535,25 +528,23 @@ func (c *baseConn) WaitUntilActive() <-chan struct{} { return c.activeChan }
 func (c *baseConn) WaitUntilClosed() <-chan struct{} { return c.closedChan }
 
 func (c *baseConn) State() ConnectionState {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
 	return c.state
 }
 
 func (c *baseConn) IsActive() bool {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
 	return c.state == ConnectionStateActive
 }
 
 func (c *baseConn) IsClosed() bool {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
 	return c.state == ConnectionStateClosed
 }
 
 func (c *baseConn) Closed() bool {
-	c.closeMu.Lock()
-	defer c.closeMu.Unlock()
-	return c.closed
+	return c.IsClosed()
 }
