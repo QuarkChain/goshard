@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
 const defaultDialTimeout = 10 * time.Second
@@ -22,18 +24,18 @@ const defaultDialTimeout = 10 * time.Second
 //
 // Architecture:
 //
-//	XshardConn  embeds  *baseConn  embeds  *transport
+//	XshardConn embeds *conn.BaseConn, which uses the TCP frame transport.
 //
 // No forwarder — all frames are dispatched locally. RPC ID validation is
-// global monotonic (the default in baseConn).
+// global monotonic (the default in conn.BaseConn).
 type XshardConn struct {
-	*baseConn
+	*conn.BaseConn
 
 	// local identity of this slave, used in PONG responses.
 	localID              []byte
 	localFullShardIDList []uint32
 
-	// peer identity state, protected by its own mutex (not baseConn.closeMu).
+	// peer identity state, protected by its own mutex.
 	stateMu               sync.Mutex
 	remoteID              []byte
 	remoteFullShardIDList []uint32
@@ -46,26 +48,26 @@ type XshardConn struct {
 // maxPayloadSize controls frame payload size limit; 0 disables the limit.
 // localID and localFullShardIDList identify this slave and are used in PONG responses.
 func NewXshardConn(addr string, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) (*XshardConn, error) {
-	conn, err := net.DialTimeout("tcp", addr, defaultDialTimeout)
+	nc, err := net.DialTimeout("tcp", addr, defaultDialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial xshard slave %s: %w", addr, err)
 	}
-	return newXshardConn(conn, maxPayloadSize, localID, localFullShardIDList, logger), nil
+	return newXshardConn(nc, maxPayloadSize, localID, localFullShardIDList, logger), nil
 }
 
 // NewXshardConnFromConn wraps an accepted net.Conn as an XshardConn.
 // maxPayloadSize controls frame payload size limit; 0 disables the limit.
 // localID and localFullShardIDList identify this slave and are used in PONG responses.
-func NewXshardConnFromConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *XshardConn {
-	return newXshardConn(conn, maxPayloadSize, localID, localFullShardIDList, logger)
+func NewXshardConnFromConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *XshardConn {
+	return newXshardConn(nc, maxPayloadSize, localID, localFullShardIDList, logger)
 }
 
-func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *XshardConn {
+func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *XshardConn {
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrameNoMeta(r, maxPayloadSize)
 	}
 	xc := &XshardConn{
-		baseConn:             newBaseConnFromConn(conn, readFrame, wire.WriteFrameNoMeta, logger),
+		BaseConn:             conn.NewBaseConnFromConn(nc, readFrame, wire.WriteFrameNoMeta, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 		pingReceived:         make(chan struct{}),
@@ -73,16 +75,16 @@ func newXshardConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFu
 
 	// Register serializers for all opcodes that SlaveConnection understands.
 	// This matches Python's SLAVE_OP_SERIALIZER_MAP.
-	xc.baseConn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing):                        OpSerializerFor[wire.PingRequest, wire.PongResponse](),
-		byte(wire.ClusterOpAddXshardTxListRequest):      OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](),
-		byte(wire.ClusterOpBatchAddXshardTxListRequest): OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](),
+	xc.BaseConn.RegisterOpSerializers(map[byte]*conn.OpSerializer{
+		byte(wire.ClusterOpPing):                        conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](),
+		byte(wire.ClusterOpAddXshardTxListRequest):      conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](),
+		byte(wire.ClusterOpBatchAddXshardTxListRequest): conn.OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](),
 	})
 
 	// Register handlers for all slave-to-slave RPCs.
 	// PING/PONG is the slave-to-slave identity exchange.
 	// ADD_XSHARD_TX_LIST and BATCH_ADD_XSHARD_TX_LIST are stubs for protocol compatibility.
-	xc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
+	xc.BaseConn.RegisterTypedHandlers(map[byte]conn.TypedHandler{
 		// ── Permanent connection handler ───────────────────────────────
 		// PING/PONG is the slave-to-slave identity exchange.
 
@@ -116,12 +118,12 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 	x.stateMu.Unlock()
 
 	if len(storedShardList) == 0 {
-		// Returning error causes baseConn to close connection (Python's close_with_error)
+		// Returning error causes BaseConn to close connection (Python's close_with_error)
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
 
 	// Signal ping received AFTER check passes (matches Python's ping_received_event.set())
-	if !x.baseConn.Closed() {
+	if !x.BaseConn.Closed() {
 		x.pingOnce.Do(func() { close(x.pingReceived) })
 	}
 
@@ -139,8 +141,8 @@ func (x *XshardConn) handleAddXshardTxList(req any) (any, error) {
 	_ = req.(*wire.AddXshardTxListRequest)
 
 	// TODO(xshard): implement xshard transaction processing.
-	x.log.Warn("AddXshardTxList stub invoked — transaction will be discarded", "remote", x.RemoteAddr())
-	return nil, ErrHandlerNotImplemented
+	x.Logger().Warn("AddXshardTxList stub invoked — transaction will be discarded", "remote", x.RemoteAddr())
+	return nil, conn.ErrHandlerNotImplemented
 }
 
 // handleBatchAddXshardTxList is the BATCH_ADD_XSHARD_TX_LIST_REQUEST stub.
@@ -151,8 +153,8 @@ func (x *XshardConn) handleBatchAddXshardTxList(req any) (any, error) {
 	_ = req.(*wire.BatchAddXshardTxListRequest)
 
 	// TODO(xshard): implement batch xshard transaction processing.
-	x.log.Warn("BatchAddXshardTxList stub invoked — transactions will be discarded", "remote", x.RemoteAddr())
-	return nil, ErrHandlerNotImplemented
+	x.Logger().Warn("BatchAddXshardTxList stub invoked — transactions will be discarded", "remote", x.RemoteAddr())
+	return nil, conn.ErrHandlerNotImplemented
 }
 
 // SetRemoteIdentity sets the peer identity for outbound xshard connections that
@@ -186,8 +188,8 @@ func (x *XshardConn) RemoteFullShardIDList() []uint32 {
 func (x *XshardConn) WaitUntilPingReceived() bool {
 	select {
 	case <-x.pingReceived:
-		return !x.baseConn.Closed()
-	case <-x.baseConn.Error():
+		return !x.BaseConn.Closed()
+	case <-x.BaseConn.WaitUntilClosed():
 		return false
 	}
 }
@@ -198,7 +200,7 @@ func (x *XshardConn) WaitUntilPingReceived() bool {
 // corresponding to Python's SlaveConnection.send_ping().
 // The connection must have been started (Start() called).
 func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint32, err error) {
-	payload, err := serializeBytes(&wire.PingRequest{
+	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
 		RootTip:         nil, // slave-to-slave: no root tip required
@@ -207,13 +209,17 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 		return nil, nil, fmt.Errorf("serialize ping: %w", err)
 	}
 
-	frame, err := x.baseConn.SendRPC(ctx, byte(wire.ClusterOpPing), payload)
+	frame, err := x.BaseConn.SendRPC(ctx, byte(wire.ClusterOpPing), payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("send ping: %w", err)
 	}
+	if frame.Opcode != byte(wire.ClusterOpPong) {
+		return nil, nil, fmt.Errorf("unexpected ping response opcode: got 0x%x, want 0x%x",
+			frame.Opcode, byte(wire.ClusterOpPong))
+	}
 
 	var pong wire.PongResponse
-	if err := deserializeBytes(frame.Payload, &pong); err != nil {
+	if err := serialize.DeserializeFromBytes(frame.Payload, &pong); err != nil {
 		return nil, nil, fmt.Errorf("deserialize pong: %w", err)
 	}
 
@@ -223,13 +229,13 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 // SendXshardTxList sends an AddXshardTxListRequest via RPC and returns the response.
 // Python's ADD_XSHARD_TX_LIST_REQUEST is an RPC (in SLAVE_OP_RPC_MAP), not fire-and-forget.
 func (x *XshardConn) SendXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
-	return x.baseConn.SendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), payload)
+	return x.BaseConn.SendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), payload)
 }
 
 // SendBatchXshardTxList sends a BatchAddXshardTxListRequest via RPC and returns the response.
 // Python's BATCH_ADD_XSHARD_TX_LIST_REQUEST is an RPC (in SLAVE_OP_RPC_MAP).
 func (x *XshardConn) SendBatchXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
-	return x.baseConn.SendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), payload)
+	return x.BaseConn.SendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), payload)
 }
 
 // ParseAddXshardTxListResponse decodes and validates an
@@ -246,7 +252,7 @@ func ParseAddXshardTxListResponse(frame *wire.Frame) (*wire.AddXshardTxListRespo
 			frame.Opcode, byte(wire.ClusterOpAddXshardTxListResponse))
 	}
 	var resp wire.AddXshardTxListResponse
-	if err := deserializeBytes(frame.Payload, &resp); err != nil {
+	if err := serialize.DeserializeFromBytes(frame.Payload, &resp); err != nil {
 		return nil, fmt.Errorf("deserialize AddXshardTxListResponse: %w", err)
 	}
 	if resp.ErrorCode != 0 {

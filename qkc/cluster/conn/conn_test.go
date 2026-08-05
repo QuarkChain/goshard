@@ -31,6 +31,20 @@ type fakeFrameTransport struct {
 	writeStarted      chan struct{}
 	writeOnce         sync.Once
 	releaseWrite      chan struct{}
+	writeErr          error
+	closeErr          error
+}
+
+type interruptibleFakeFrameTransport struct {
+	*fakeFrameTransport
+	interruptOnce sync.Once
+}
+
+func (t *interruptibleFakeFrameTransport) interrupt() error {
+	t.interruptOnce.Do(func() {
+		close(t.releaseWrite)
+	})
+	return t.Close()
 }
 
 func newFakeFrameTransport() *fakeFrameTransport {
@@ -41,7 +55,7 @@ func newFakeFrameTransport() *fakeFrameTransport {
 	}
 }
 
-func (t *fakeFrameTransport) readFrame() (*wire.Frame, error) {
+func (t *fakeFrameTransport) ReadFrame() (*wire.Frame, error) {
 	select {
 	case frame := <-t.frames:
 		return frame, nil
@@ -50,7 +64,10 @@ func (t *fakeFrameTransport) readFrame() (*wire.Frame, error) {
 	}
 }
 
-func (t *fakeFrameTransport) writeFrame(frame *wire.Frame) error {
+func (t *fakeFrameTransport) WriteFrame(frame *wire.Frame) error {
+	if t.writeErr != nil {
+		return t.writeErr
+	}
 	select {
 	case t.writes <- frame:
 		if t.releaseWrite != nil {
@@ -69,7 +86,7 @@ func (t *fakeFrameTransport) writeFrame(frame *wire.Frame) error {
 	}
 }
 
-func (t *fakeFrameTransport) close() error {
+func (t *fakeFrameTransport) Close() error {
 	t.closeOnce.Do(func() {
 		t.writeMu.Lock()
 		t.closeWhileWriting = t.writing
@@ -79,7 +96,7 @@ func (t *fakeFrameTransport) close() error {
 		t.closeMu.Unlock()
 		close(t.closed)
 	})
-	return nil
+	return t.closeErr
 }
 
 func (t *fakeFrameTransport) RemoteAddr() string {
@@ -158,7 +175,7 @@ func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()
 	return
 }
 
-// ── baseConn unit tests (fake transport) ──────────────────────────────────────
+// ── BaseConn unit tests (fake transport) ─────────────────────────────────────
 
 func TestBaseConn_CloseWaitsForOutboundWrite(t *testing.T) {
 	tr := newFakeFrameTransport()
@@ -204,8 +221,109 @@ func TestBaseConn_CloseWaitsForOutboundWrite(t *testing.T) {
 	}
 }
 
-func TestBaseConn_ConcurrentSendRPCMetaAndClose(t *testing.T) {
+func TestBaseConn_CloseInterruptsBlockedWriter(t *testing.T) {
+	base := newFakeFrameTransport()
+	base.writeStarted = make(chan struct{})
+	base.releaseWrite = make(chan struct{})
+	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+	select {
+	case <-tr.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fake transport did not start writing")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not interrupt blocked writer")
+	}
+	if err := <-result; err != ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
+	}
+}
+
+func TestBaseConn_CleanCloseDoesNotPublishError(t *testing.T) {
+	conn := NewBaseConn(newFakeFrameTransport(), log.New())
+	conn.Start()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close connection: %v", err)
+	}
+	select {
+	case err := <-conn.Error():
+		t.Fatalf("clean close published error: %v", err)
+	default:
+	}
+}
+
+func TestBaseConn_CloseReturnsTransportError(t *testing.T) {
+	closeErr := errors.New("close failed")
 	tr := newFakeFrameTransport()
+	tr.closeErr = closeErr
+	conn := NewBaseConn(tr, log.New())
+	if err := conn.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("expected transport close error, got %v", err)
+	}
+}
+
+func TestBaseConn_CanceledQueuedRPCIsNotWritten(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writeStarted = make(chan struct{})
+	tr.releaseWrite = make(chan struct{})
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		firstResult <- err
+	}()
+	select {
+	case <-tr.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first write did not block")
+	}
+	select {
+	case <-tr.writes:
+	case <-time.After(time.Second):
+		t.Fatal("first write was not recorded")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected queued RPC timeout, got %v", err)
+	}
+	close(tr.releaseWrite)
+	select {
+	case frame := <-tr.writes:
+		t.Fatalf("canceled queued RPC was written: %#v", frame)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close connection: %v", err)
+	}
+	if err := <-firstResult; err != ErrConnectionClosed {
+		t.Fatalf("expected first RPC to be closed, got %v", err)
+	}
+}
+
+func TestConcurrentCloseAndSendRPC(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writes = make(chan *wire.Frame, 64)
 	conn := NewBaseConn(tr, log.New())
 	conn.Start()
 
@@ -225,12 +343,19 @@ func TestBaseConn_ConcurrentSendRPCMetaAndClose(t *testing.T) {
 	}
 
 	close(start)
-	conn.Close()
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close deadlocked with concurrent SendRPC")
+	}
 	wg.Wait()
 
-	conn.pendingMu.Lock()
-	pending := len(conn.pending)
-	conn.pendingMu.Unlock()
+	pending := conn.pendingLen()
 	if pending != 0 {
 		t.Fatalf("pending RPCs remain after Close: %d", pending)
 	}
@@ -239,10 +364,11 @@ func TestBaseConn_ConcurrentSendRPCMetaAndClose(t *testing.T) {
 	}
 }
 
-func TestBaseConn_LateResponseAfterTimeoutClosesConnection(t *testing.T) {
+func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
 	conn.Start()
+	defer conn.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
@@ -259,16 +385,241 @@ func TestBaseConn_LateResponseAfterTimeoutClosesConnection(t *testing.T) {
 	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 1}
 
 	select {
+	case <-time.After(50 * time.Millisecond):
+		if conn.IsClosed() {
+			t.Fatal("late response closed the connection")
+		}
 	case <-conn.WaitUntilClosed():
-	case <-time.After(time.Second):
-		t.Fatal("late response did not close the connection")
+		t.Fatal("late response closed the connection")
 	}
 
-	conn.pendingMu.Lock()
-	pending := len(conn.pending)
-	conn.pendingMu.Unlock()
+	pending := conn.pendingLen()
 	if pending != 0 {
 		t.Fatalf("timed-out RPC remains pending: %d", pending)
+	}
+}
+
+func TestBaseConn_CancelPreservesContextError(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+}
+
+func TestBaseConn_ExpiredLateResponseClosesConnection(t *testing.T) {
+	previousGracePeriod := lateResponseGracePeriod
+	lateResponseGracePeriod = time.Millisecond
+	defer func() { lateResponseGracePeriod = previousGracePeriod }()
+
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+	var request *wire.Frame
+	select {
+	case request = <-tr.writes:
+	case <-time.After(time.Second):
+		t.Fatal("fake transport did not receive request")
+	}
+	cancel()
+	select {
+	case <-result:
+	case <-time.After(time.Second):
+		t.Fatal("SendRPC did not return after cancellation")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID}
+	select {
+	case <-conn.WaitUntilClosed():
+	case <-time.After(time.Second):
+		t.Fatal("expired late response did not close the connection")
+	}
+}
+
+func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
+	const iterations = 100
+	for i := 0; i < iterations; i++ {
+		tr := newFakeFrameTransport()
+		conn := NewBaseConn(tr, log.New())
+		conn.Start()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+			result <- err
+		}()
+
+		var request *wire.Frame
+		select {
+		case request = <-tr.writes:
+		case <-time.After(time.Second):
+			t.Fatal("fake transport did not receive request")
+		}
+		start := make(chan struct{})
+		go func() {
+			<-start
+			cancel()
+		}()
+		go func() {
+			<-start
+			tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID}
+		}()
+		close(start)
+
+		select {
+		case <-result:
+		case <-time.After(time.Second):
+			t.Fatal("SendRPC did not complete")
+		}
+		if pending := conn.pendingLen(); pending != 0 {
+			t.Fatalf("iteration %d: pending RPCs remain: %d", i, pending)
+		}
+		conn.Close()
+	}
+}
+
+func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+	select {
+	case <-tr.writes:
+	case <-time.After(time.Second):
+		t.Fatal("fake transport did not receive request")
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatalf("close fake transport: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err != ErrConnectionClosed {
+			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read failure did not wake pending RPC")
+	}
+	<-conn.WaitUntilClosed()
+	if pending := conn.pendingLen(); pending != 0 {
+		t.Fatalf("pending RPCs remain after read failure: %d", pending)
+	}
+}
+
+func TestBaseConn_WriteFailureWakesPendingRPC(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writeErr = errors.New("write failed")
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+	if err != ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
+	}
+	<-conn.WaitUntilClosed()
+	if pending := conn.pendingLen(); pending != 0 {
+		t.Fatalf("pending RPCs remain after write failure: %d", pending)
+	}
+}
+
+func TestBaseConn_HandlerCompletionAfterCloseIsDropped(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	conn.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](),
+	})
+	conn.RegisterTypedHandlers(map[byte]TypedHandler{
+		byte(wire.ClusterOpPing): func(req any) (any, error) {
+			close(handlerStarted)
+			<-releaseHandler
+			return &wire.PongResponse{}, nil
+		},
+	})
+	conn.Start()
+
+	payload, err := serialize.SerializeToBytes(&wire.PingRequest{})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: payload}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close connection: %v", err)
+	}
+	close(releaseHandler)
+	select {
+	case frame := <-tr.writes:
+		t.Fatalf("handler wrote response after close: %#v", frame)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writes = make(chan *wire.Frame, 64)
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	const senders = 32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(senders)
+	for i := 0; i < senders; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		}()
+	}
+
+	close(start)
+	frames := make([]*wire.Frame, 0, senders)
+	for len(frames) < senders {
+		select {
+		case frame := <-tr.writes:
+			frames = append(frames, frame)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent RPC writes")
+		}
+	}
+	for i, frame := range frames {
+		if frame.RPCID != uint64(i+1) {
+			t.Fatalf("rpc id at position %d: got %d, want %d", i, frame.RPCID, i+1)
+		}
+	}
+	if conn.IsClosed() {
+		t.Fatal("connection closed during concurrent sends")
+	}
+
+	conn.Close()
+	wg.Wait()
+	if conn.IsClosed() == false {
+		t.Fatal("connection should be closed after test cleanup")
 	}
 }
 
@@ -294,9 +645,7 @@ func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 		t.Fatalf("SendRPC failed: %v", err)
 	}
 
-	conn.pendingMu.Lock()
-	pending := len(conn.pending)
-	conn.pendingMu.Unlock()
+	pending := conn.pendingLen()
 	if pending != 0 {
 		t.Fatalf("pending RPC remains after response: %d", pending)
 	}
@@ -317,7 +666,7 @@ func TestBaseConn_DoubleClose(t *testing.T) {
 	}
 }
 
-// ── baseConn integration tests (TCP pair) ─────────────────────────────────────
+// ── BaseConn integration tests (TCP pair) ────────────────────────────────────
 
 // TestBaseConn_CloseWakesPendingRPC verifies that Close wakes all pending RPCs.
 func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {

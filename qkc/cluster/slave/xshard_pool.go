@@ -296,6 +296,12 @@ func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 	}
 
 	// Register slave ID for deduplication
+	if len(remoteID) > 0 && p.slaveIDs[string(remoteID)] {
+		p.mu.Unlock()
+		conn.Close()
+		p.log.Warn("duplicate inbound slave connection rejected", "slave_id", string(remoteID), "remote", conn.RemoteAddr())
+		return false
+	}
 	if len(remoteID) > 0 {
 		p.slaveIDs[string(remoteID)] = true
 	}
@@ -419,10 +425,28 @@ func (p *XshardPool) removeConnectionLocked(conn *XshardConn) bool {
 	}
 	if removed {
 		if remoteID := string(conn.RemoteID()); remoteID != "" {
-			delete(p.slaveIDs, remoteID)
+			if !p.hasRemoteIDLocked(remoteID) {
+				delete(p.slaveIDs, remoteID)
+			}
 		}
 	}
 	return removed
+}
+
+func (p *XshardPool) hasRemoteIDLocked(remoteID string) bool {
+	for _, conns := range p.conns {
+		for _, conn := range conns {
+			if string(conn.RemoteID()) == remoteID {
+				return true
+			}
+		}
+	}
+	for _, conn := range p.inbound {
+		if string(conn.RemoteID()) == remoteID {
+			return true
+		}
+	}
+	return false
 }
 
 // OutboundSize returns the number of outbound connections (indexed by shard ID).
