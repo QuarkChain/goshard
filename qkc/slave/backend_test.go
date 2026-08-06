@@ -9,9 +9,10 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/config"
-	"github.com/ethereum/go-ethereum/qkc/genesis"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
@@ -34,17 +35,18 @@ func bootEnv(t *testing.T, path string) (*config.SlaveContext, *types.RootBlockH
 		t.Fatalf("ResolveSlave: %v", err)
 	}
 	ctx.DBPathRoot = t.TempDir()
-	root, err := genesis.RootBlock(cfg.Quarkchain)
+	root, err := qkc.CreateRootBlock(cfg.Quarkchain)
 	if err != nil {
-		t.Fatalf("RootBlock: %v", err)
+		t.Fatalf("CreateRootBlock: %v", err)
 	}
 	return ctx, root
 }
 
-// TODO(real shard chain): inject the qkc/core service here and assert its
-// canonical genesis/head plus blocking shutdown of its background work.
 // TestSlaveBootAndReopen boots S0 from each real network config, checks its shard
 // registry, stops it, and verifies that the same databases reopen cleanly.
+//
+// TODO: inject the real chain service here once it exists and assert its
+// canonical genesis/head plus blocking shutdown of its background work.
 func TestSlaveBootAndReopen(t *testing.T) {
 	for _, path := range []string{fixtureMainnet, fixtureDevnet} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
@@ -98,12 +100,12 @@ type failingChainService struct {
 	built     int
 }
 
-func (s *failingChainService) New(db ethdb.Database, g *shard.Genesis) (shard.ShardChain, error) {
+func (s *failingChainService) New(db ethdb.Database, genesis *types.MinorBlock, chainConfig *params.ChainConfig) (shard.ShardChain, error) {
 	if s.built >= s.failAfter {
 		return nil, errors.New("injected chain failure")
 	}
 	s.built++
-	return shard.StubChainService{}.New(db, g)
+	return shard.StubChainService{}.New(db, genesis, chainConfig)
 }
 
 // TestSlaveBootRollback: when a later shard fails to boot, the shards already

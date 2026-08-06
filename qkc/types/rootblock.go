@@ -3,6 +3,7 @@
 // RootBlockHeader mirrors goquarkchain's core/types.RootBlockHeader, kept minimal:
 // only the fields and the Hash/SealHash needed to derive and pin the root genesis
 // block. Mining, signing, and RLP helpers are omitted.
+// TODO: more content need to be added later.
 //
 // Field order and ser tags reproduce pyquarkchain's RootBlockHeader.FIELDS
 // (quarkchain/core.py:888) exactly, so qkc/serialize encodes it byte-identically:
@@ -29,6 +30,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 // RootBlockHeader is the QuarkChain root block header. Only the subset of behavior
@@ -40,7 +42,7 @@ type RootBlockHeader struct {
 	MinorHeaderHash common.Hash
 	Root            common.Hash
 	Coinbase        account.Address
-	CoinbaseAmount  *TokenBalances
+	CoinbaseAmount  *qkcCommon.TokenBalances
 	Time            uint64
 	Difficulty      *big.Int
 	TotalDifficulty *big.Int

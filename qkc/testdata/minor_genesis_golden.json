@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "pyquarkchain GenesisManager.create_minor_block() output for chain 0's shard in each",
+    "singularity network, asserted by qkc.TestMinorGenesisGolden down to the block hash.",
+    "state_root covers the QuarkChain account encoding, meta_hash and header_hash the",
+    "block layout and its QKC serialization. Regeneration: qkc/config/singularity/README.md."
+  ],
+  "networks": [
+    {
+      "name": "mainnet",
+      "config": "config/singularity/mainnet.json",
+      "full_shard_id": 1,
+      "root_genesis_hash": "0x4036783e441eb5057bf2be96bf1fd4585ac49824de15c0d92a4c14a97886ca51",
+      "coinbase_address": "0x000000000000000000000000000000000000000000000001",
+      "coinbase_token_id": 35760,
+      "coinbase_amount": "3250000000000000000",
+      "gas_limit": 12000000,
+      "xshard_gas_limit": 6000000,
+      "xshard_cursor": [0, 0, 0],
+      "state_root": "0x699737e3597ea304b7d2e2f4ecbf8ab6348688287c59cec8599cf7a4f7c82153",
+      "meta_hash": "0x87d07aa2a3b8849a76f2c2a0dc51d17e4105ddf01532bc5e6c3a93f15ddf9c8c",
+      "header_hash": "0x04493a3c06261af970ca4fc33caa585fbcef11cdb73bb1e3be2a9f6b828a7a0f"
+    },
+    {
+      "name": "devnet",
+      "config": "config/singularity/devnet.json",
+      "full_shard_id": 1,
+      "root_genesis_hash": "0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d",
+      "coinbase_address": "0x000000000000000000000000000000000000000000000001",
+      "coinbase_token_id": 35760,
+      "coinbase_amount": "3250000000000000000",
+      "gas_limit": 12000000,
+      "xshard_gas_limit": 6000000,
+      "xshard_cursor": [0, 0, 0],
+      "state_root": "0x76b7e413ee8a10d27ad5158ce91b8b8e61d6af8805b965a4ce11b93db0286ed1",
+      "meta_hash": "0xd13ae2665f8bc7aadf26a824f6db50956e03291ff42c05c877dbc56229d37d7e",
+      "header_hash": "0x661b12d25851f510519f8b157b2b76c95ea8ba4faf2a78f047c12c0bec792667"
+    }
+  ]
+}

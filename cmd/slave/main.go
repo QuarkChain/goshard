@@ -30,7 +30,7 @@ var (
 	}
 	nodeIDFlag = &cli.StringFlag{
 		Name:  "node_id",
-		Usage: "Slave identity (e.g. S0) selecting which shards this process owns",
+		Usage: "Slave identity (e.g. S0), matched against SLAVE_LIST[].ID in cluster_config to select which shards this process owns",
 	}
 )
 

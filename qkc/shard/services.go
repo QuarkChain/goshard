@@ -5,6 +5,8 @@ package shard
 import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // ShardChain is the named boundary between the slave skeleton and the geth-core
@@ -12,8 +14,7 @@ import (
 // qkc/core.MinorBlockChain), which is delivered by a separate task. It exposes
 // only what the slave needs and is expected to co-evolve with that task.
 type ShardChain interface {
-	// GenesisHash is the chain's genesis block hash, captured in the genesis
-	// record and compared on reopen.
+	// GenesisHash is the hash of the genesis block the chain stands on.
 	GenesisHash() common.Hash
 	// Head is the current chain head.
 	Head() (height uint64, hash common.Hash)
@@ -21,47 +22,47 @@ type ShardChain interface {
 	Stop()
 }
 
-// ChainService constructs the ShardChain for one shard from its isolated chaindb
-// and genesis descriptor.
+// ChainService constructs the ShardChain for one shard from its isolated chaindb,
+// the shard's genesis block (whose state is already materialized in that db), and
+// the EVM rule set.
+//
+// An implementation must fail rather than open a chain whose head state is missing
+// from db, as geth's NewBlockChain does. The caller checks only the genesis state,
+// which is all it can know about; every state above genesis belongs to the chain.
+//
+// This is the seam that survives: the implementation becomes a NewBlockChain call
+// over the same arguments — qkc derives the genesis from config and root linkage,
+// geth owns the chain.
 type ChainService interface {
-	New(db ethdb.Database, genesis *Genesis) (ShardChain, error)
+	New(db ethdb.Database, genesis *types.MinorBlock, chainConfig *params.ChainConfig) (ShardChain, error)
 }
 
-// Placeholder injection points for downstream issues. Each is an empty interface
-// today; the concrete surface arrives with the referenced issue.
-type (
-	Engine       interface{} // filled by #4 (real PoW / PoSW); the concrete interface is chosen by the chain task
-	MasterConn   interface{} // filled by #5 (cluster wire protocol)
-	Miner        interface{} // filled by #4 (miner)
-	Synchronizer interface{} // filled by later sync work
-)
-
-// Options is the injection-point surface downstream issues plug into.
+// Options is the injection-point surface downstream issues plug into. It carries
+// a field only once a concrete consumer exists: an engine, master connection,
+// miner and synchronizer all belong here eventually, but each arrives with the
+// task that defines its interface, not as an empty placeholder.
 type Options struct {
-	Chain        ChainService // nil means the stub; the geth-core shard-chain task supplies the real one
-	Engine       Engine       // nil today; #4
-	MasterConn   MasterConn   // nil today; #5
-	Miner        Miner        // nil today; #4
-	Synchronizer Synchronizer // nil today
+	Chain ChainService // nil means the stub; the geth-core shard-chain task supplies the real one
 }
 
 func (o Options) chainService() ChainService {
 	if o.Chain != nil {
 		return o.Chain
 	}
-	// TODO(real shard chain): production wiring must inject the qkc/core service
-	// once it can commit the real QKC genesis; keep this stub only as a test seam.
+	// TODO: production wiring must inject the real chain service (a geth
+	// core.BlockChain over QKC minor blocks) once it exists; the stub is a test
+	// seam until then.
 	return StubChainService{}
 }
 
 // StubChainService satisfies the ShardChain seam without any execution, so the
-// slave skeleton boots and is testable before the real chain lands. The stub
-// builds no state: it reports the genesis descriptor's identity at head height 0
-// and stops cleanly.
+// slave skeleton boots and is testable before the real chain lands. It runs no
+// EVM and imports no blocks: it stands at the genesis block it was handed, whose
+// state is already in the database, and stops cleanly.
 type StubChainService struct{}
 
-func (StubChainService) New(_ ethdb.Database, genesis *Genesis) (ShardChain, error) {
-	return &stubChain{genesis: genesis.Fingerprint()}, nil
+func (StubChainService) New(_ ethdb.Database, genesis *types.MinorBlock, _ *params.ChainConfig) (ShardChain, error) {
+	return &stubChain{genesis: genesis.Hash()}, nil
 }
 
 type stubChain struct {
