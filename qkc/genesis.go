@@ -69,24 +69,13 @@ func CreateRootBlock(qkc *config.QuarkChainConfig) (*types.RootBlockHeader, erro
 	}, nil
 }
 
-// CreateMinorBlock derives one shard's genesis minor block, mirroring
-// pyquarkchain's GenesisManager.create_minor_block (quarkchain/genesis.py:43):
-// GENESIS.ALLOC is materialized into db and the resulting state root is sealed
-// into the block's meta, which the header commits to. The block hash is
-// byte-identical to pyquarkchain's create_minor_block().header.get_hash().
-//
-// Pass an ephemeral database to derive the block without persisting its state —
-// the split geth makes between hashing and flushing a genesis allocation
-// (core/genesis.go hashAlloc/flushAlloc).
-//
-// GENESIS.NONCE is deliberately unused: pyquarkchain passes no nonce (nor bloom or
-// mixhash) to the genesis header, so all three stay zero.
-func CreateMinorBlock(qkc *config.QuarkChainConfig, fullShardID uint32, root *types.RootBlockHeader, db ethdb.Database) (*types.MinorBlock, error) {
+// resolveShardGenesis returns the shard's config after rejecting every GENESIS
+// shape this bootstrap cannot stand up. CreateMinorBlock and CommitGenesisState
+// both start here, so a block and the state under it can never come from
+// different validation.
+func resolveShardGenesis(qkc *config.QuarkChainConfig, fullShardID uint32) (*config.ShardConfig, error) {
 	if qkc == nil {
 		return nil, fmt.Errorf("genesis: QUARKCHAIN config is missing")
-	}
-	if root == nil {
-		return nil, fmt.Errorf("shard 0x%08x: genesis needs the root genesis header to link", fullShardID)
 	}
 	shardCfg := qkc.GetShardConfigByFullShardID(fullShardID)
 	if shardCfg == nil {
@@ -110,6 +99,52 @@ func CreateMinorBlock(qkc *config.QuarkChainConfig, fullShardID uint32, root *ty
 	if g.Height != 0 {
 		return nil, fmt.Errorf("shard 0x%08x: GENESIS.HEIGHT = %d: the genesis block must be block 0", fullShardID, g.Height)
 	}
+	if err := checkAllocOwnership(qkc, fullShardID, g.Alloc); err != nil {
+		return nil, err
+	}
+	return shardCfg, nil
+}
+
+// CommitGenesisState materializes one shard's GENESIS.ALLOC into db and returns
+// the state root it hashes to — the same root CreateMinorBlock seals into the
+// block's meta. It is geth's flushAlloc to CreateMinorBlock's hashAlloc
+// (core/genesis.go): deriving the block never touches a real chaindb, so a
+// datadir whose stored genesis turns out to disagree with the config is rejected
+// before any state is written into it.
+func CommitGenesisState(qkc *config.QuarkChainConfig, fullShardID uint32, db ethdb.Database) (common.Hash, error) {
+	shardCfg, err := resolveShardGenesis(qkc, fullShardID)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	stateRoot, err := commitGenesisAlloc(db, shardCfg.Genesis.Alloc)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("shard 0x%08x: materialize GENESIS.ALLOC: %w", fullShardID, err)
+	}
+	return stateRoot, nil
+}
+
+// CreateMinorBlock derives one shard's genesis minor block, mirroring
+// pyquarkchain's GenesisManager.create_minor_block (quarkchain/genesis.py:43):
+// GENESIS.ALLOC is hashed and the resulting state root sealed into the block's
+// meta, which the header commits to. The block hash is byte-identical to
+// pyquarkchain's create_minor_block().header.get_hash().
+//
+// Nothing is persisted — the allocation is hashed in an ephemeral database, the
+// split geth makes between hashing and flushing a genesis allocation
+// (core/genesis.go hashAlloc/flushAlloc). CommitGenesisState is the flush half.
+//
+// GENESIS.NONCE is deliberately unused: pyquarkchain passes no nonce (nor bloom or
+// mixhash) to the genesis header, so all three stay zero.
+func CreateMinorBlock(qkc *config.QuarkChainConfig, fullShardID uint32, root *types.RootBlockHeader) (*types.MinorBlock, error) {
+	if root == nil {
+		return nil, fmt.Errorf("shard 0x%08x: genesis needs the root genesis header to link", fullShardID)
+	}
+	shardCfg, err := resolveShardGenesis(qkc, fullShardID)
+	if err != nil {
+		return nil, err
+	}
+	g := shardCfg.Genesis
+
 	prevMinor, err := parseGenesisHash(g.HashPrevMinorBlock)
 	if err != nil {
 		return nil, fmt.Errorf("shard 0x%08x: GENESIS.HASH_PREV_MINOR_BLOCK: %w", fullShardID, err)
@@ -118,17 +153,14 @@ func CreateMinorBlock(qkc *config.QuarkChainConfig, fullShardID uint32, root *ty
 	if err != nil {
 		return nil, fmt.Errorf("shard 0x%08x: GENESIS.HASH_MERKLE_ROOT: %w", fullShardID, err)
 	}
-	if err := checkAllocOwnership(qkc, fullShardID, g.Alloc); err != nil {
-		return nil, err
-	}
 	coinbaseAmount, err := genesisCoinbaseAmount(qkc, shardCfg)
 	if err != nil {
 		return nil, fmt.Errorf("shard 0x%08x: %w", fullShardID, err)
 	}
 
-	stateRoot, err := commitGenesisAlloc(db, g.Alloc)
+	stateRoot, err := genesisAllocRoot(g.Alloc)
 	if err != nil {
-		return nil, fmt.Errorf("shard 0x%08x: materialize GENESIS.ALLOC: %w", fullShardID, err)
+		return nil, fmt.Errorf("shard 0x%08x: hash GENESIS.ALLOC: %w", fullShardID, err)
 	}
 
 	meta := &types.MinorBlockMeta{

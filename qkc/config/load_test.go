@@ -341,6 +341,29 @@ func TestValidateRejectsBadTokenName(t *testing.T) {
 	}
 }
 
+// TestSlaveContextOwns: ownership follows FULL_SHARD_ID_LIST, not the shared
+// chain config — S1's shards are configured, and still not S0's to host.
+func TestSlaveContextOwns(t *testing.T) {
+	cfg := mustLoad(t)
+	sc, err := cfg.ResolveSlave("S0")
+	if err != nil {
+		t.Fatalf("ResolveSlave(S0): %v", err)
+	}
+	for _, tc := range []struct {
+		id   uint32
+		want bool
+	}{
+		{0x00000001, true},  // S0's first shard
+		{0x00040001, true},  // S0's second shard
+		{0x00010001, false}, // configured, but S1's
+		{0x00990099, false}, // configured nowhere
+	} {
+		if got := sc.Owns(tc.id); got != tc.want {
+			t.Errorf("S0.Owns(0x%08x) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
 func mustLoad(t *testing.T) *ClusterConfig {
 	t.Helper()
 	cfg, err := LoadClusterConfig(fixtureMainnet)
