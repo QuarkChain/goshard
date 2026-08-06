@@ -165,6 +165,62 @@ func TestStateAccountDecodeRejectsUnsupportedTokenBalanceEncoding(t *testing.T) 
 	}
 }
 
+// TestSlimAccountRoundtripPreservesMNT guards the snapshot round-trip: an account
+// that flows StateAccount -> SlimAccountRLP -> FullAccount (the path taken when a
+// state read is served from the snapshot flat layer) must retain its MntBalances
+// and FullShardKey. Before the SlimAccount fields were added, both were silently
+// dropped, so a snapshot-served QKC account read MntBalances=nil / FullShardKey=0
+// and re-committed a corrupted account, forking the trie root.
+func TestSlimAccountRoundtripPreservesMNT(t *testing.T) {
+	cases := []struct {
+		name string
+		acct StateAccount
+	}{
+		{
+			name: "no MNT, shard set",
+			acct: StateAccount{
+				Nonce:        7,
+				Balance:      uint256.NewInt(1234),
+				Root:         EmptyRootHash,
+				CodeHash:     EmptyCodeHash[:],
+				FullShardKey: 0x1a2b,
+			},
+		},
+		{
+			name: "MNT + shard set",
+			acct: StateAccount{
+				Nonce:    9,
+				Balance:  uint256.NewInt(5000),
+				Root:     EmptyRootHash,
+				CodeHash: EmptyCodeHash[:],
+				MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+					100: uint256.NewInt(500),
+					200: uint256.NewInt(900),
+				}),
+				FullShardKey: 0x2f3e,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			slim := SlimAccountRLP(tc.acct)
+			decoded, err := FullAccount(slim)
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.acct.Nonce, decoded.Nonce)
+			assert.Equal(t, tc.acct.Balance, decoded.Balance)
+			assert.Equal(t, tc.acct.FullShardKey, decoded.FullShardKey)
+			if tc.acct.MntBalances == nil || tc.acct.MntBalances.IsBlank() {
+				assert.True(t, decoded.MntBalances == nil || decoded.MntBalances.IsBlank())
+			} else {
+				require.NotNil(t, decoded.MntBalances)
+				assert.Equal(t, tc.acct.MntBalances.GetBalanceMap(), decoded.MntBalances.GetBalanceMap())
+			}
+		})
+	}
+}
+
 // TestStateAccountPyquarkchainDecodeCompatibility verifies that goshard can
 // decode blobs produced by pyquarkchain. These are the authoritative wire
 // vectors for the QKC 6-element RLP format. All vectors use full_shard_key=1.
