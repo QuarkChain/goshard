@@ -49,62 +49,62 @@ func strRJust(initStr []byte, fill byte, width int) []byte {
 	return data
 }
 
-func evmTxToTypedData(evmTx *EvmTransaction) []map[string]string {
+func evmTxToTypedData(evmTx *EvmTx) []map[string]string {
 	typedTxData := make([]map[string]string, 0)
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "nonce",
-		"value": uint64ToHex(evmTx.data.AccountNonce),
+		"value": uint64ToHex(evmTx.AccountNonce),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "gasPrice",
-		"value": bigIntToHex(evmTx.data.Price),
+		"value": bigIntToHex(evmTx.Price),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "gasLimit",
-		"value": uint64ToHex(evmTx.data.GasLimit),
+		"value": uint64ToHex(evmTx.GasLimit),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint160",
 		"name":  "to",
-		"value": recipientToHex(evmTx.To()),
+		"value": recipientToHex(evmTx.to()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "value",
-		"value": bigIntToHex(evmTx.data.Amount),
+		"value": bigIntToHex(evmTx.Amount),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "bytes",
 		"name":  "data",
-		"value": "0x" + hex.EncodeToString(evmTx.data.Payload),
+		"value": "0x" + hex.EncodeToString(evmTx.Payload),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint256",
 		"name":  "networkId",
-		"value": uint32ToHex(evmTx.data.NetworkId),
+		"value": uint32ToHex(evmTx.NetworkID),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint32",
 		"name":  "fromFullShardKey",
-		"value": uint32ToHex(evmTx.data.FromFullShardKey.GetValue()),
+		"value": uint32ToHex(evmTx.FromFullShardKey.GetValue()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint32",
 		"name":  "toFullShardKey",
-		"value": uint32ToHex(evmTx.data.ToFullShardKey.GetValue()),
+		"value": uint32ToHex(evmTx.ToFullShardKey.GetValue()),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint64",
 		"name":  "gasTokenId",
-		"value": uint64ToHex(evmTx.data.GasTokenID),
+		"value": uint64ToHex(evmTx.GasTokenID),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "uint64",
 		"name":  "transferTokenId",
-		"value": uint64ToHex(evmTx.data.TransferTokenID),
+		"value": uint64ToHex(evmTx.TransferTokenID),
 	})
 	typedTxData = append(typedTxData, map[string]string{
 		"type":  "string",
@@ -158,6 +158,9 @@ func solidityPack(types, values []string) ([]byte, error) {
 				return nil, errors.New("unsupported byte size")
 			}
 			v, err := hex.DecodeString(value[2:])
+			if err != nil {
+				return nil, err
+			}
 			if len(v) > size {
 				return nil, errors.New("data is large than size")
 			}
