@@ -53,6 +53,16 @@ type PrecompiledContract interface {
 	Name() string
 }
 
+// PrecompiledContractWithEVM is a precompile that requires EVM access.
+// Used by MNT precompiles (currentMntID, transferMnt, mintMNT, balanceMNT, deploySystemContract).
+// Structs implementing this interface also implement PrecompiledContract; the plain Run
+// method is never called because Call() detects PrecompiledContractWithEVM first.
+type PrecompiledContractWithEVM interface {
+	RequiredGas(input []byte) uint64
+	RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]byte, error)
+	Name() string
+}
+
 // PrecompiledContracts contains the precompiled contracts supported at the given fork.
 type PrecompiledContracts map[common.Address]PrecompiledContract
 
@@ -212,24 +222,27 @@ func init() {
 }
 
 func activePrecompiledContracts(rules params.Rules) PrecompiledContracts {
+	var base PrecompiledContracts
 	switch {
 	case rules.IsUBT:
-		return PrecompiledContractsVerkle
+		base = PrecompiledContractsVerkle
 	case rules.IsOsaka:
-		return PrecompiledContractsOsaka
+		base = PrecompiledContractsOsaka
 	case rules.IsPrague:
-		return PrecompiledContractsPrague
+		base = PrecompiledContractsPrague
 	case rules.IsCancun:
-		return PrecompiledContractsCancun
+		base = PrecompiledContractsCancun
 	case rules.IsBerlin:
-		return PrecompiledContractsBerlin
+		base = PrecompiledContractsBerlin
 	case rules.IsIstanbul:
-		return PrecompiledContractsIstanbul
+		base = PrecompiledContractsIstanbul
 	case rules.IsByzantium:
-		return PrecompiledContractsByzantium
+		base = PrecompiledContractsByzantium
 	default:
-		return PrecompiledContractsHomestead
+		base = PrecompiledContractsHomestead
 	}
+	contracts := maps.Clone(base)
+	return contracts
 }
 
 // ActivePrecompiledContracts returns a copy of precompiled contracts enabled with the current configuration.
@@ -279,6 +292,17 @@ func RunPrecompiledContract(stateDB StateDB, p PrecompiledContract, address comm
 	}
 	output, err := p.Run(input)
 	return output, gas, err
+}
+
+// runMNTPrecompiledContract runs an MNT precompiled contract that requires EVM access.
+func runMNTPrecompiledContract(evm *EVM, p PrecompiledContractWithEVM, addr common.Address, input []byte, gas GasBudget, caller common.Address, value *uint256.Int) ([]byte, GasBudget, error) {
+	contract := NewContract(caller, addr, value, gas, evm.jumpDests)
+	gasCost := p.RequiredGas(input)
+	if ok := contract.UseGas(GasCosts{RegularGas: gasCost}, nil, tracing.GasChangeCallPrecompiledContract); !ok {
+		return nil, gas, ErrOutOfGas
+	}
+	ret, err := p.RunWithEVM(input, evm, contract)
+	return ret, contract.Gas, err
 }
 
 // ecrecover implemented as a native contract.

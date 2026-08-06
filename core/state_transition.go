@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
@@ -234,6 +235,10 @@ type Message struct {
 	// - From is not verified to be an EOA
 	// - GasLimit is not checked against the protocol defined tx gaslimit
 	SkipTransactionChecks bool
+
+	GasTokenID      uint64 // token used for gas; QKC is 35760 and token 0 is an MNT
+	TransferTokenID uint64 // token used for value transfer; QKC is 35760 and token 0 is an MNT
+	FullShardKey    uint32 // destination full shard key; upper 16 bits are the QuarkChain chain ID
 }
 
 // TransactionToMessage converts a transaction into a Message.
@@ -284,6 +289,8 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		SkipTransactionChecks: false,
 		BlobHashes:            tx.BlobHashes(),
 		BlobGasFeeCap:         blobGasFeeCap,
+		GasTokenID:            qkccommon.DefaultTokenID,
+		TransferTokenID:       qkccommon.DefaultTokenID,
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
@@ -312,6 +319,9 @@ func ApplyMessage(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, err
 		gp = NewGasPool(msg.GasLimit)
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
+	if stateDB, ok := evm.StateDB.(interface{ SetFullShardKey(uint32) }); ok {
+		stateDB.SetFullShardKey(msg.FullShardKey)
+	}
 	return newStateTransition(evm, msg, gp).execute()
 }
 
@@ -377,7 +387,7 @@ func (st *stateTransition) buyGas() error {
 			return fmt.Errorf("%w: address %v required balance exceeds 256 bits", ErrInsufficientFunds, st.msg.From.Hex())
 		}
 	}
-	if st.msg.Value != nil {
+	if st.msg.Value != nil && st.msg.GasTokenID == st.msg.TransferTokenID {
 		if _, overflow := balanceCheck.AddOverflow(balanceCheck, st.msg.Value); overflow {
 			return fmt.Errorf("%w: address %v required balance exceeds 256 bits", ErrInsufficientFunds, st.msg.From.Hex())
 		}
@@ -413,8 +423,18 @@ func (st *stateTransition) buyGas() error {
 			}
 		}
 	}
-	if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
-		return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
+	gasTokenID := st.msg.GasTokenID
+	if gasTokenID == qkccommon.DefaultTokenID {
+		// QKC gas: check native balance
+		if have, want := st.state.GetBalance(st.msg.From), balanceCheck; have.Cmp(want) < 0 {
+			return fmt.Errorf("%w: address %v have %v want %v", ErrInsufficientFunds, st.msg.From.Hex(), have, want)
+		}
+	} else {
+		// Non-QKC gas token: check MNT balance
+		if have := st.state.GetMntBalance(st.msg.From, gasTokenID); have.Cmp(balanceCheck) < 0 {
+			return fmt.Errorf("%w: address %v MNT gas token %d have %v want %v",
+				ErrInsufficientFunds, st.msg.From.Hex(), gasTokenID, have, balanceCheck)
+		}
 	}
 	if err := st.gp.SubGas(st.msg.GasLimit); err != nil {
 		return err
@@ -426,7 +446,11 @@ func (st *stateTransition) buyGas() error {
 	st.gasRemaining = vm.NewGasBudget(st.msg.GasLimit)
 	st.initialBudget = st.gasRemaining.Copy()
 
-	st.state.SubBalance(st.msg.From, mgval, tracing.BalanceDecreaseGasBuy)
+	if gasTokenID == qkccommon.DefaultTokenID {
+		st.state.SubBalance(st.msg.From, mgval, tracing.BalanceDecreaseGasBuy)
+	} else {
+		st.state.SubMntBalance(st.msg.From, mgval, gasTokenID)
+	}
 	return nil
 }
 
@@ -593,7 +617,7 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 	if value == nil {
 		value = new(uint256.Int)
 	}
-	if !value.IsZero() && !st.evm.Context.CanTransfer(st.state, msg.From, value) {
+	if !value.IsZero() && !st.evm.Context.CanTransfer(st.state, msg.From, value, msg.TransferTokenID) {
 		return nil, fmt.Errorf("%w: address %v", ErrInsufficientFundsForTransfer, msg.From.Hex())
 	}
 

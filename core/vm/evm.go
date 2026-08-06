@@ -28,14 +28,15 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
 type (
 	// CanTransferFunc is the signature of a transfer guard function
-	CanTransferFunc func(StateDB, common.Address, *uint256.Int) bool
+	CanTransferFunc func(StateDB, common.Address, *uint256.Int, uint64) bool
 	// TransferFunc is the signature of a transfer function
-	TransferFunc func(StateDB, common.Address, common.Address, *uint256.Int, *params.Rules)
+	TransferFunc func(StateDB, common.Address, common.Address, *uint256.Int, *params.Rules, uint64)
 	// GetHashFunc returns the n'th block hash in the blockchain
 	// and is used by the BLOCKHASH EVM op code.
 	GetHashFunc func(uint64) common.Hash
@@ -73,10 +74,13 @@ type BlockContext struct {
 // All fields can change between transactions.
 type TxContext struct {
 	// Message information
-	Origin       common.Address      // Provides information for ORIGIN
-	GasPrice     *uint256.Int        // Provides information for GASPRICE (and is used to zero the basefee if NoBaseFee is set)
-	BlobHashes   []common.Hash       // Provides information for BLOBHASH
-	AccessEvents *state.AccessEvents // Capture all state accesses for this tx
+	Origin          common.Address      // Provides information for ORIGIN
+	GasPrice        *uint256.Int        // Provides information for GASPRICE (and is used to zero the basefee if NoBaseFee is set)
+	BlobHashes      []common.Hash       // Provides information for BLOBHASH
+	AccessEvents    *state.AccessEvents // Capture all state accesses for this tx
+	GasTokenID      uint64              // token used to pay gas (default: 35760 = QKC)
+	TransferTokenID uint64              // token used for value transfer (default: 35760 = QKC)
+	FullShardKey    uint32              // destination full shard key; upper 16 bits are the QuarkChain chain ID
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
@@ -145,7 +149,7 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		jumpDests:   newMapJumpDests(),
 		arena:       newArena(),
 	}
-	evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	evm.precompiles = activePrecompiledContractsQKC(evm.chainRules, blockCtx.Time, config.QKCConfig)
 
 	switch {
 	case evm.chainRules.IsAmsterdam:
@@ -260,7 +264,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	syscall := isSystemCall(caller)
 
 	// Fail if we're trying to transfer more than the available balance.
-	if !syscall && !value.IsZero() && !evm.Context.CanTransfer(evm.StateDB, caller, value) {
+	if !syscall && !value.IsZero() && !evm.Context.CanTransfer(evm.StateDB, caller, value, evm.TxContext.TransferTokenID) {
 		return nil, gas, ErrInsufficientBalance
 	}
 	snapshot := evm.StateDB.Snapshot()
@@ -292,11 +296,15 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	// Calling this is required even for zero-value transfers,
 	// to ensure the state clearing mechanism is applied.
 	if !syscall {
-		evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules)
+		evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules, evm.TxContext.TransferTokenID)
 	}
 
 	if isPrecompile {
-		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
+		if mntP, ok := p.(PrecompiledContractWithEVM); ok {
+			ret, gas, err = runMNTPrecompiledContract(evm, mntP, addr, input, gas, caller, value)
+		} else {
+			ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
+		}
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		code := evm.resolveCode(addr)
@@ -309,6 +317,14 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			contract.SetCallCode(evm.resolveCodeHash(addr), code)
 			ret, err = evm.Run(contract, input, false)
 			gas = contract.Gas
+
+			// QKC: if transferring a non-default MNT token, recipient must have acknowledged
+			// the token via currentMntID precompile, else revert (mirrors goquarkchain behavior).
+			if err == nil && len(contract.Code) != 0 && !contract.TokenIDQueried &&
+				evm.TxContext.TransferTokenID != qkccommon.DefaultTokenID &&
+				!value.IsZero() {
+				err = ErrExecutionReverted
+			}
 		}
 	}
 	// When an error was returned by the EVM or when setting the creation code
@@ -352,7 +368,7 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	// Note although it's noop to transfer X ether to caller itself. But
 	// if caller doesn't have enough balance, it would be an error to allow
 	// over-charging itself. So the check here is necessary.
-	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
+	if !evm.Context.CanTransfer(evm.StateDB, caller, value, evm.TxContext.TransferTokenID) {
 		return nil, gas, ErrInsufficientBalance
 	}
 	var snapshot = evm.StateDB.Snapshot()
@@ -492,7 +508,7 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, common.Address{}, gas, ErrDepth
 	}
-	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
+	if !evm.Context.CanTransfer(evm.StateDB, caller, value, evm.TxContext.TransferTokenID) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
 	nonce := evm.StateDB.GetNonce(caller)
@@ -562,7 +578,7 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 			evm.Config.Tracer.OnGasChange(prior, gas.RegularGas, tracing.GasChangeWitnessContractInit)
 		}
 	}
-	evm.Context.Transfer(evm.StateDB, caller, address, value, &evm.chainRules)
+	evm.Context.Transfer(evm.StateDB, caller, address, value, &evm.chainRules, evm.TxContext.TransferTokenID)
 
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
@@ -624,6 +640,10 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
 	return evm.create(caller, code, gas, value, contractAddr, CREATE)
+}
+
+func (evm *EVM) createAt(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
+	return evm.create(caller, code, gas, value, address, CREATE)
 }
 
 // Create2 creates a new contract using code as deployment code.

@@ -21,9 +21,12 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/holiman/uint256"
 )
 
 func TestFloorDataGas(t *testing.T) {
@@ -283,5 +286,33 @@ func TestIntrinsicGas(t *testing.T) {
 				t.Fatalf("gas mismatch: got %+v, want %+v", got, want)
 			}
 		})
+	}
+}
+
+func TestTokenZeroRoutesToMNT(t *testing.T) {
+	db, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := common.HexToAddress("0x100")
+	recipient := common.HexToAddress("0x200")
+	db.AddBalance(sender, uint256.NewInt(100), 0)
+	db.AddMntBalance(sender, uint256.NewInt(50), 0)
+
+	if !CanTransfer(db, sender, uint256.NewInt(50), 0) || CanTransfer(db, sender, uint256.NewInt(51), 0) {
+		t.Fatal("token 0 transfer guard did not use MNT balance")
+	}
+	if !CanTransfer(db, sender, uint256.NewInt(100), qkccommon.DefaultTokenID) {
+		t.Fatal("default token transfer guard did not use QKC balance")
+	}
+	Transfer(db, sender, recipient, uint256.NewInt(20), new(params.Rules), 0)
+	if got := db.GetMntBalance(sender, 0); !got.Eq(uint256.NewInt(30)) {
+		t.Fatalf("sender token 0 balance = %v, want 30", got)
+	}
+	if got := db.GetMntBalance(recipient, 0); !got.Eq(uint256.NewInt(20)) {
+		t.Fatalf("recipient token 0 balance = %v, want 20", got)
+	}
+	if got := db.GetBalance(sender); !got.Eq(uint256.NewInt(100)) {
+		t.Fatalf("sender QKC balance changed: %v", got)
 	}
 }

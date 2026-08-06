@@ -38,6 +38,10 @@ type hookedStateDB struct {
 	hooks *tracing.Hooks
 }
 
+func (s *hookedStateDB) SetFullShardKey(fullShardKey uint32) {
+	s.inner.SetFullShardKey(fullShardKey)
+}
+
 // NewHookedState wraps the given stateDb with the given hooks
 func NewHookedState(stateDb *StateDB, hooks *tracing.Hooks) *hookedStateDB {
 	s := &hookedStateDB{stateDb, hooks}
