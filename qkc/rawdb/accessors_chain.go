@@ -1,4 +1,4 @@
-// Modified from go-ethereum under GNU Lesser General Public License
+// Copyright 2026-2027, QuarkChain.
 package rawdb
 
 import (
@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/QuarkChain/goquarkchain/core/types"
-	"github.com/QuarkChain/goquarkchain/serialize"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -500,22 +501,22 @@ func ReadGenesis(db DatabaseReader, hash common.Hash) *types.MinorBlock {
 	return res
 }
 
-func WriteConfirmedCrossShardTxList(db DatabaseWriter, hash common.Hash, list *types.CrossShardTransactionDepositList) {
+func WriteConfirmedCrossShardTxList(db DatabaseWriter, hash common.Hash, list *types.CrossShardTransactionList) {
 	data, err := serialize.SerializeToBytes(list)
 	if err != nil {
-		log.Crit("can not serialize CrossShardTransactionDepositList")
+		log.Crit("can not serialize CrossShardTransactionList")
 	}
 	key := makeConfirmedXShardKey(hash)
 	if err := db.Put(key, data); err != nil {
 		log.Crit("Failed to store header", "err", err)
 	}
 }
-func ReadConfirmedCrossShardTxList(db DatabaseReader, hash common.Hash) *types.CrossShardTransactionDepositList {
+func ReadConfirmedCrossShardTxList(db DatabaseReader, hash common.Hash) *types.CrossShardTransactionList {
 	data, _ := db.Get(makeConfirmedXShardKey(hash))
 	if len(data) == 0 {
 		return nil
 	}
-	list := new(types.CrossShardTransactionDepositList)
+	list := new(types.CrossShardTransactionList)
 	if err := serialize.Deserialize(serialize.NewByteBuffer(data), list); err != nil {
 		log.Error("Invalid block header Deserialize", "hash", hash, "err", err)
 		return nil
@@ -523,22 +524,22 @@ func ReadConfirmedCrossShardTxList(db DatabaseReader, hash common.Hash) *types.C
 	return list
 }
 
-func WriteCrossShardTxList(db DatabaseWriter, hash common.Hash, list *types.CrossShardTransactionDepositList) {
+func WriteCrossShardTxList(db DatabaseWriter, hash common.Hash, list *types.CrossShardTransactionList) {
 	data, err := serialize.SerializeToBytes(list)
 	if err != nil {
-		log.Crit("can not serialize CrossShardTransactionDepositList")
+		log.Crit("can not serialize CrossShardTransactionList")
 	}
 	key := makeXShardTxList(hash)
 	if err := db.Put(key, data); err != nil {
 		log.Crit("Failed to store header", "err", err)
 	}
 }
-func ReadCrossShardTxList(db DatabaseReader, hash common.Hash) *types.CrossShardTransactionDepositList {
+func ReadCrossShardTxList(db DatabaseReader, hash common.Hash) *types.CrossShardTransactionList {
 	data, _ := db.Get(makeXShardTxList(hash))
 	if len(data) == 0 {
 		return nil
 	}
-	list := new(types.CrossShardTransactionDepositList)
+	list := new(types.CrossShardTransactionList)
 	if err := serialize.Deserialize(serialize.NewByteBuffer(data), list); err != nil {
 		log.Error("Invalid block header Deserialize", "hash", hash, "err", err)
 		return nil
@@ -574,7 +575,7 @@ func GetMinorBlockCnt(db DatabaseReader, fullShardID uint32, height uint32) []by
 	return data
 }
 
-func WriteMinorBlockCoinbase(db DatabaseWriter, mHash common.Hash, coinbaseToken *types.TokenBalances) {
+func WriteMinorBlockCoinbase(db DatabaseWriter, mHash common.Hash, coinbaseToken *qkcCommon.TokenBalances) {
 	tokenBytes, err := serialize.SerializeToBytes(coinbaseToken)
 	if err != nil {
 		log.Crit("failed to put minor block coinbase", "serialize err", err)
@@ -585,12 +586,12 @@ func WriteMinorBlockCoinbase(db DatabaseWriter, mHash common.Hash, coinbaseToken
 	}
 }
 
-func GetMinorBlockCoinbaseToken(db DatabaseReader, hash common.Hash) *types.TokenBalances {
+func GetMinorBlockCoinbaseToken(db DatabaseReader, hash common.Hash) *qkcCommon.TokenBalances {
 	data, _ := db.Get(makeMinorBlockCoinbase(hash))
 	if len(data) == 0 {
 		return nil
 	}
-	tokens := new(types.TokenBalances)
+	tokens := new(qkcCommon.TokenBalances)
 	if err := serialize.DeserializeFromBytes(data, tokens); err != nil {
 		log.Error("GetMinorBlockCoinbaseToken", "deserialize err", err)
 		return nil
@@ -599,7 +600,7 @@ func GetMinorBlockCoinbaseToken(db DatabaseReader, hash common.Hash) *types.Toke
 }
 
 func ContainMinorBlockByHash(db DatabaseReader, hash common.Hash) bool {
-	if has, err := db.Has(makeMinorBlockCoinbase(hash)); !has || err != nil {
+	if has, err := db.Has(blockKey(hash)); !has || err != nil {
 		return false
 	}
 	return true

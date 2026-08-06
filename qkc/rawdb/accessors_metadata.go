@@ -1,19 +1,22 @@
-// Modified from go-ethereum under GNU Lesser General Public License
+// Copyright 2026-2027, QuarkChain.
 
 package rawdb
 
 import (
 	"encoding/binary"
 	"encoding/json"
-	
-	"github.com/QuarkChain/goquarkchain/cluster/config"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/config"
 )
 
 // ReadDatabaseVersion retrieves the version number of the database.
 func ReadDatabaseVersion(db DatabaseReader) uint32 {
-	enc, _ := db.Get(databaseVerisionKey)
+	enc, err := db.Get(databaseVerisionKey)
+	if err != nil || len(enc) != 4 {
+		return 0
+	}
 	return binary.BigEndian.Uint32(enc)
 }
 
@@ -21,6 +24,9 @@ func ReadDatabaseVersion(db DatabaseReader) uint32 {
 func WriteDatabaseVersion(db DatabaseWriter, version uint32) {
 	bytes := make([]byte, 4, 4)
 	binary.BigEndian.PutUint32(bytes, version)
+	if err := db.Put(databaseVerisionKey, bytes); err != nil {
+		log.Crit("Failed to store database version", "err", err)
+	}
 }
 
 // ReadChainConfig retrieves the consensus settings based on the given genesis hash.

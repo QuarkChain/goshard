@@ -1,4 +1,4 @@
-// Modified from go-ethereum under GNU Lesser General Public License
+// Copyright 2026-2027, QuarkChain.
 
 package rawdb
 
@@ -8,23 +8,23 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcTypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
 var (
 	limitedSizeByes = []byte{'\x01', '\x02', '\x03'}
-	tx1             = types.Transaction{TxType: types.EvmTx, EvmTx: types.NewEvmTransaction(1, account.BytesToIdentityRecipient([]byte{0x11}), big.NewInt(111), 1111, big.NewInt(11111), 0, 1, 1, 0, []byte{0x11, 0x11, 0x11}, 0, 0)}
-	tx2             = types.Transaction{TxType: types.EvmTx, EvmTx: types.NewEvmTransaction(2, account.BytesToIdentityRecipient([]byte{0x22}), big.NewInt(222), 2222, big.NewInt(22222), 0, 1, 1, 0, []byte{0x22, 0x22, 0x22}, 0, 0)}
-	tx3             = types.Transaction{TxType: types.EvmTx, EvmTx: types.NewEvmTransaction(3, account.BytesToIdentityRecipient([]byte{0x33}), big.NewInt(333), 3333, big.NewInt(33333), 0, 1, 1, 0, []byte{0x33, 0x33, 0x33}, 0, 0)}
-	txs             = types.Transactions{&tx1, &tx2, &tx3}
+	tx1             = qkcTypes.NewEvmTransaction(1, account.BytesToIdentityRecipient([]byte{0x11}), big.NewInt(111), 1111, big.NewInt(11111), 0, 1, 1, 0, []byte{0x11, 0x11, 0x11}, 0, 0)
+	tx2             = qkcTypes.NewEvmTransaction(2, account.BytesToIdentityRecipient([]byte{0x22}), big.NewInt(222), 2222, big.NewInt(22222), 0, 1, 1, 0, []byte{0x22, 0x22, 0x22}, 0, 0)
+	tx3             = qkcTypes.NewEvmTransaction(3, account.BytesToIdentityRecipient([]byte{0x33}), big.NewInt(333), 3333, big.NewInt(33333), 0, 1, 1, 0, []byte{0x33, 0x33, 0x33}, 0, 0)
+	txs             = qkcTypes.Transactions{tx1, tx2, tx3}
 
-	header1 = &types.MinorBlockHeader{Number: uint64(41)}
-	header2 = &types.MinorBlockHeader{Number: uint64(42)}
-	header3 = &types.MinorBlockHeader{Number: uint64(43)}
-	headers = types.MinorBlockHeaders{header1, header2, header3}
+	header1 = &qkcTypes.MinorBlockHeader{Number: uint64(41)}
+	header2 = &qkcTypes.MinorBlockHeader{Number: uint64(42)}
+	header3 = &qkcTypes.MinorBlockHeader{Number: uint64(43)}
+	headers = qkcTypes.MinorBlockHeaders{header1, header2, header3}
 )
 
 // Tests block header storage and retrieval operations.
@@ -33,7 +33,7 @@ func TestMinorBlockHeaderStorage(t *testing.T) {
 
 	// Create a test header to move around the database and make sure it's really new
 	//todo init header and meta
-	header := &types.MinorBlockHeader{Number: uint64(42)}
+	header := &qkcTypes.MinorBlockHeader{Number: uint64(42)}
 	if entry := ReadMinorBlockHeader(db, header.Hash()); entry != nil {
 		t.Fatalf("Non existent header returned: %v", entry)
 	}
@@ -57,7 +57,7 @@ func TestRootBlockHeaderStorage(t *testing.T) {
 
 	// Create a test header to move around the database and make sure it's really new
 	//todo init header and meta
-	header := &types.RootBlockHeader{Number: uint32(42)}
+	header := &qkcTypes.RootBlockHeader{Number: uint32(42)}
 	if entry := ReadRootBlockHeader(db, header.Hash()); entry != nil {
 		t.Fatalf("Non existent header returned: %v", entry)
 	}
@@ -80,10 +80,10 @@ func TestRootBlockStorage(t *testing.T) {
 	db := ethdb.NewMemDatabase()
 
 	// Create a test block to move around the database and make sure it's really new
-	block := types.NewRootBlockWithHeader(&types.RootBlockHeader{
+	block := qkcTypes.NewRootBlockWithHeader(&qkcTypes.RootBlockHeader{
 		Extra:           limitedSizeByes,
-		ParentHash:      types.EmptyHash,
-		MinorHeaderHash: types.EmptyHash,
+		ParentHash:      qkcTypes.EmptyHash,
+		MinorHeaderHash: qkcTypes.EmptyHash,
 	}).WithBody(headers, limitedSizeByes)
 
 	if entry := ReadRootBlock(db, block.Hash()); entry != nil {
@@ -111,10 +111,10 @@ func TestMinorBlockStorage(t *testing.T) {
 	db := ethdb.NewMemDatabase()
 
 	// Create a test block to move around the database and make sure it's really new
-	block := types.NewMinorBlockWithHeader(&types.MinorBlockHeader{
+	block := qkcTypes.NewMinorBlockWithHeader(&qkcTypes.MinorBlockHeader{
 		Extra:      limitedSizeByes,
-		ParentHash: types.EmptyHash,
-	}, &types.MinorBlockMeta{}).WithBody(txs, limitedSizeByes)
+		ParentHash: qkcTypes.EmptyHash,
+	}, &qkcTypes.MinorBlockMeta{}).WithBody(txs, limitedSizeByes)
 
 	if entry := ReadMinorBlock(db, block.Hash()); entry != nil {
 		t.Fatalf("Non existent block returned: %v", entry)
@@ -137,6 +137,24 @@ func TestMinorBlockStorage(t *testing.T) {
 	}
 	if entry := ReadMinorBlockHeader(db, block.Hash()); entry != nil {
 		t.Fatalf("Deleted header returned: %v", entry)
+	}
+}
+
+func TestContainMinorBlockByHashUsesBlockBody(t *testing.T) {
+	db := ethdb.NewMemDatabase()
+	hash := common.HexToHash("0x01")
+
+	if err := db.Put(makeMinorBlockCoinbase(hash), []byte{1}); err != nil {
+		t.Fatalf("write coinbase metadata: %v", err)
+	}
+	if ContainMinorBlockByHash(db, hash) {
+		t.Fatal("coinbase metadata was mistaken for a minor block")
+	}
+	if err := db.Put(blockKey(hash), []byte{1}); err != nil {
+		t.Fatalf("write block body: %v", err)
+	}
+	if !ContainMinorBlockByHash(db, hash) {
+		t.Fatal("stored minor block body was not found")
 	}
 }
 
@@ -205,10 +223,10 @@ func TestHeadStorage(t *testing.T) {
 func TestBlockReceiptStorage(t *testing.T) {
 	db := ethdb.NewMemDatabase()
 
-	receipt1 := &types.Receipt{
-		Status:            types.ReceiptStatusFailed,
+	receipt1 := &qkcTypes.Receipt{
+		Status:            qkcTypes.ReceiptStatusFailed,
 		CumulativeGasUsed: 1,
-		Logs: []*types.Log{
+		Logs: []*qkcTypes.Log{
 			{Recipient: account.BytesToIdentityRecipient([]byte{0x11})},
 			{Recipient: account.BytesToIdentityRecipient([]byte{0x01, 0x11})},
 		},
@@ -216,10 +234,10 @@ func TestBlockReceiptStorage(t *testing.T) {
 		ContractAddress: account.BytesToIdentityRecipient([]byte{0x01, 0x11, 0x11}),
 		GasUsed:         111111,
 	}
-	receipt2 := &types.Receipt{
+	receipt2 := &qkcTypes.Receipt{
 		PostState:         common.Hash{2}.Bytes(),
 		CumulativeGasUsed: 2,
-		Logs: []*types.Log{
+		Logs: []*qkcTypes.Log{
 			{Recipient: account.BytesToIdentityRecipient([]byte{0x22})},
 			{Recipient: account.BytesToIdentityRecipient([]byte{0x02, 0x22})},
 		},
@@ -227,7 +245,7 @@ func TestBlockReceiptStorage(t *testing.T) {
 		ContractAddress: account.BytesToIdentityRecipient([]byte{0x02, 0x22, 0x22}),
 		GasUsed:         222222,
 	}
-	receipts := []*types.Receipt{receipt1, receipt2}
+	receipts := []*qkcTypes.Receipt{receipt1, receipt2}
 
 	// Check that no receipt entries are in a pristine database
 	hash := common.BytesToHash([]byte{0x03, 0x14})

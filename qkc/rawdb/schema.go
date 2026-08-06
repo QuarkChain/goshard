@@ -1,4 +1,4 @@
-// Modified from go-ethereum under GNU Lesser General Public License
+// Copyright 2026-2027, QuarkChain.
 package rawdb
 
 import (

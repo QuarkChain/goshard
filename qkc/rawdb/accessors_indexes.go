@@ -1,12 +1,12 @@
-// Modified from go-ethereum under GNU Lesser General Public License
+// Copyright 2026-2027, QuarkChain.
 
 package rawdb
 
 import (
-	"github.com/QuarkChain/goquarkchain/core/types"
-	"github.com/QuarkChain/goquarkchain/serialize"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // ReadBlockContentLookupEntry retrieves the positional metadata associated with a transaction
