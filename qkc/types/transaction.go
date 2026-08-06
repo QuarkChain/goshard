@@ -179,8 +179,7 @@ func (tx *EvmTx) validate() error {
 		return errors.New("transfer token ID exceeds maximum")
 	}
 	if tx.Version == 2 {
-		defaultTokenID := qkcCommon.TokenIDEncode("QKC")
-		if tx.GasTokenID != defaultTokenID || tx.TransferTokenID != defaultTokenID {
+		if tx.GasTokenID != qkcCommon.DefaultTokenID || tx.TransferTokenID != qkcCommon.DefaultTokenID {
 			return ErrV2NonDefaultToken
 		}
 		if tx.fromChainID() != tx.toChainID() || tx.fromShardKey() != 0 || tx.toShardKey() != 0 {
