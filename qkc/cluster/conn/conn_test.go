@@ -109,6 +109,26 @@ func (t *fakeFrameTransport) closes() int {
 	return t.closeCount
 }
 
+// validPongPayload returns a serialized empty PongResponse for tests that need
+// to feed valid response frames through the fake transport.
+func validPongPayload(t *testing.T) []byte {
+	t.Helper()
+	payload, err := serialize.SerializeToBytes(&wire.PongResponse{})
+	if err != nil {
+		t.Fatalf("serialize pong: %v", err)
+	}
+	return payload
+}
+
+// registerPingSerializer registers a PING/PONG serializer on conn so that
+// BaseConn can deserialize inbound PONG responses.
+func registerPingSerializer(t *testing.T, conn *BaseConn) {
+	t.Helper()
+	conn.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+	})
+}
+
 // ── TCP test pair helper ──────────────────────────────────────────────────────
 
 // writeRawFrame writes a raw frame directly to the underlying TCP connection,
@@ -157,10 +177,15 @@ func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()
 	client = NewBaseConnFromConn(clientConn, readFrame, wire.WriteFrameNoMeta, logger)
 	server = NewBaseConnFromConn(serverConn, readFrame, wire.WriteFrameNoMeta, logger)
 
-	// Register PING serializer and a minimal handler on the server so it can
-	// deserialize PING requests and produce PONG responses.
+	// Register PING serializer on both sides so that the client can deserialize
+	// inbound PONG responses (BaseConn validates response payloads before
+	// rpc_id matching) and the server can deserialize PING requests.
+	pingSer := OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
+	client.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing): pingSer,
+	})
 	server.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](),
+		byte(wire.ClusterOpPing): pingSer,
 	})
 	server.RegisterTypedHandlers(map[byte]TypedHandler{
 		byte(wire.ClusterOpPing): func(req any) (any, error) {
@@ -367,6 +392,7 @@ func TestConcurrentCloseAndSendRPC(t *testing.T) {
 func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, conn)
 	conn.Start()
 	defer conn.Close()
 
@@ -382,7 +408,7 @@ func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("fake transport did not receive request")
 	}
-	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 1}
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 1, Payload: validPongPayload(t)}
 
 	select {
 	case <-time.After(50 * time.Millisecond):
@@ -420,6 +446,7 @@ func TestBaseConn_ExpiredLateResponseClosesConnection(t *testing.T) {
 
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, conn)
 	conn.Start()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -442,7 +469,7 @@ func TestBaseConn_ExpiredLateResponseClosesConnection(t *testing.T) {
 	}
 
 	time.Sleep(10 * time.Millisecond)
-	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID}
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: validPongPayload(t)}
 	select {
 	case <-conn.WaitUntilClosed():
 	case <-time.After(time.Second):
@@ -452,9 +479,11 @@ func TestBaseConn_ExpiredLateResponseClosesConnection(t *testing.T) {
 
 func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 	const iterations = 100
+	pongPayload := validPongPayload(t)
 	for i := 0; i < iterations; i++ {
 		tr := newFakeFrameTransport()
 		conn := NewBaseConn(tr, log.New())
+		registerPingSerializer(t, conn)
 		conn.Start()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -477,7 +506,7 @@ func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 		}()
 		go func() {
 			<-start
-			tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID}
+			tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: pongPayload}
 		}()
 		close(start)
 
@@ -547,7 +576,7 @@ func TestBaseConn_HandlerCompletionAfterCloseIsDropped(t *testing.T) {
 	handlerStarted := make(chan struct{})
 	releaseHandler := make(chan struct{})
 	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](),
+		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 	})
 	conn.RegisterTypedHandlers(map[byte]TypedHandler{
 		byte(wire.ClusterOpPing): func(req any) (any, error) {
@@ -626,6 +655,7 @@ func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, conn)
 	conn.Start()
 	defer conn.Close()
 
@@ -637,7 +667,7 @@ func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 
 	select {
 	case request := <-tr.writes:
-		tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID}
+		tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: validPongPayload(t)}
 	case <-time.After(time.Second):
 		t.Fatal("fake transport did not receive request")
 	}
@@ -872,5 +902,109 @@ func TestDispatch_ExactPayloadProcessesNormally(t *testing.T) {
 	}
 	if server.IsClosed() {
 		t.Fatal("server should remain open after well-formed exchange")
+	}
+}
+
+// TestDispatch_MalformedResponsePayloadClosesConnection verifies that a PONG
+// response with a malformed payload (trailing bytes) causes the receiver to
+// close the connection.
+func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
+	client, server, cleanup := newTestBaseConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	// Append a trailing byte to a valid PONG payload so deserialization fails.
+	// BaseConn deserializes response payloads before rpc_id matching, so the
+	// malformed payload closes the connection.
+	pongPayload, err := serialize.SerializeToBytes(&wire.PongResponse{
+		ID:              []byte("server"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	if err != nil {
+		t.Fatalf("serialize pong: %v", err)
+	}
+	malformedPong := append(pongPayload, 0xFF)
+
+	writeRawFrame(t, server.conn, &wire.Frame{
+		Opcode:  byte(wire.ClusterOpPong),
+		RPCID:   1,
+		Payload: malformedPong,
+	})
+
+	select {
+	case <-client.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not close connection after malformed PONG payload")
+	}
+}
+
+// TestDispatch_UnknownResponseOpcodeClosesConnection verifies that a frame
+// with an opcode that is neither a registered request handler nor a registered
+// response opcode causes the receiver to close the connection.
+func TestDispatch_UnknownResponseOpcodeClosesConnection(t *testing.T) {
+	client, server, cleanup := newTestBaseConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	// 0xFF is not a registered ClusterOp on either side: no handler and no
+	// response serializer. The receiver must close the connection.
+	writeRawFrame(t, server.conn, &wire.Frame{
+		Opcode:  0xFF,
+		RPCID:   1,
+		Payload: []byte{0x00},
+	})
+
+	select {
+	case <-client.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not close connection after unknown response opcode")
+	}
+}
+
+// TestDispatch_ValidResponseBehaviorUnchanged verifies that a valid PONG
+// response is delivered to the caller. SendRPC returns *wire.Frame; BaseConn
+// validates the payload internally but does not return the deserialized object,
+// so the caller deserializes the payload itself.
+func TestDispatch_ValidResponseBehaviorUnchanged(t *testing.T) {
+	client, server, cleanup := newTestBaseConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("client"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
+	if err != nil {
+		t.Fatalf("send ping rpc: %v", err)
+	}
+	if resp.Opcode != byte(wire.ClusterOpPong) {
+		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.ClusterOpPong, resp.Opcode)
+	}
+
+	// The caller receives the raw frame and deserializes the payload itself.
+	var pong wire.PongResponse
+	if err := serialize.DeserializeFromBytes(resp.Payload, &pong); err != nil {
+		t.Fatalf("deserialize pong: %v", err)
+	}
+
+	if client.IsClosed() {
+		t.Fatal("client should remain open after valid response")
+	}
+	if server.IsClosed() {
+		t.Fatal("server should remain open after valid response")
 	}
 }

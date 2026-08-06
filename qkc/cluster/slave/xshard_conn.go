@@ -73,12 +73,13 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 		pingReceived:         make(chan struct{}),
 	}
 
-	// Register serializers for all opcodes that SlaveConnection understands.
-	// This matches Python's SLAVE_OP_SERIALIZER_MAP.
+	// Register serializers for all slave-to-slave RPC opcodes. Each serializer
+	// is registered under both its request opcode and response opcode so BaseConn
+	// can deserialize inbound response payloads.
 	xc.BaseConn.RegisterOpSerializers(map[byte]*conn.OpSerializer{
-		byte(wire.ClusterOpPing):                        conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](),
-		byte(wire.ClusterOpAddXshardTxListRequest):      conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](),
-		byte(wire.ClusterOpBatchAddXshardTxListRequest): conn.OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](),
+		byte(wire.ClusterOpPing):                        conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+		byte(wire.ClusterOpAddXshardTxListRequest):      conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+		byte(wire.ClusterOpBatchAddXshardTxListRequest): conn.OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](byte(wire.ClusterOpBatchAddXshardTxListResponse)),
 	})
 
 	// Register handlers for all slave-to-slave RPCs.

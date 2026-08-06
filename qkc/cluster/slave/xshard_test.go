@@ -5,7 +5,6 @@ package slave
 import (
 	"context"
 	"net"
-	"syscall"
 	"testing"
 	"time"
 
@@ -165,10 +164,12 @@ func TestXshardConn_RPCRoundTrip(t *testing.T) {
 	}
 }
 
-// TestXshardConn_RejectEmptyShardList verifies that empty shard list causes
-// connection close (Python's close_with_error behavior). The peer ID is still
-// recorded before closing, matching Python's handle_ping.
-func TestXshardConn_XshardRPCStubReturnsProtocolError(t *testing.T) {
+// TestXshardConn_XshardRPCStubClosesConnection verifies that the
+// ADD_XSHARD_TX_LIST_REQUEST stub returns ErrHandlerNotImplemented, which
+// BaseConn treats as a connection-fatal error (matches Python's
+// close_with_error). The RPC fails with ErrConnectionClosed on the caller
+// side and both endpoints end up closed.
+func TestXshardConn_XshardRPCStubClosesConnection(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 	server.Start()
@@ -184,23 +185,12 @@ func TestXshardConn_XshardRPCStubReturnsProtocolError(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	frame, err := client.SendXshardTxList(ctx, payload)
-	if err != nil {
-		t.Fatalf("send xshard RPC: %v", err)
+	_, err = client.SendXshardTxList(ctx, payload)
+	if err != conn.ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
 	}
-	if frame.Opcode != byte(wire.ClusterOpAddXshardTxListResponse) {
-		t.Fatalf("unexpected response opcode: 0x%x", frame.Opcode)
-	}
-	resp, err := ParseAddXshardTxListResponse(frame)
-	if err == nil {
-		t.Fatal("expected unavailable-shard response")
-	}
-	if resp == nil || resp.ErrorCode != uint32(syscall.ENOENT) {
-		t.Fatalf("unexpected response: %#v, err=%v", resp, err)
-	}
-	if client.IsClosed() || server.IsClosed() {
-		t.Fatal("xshard RPC stub closed a live connection")
-	}
+	<-client.WaitUntilClosed()
+	<-server.WaitUntilClosed()
 }
 
 func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
@@ -217,9 +207,12 @@ func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
 			peerDone <- err
 			return
 		}
-		payload, err := serialize.SerializeToBytes(&wire.PongResponse{
-			ID:              []byte("server"),
-			FullShardIDList: []uint32{2},
+		// Send a valid AddXshardTxListResponse payload with the wrong opcode.
+		// BaseConn validates response payloads against the opcode's registered
+		// serializer before delivering, so the payload must deserialize cleanly
+		// as AddXshardTxListResponse; SendPing then rejects the opcode.
+		payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{
+			ErrorCode: 0,
 		})
 		if err == nil {
 			err = wire.WriteFrameNoMeta(serverConn, &wire.Frame{

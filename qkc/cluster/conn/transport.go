@@ -11,10 +11,11 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
 
-type frameTransport interface {
-	readFrame() (*wire.Frame, error)
-	writeFrame(*wire.Frame) error
-	close() error
+// FrameTransport is the frame I/O contract required by BaseConn.
+type FrameTransport interface {
+	ReadFrame() (*wire.Frame, error)
+	WriteFrame(*wire.Frame) error
+	Close() error
 	RemoteAddr() string
 }
 
@@ -51,11 +52,11 @@ func newTransport(
 	}
 }
 
-func (t *transport) readFrame() (*wire.Frame, error) {
+func (t *transport) ReadFrame() (*wire.Frame, error) {
 	return t.readFrameFn(t.r)
 }
 
-func (t *transport) writeFrame(f *wire.Frame) error {
+func (t *transport) WriteFrame(f *wire.Frame) error {
 	if err := t.writeFrameFn(t.w, f); err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}
@@ -69,7 +70,7 @@ func (t *transport) interrupt() error {
 	return t.conn.Close()
 }
 
-func (t *transport) close() error {
+func (t *transport) Close() error {
 	return t.conn.Close()
 }
 

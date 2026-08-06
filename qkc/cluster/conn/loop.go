@@ -329,9 +329,19 @@ func (c *BaseConn) handleFrame(frame *wire.Frame) {
 	}
 
 	if !isRequest {
-		if frame.RPCID == 0 {
-			c.log.Warn("unsupported opcode", "opcode", frame.Opcode)
-			c.beginShutdown(fmt.Errorf("unsupported opcode 0x%x", frame.Opcode))
+		// Response path: opcode lookup -> deserialize -> rpc_id matching -> deliver.
+		// An unknown opcode or malformed payload closes the connection regardless
+		// of rpc_id. The serializers map covers both request and response opcodes,
+		// so a single lookup by frame.Opcode handles both directions.
+		if ser == nil {
+			c.log.Warn("unknown response opcode", "opcode", frame.Opcode)
+			c.beginShutdown(fmt.Errorf("unknown response opcode 0x%x", frame.Opcode))
+			return
+		}
+		resp := ser.NewResponse()
+		if err := ser.Deserialize(frame.Payload, resp); err != nil {
+			c.log.Warn("malformed response payload", "opcode", frame.Opcode, "err", err)
+			c.beginShutdown(fmt.Errorf("malformed response payload for opcode 0x%x: %w", frame.Opcode, err))
 			return
 		}
 		call, ok := c.pending[frame.RPCID]
@@ -401,13 +411,9 @@ func (c *BaseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeri
 		result.err = fmt.Errorf("serialize response failed: %w", err)
 		return
 	}
-	respOpcode := frame.Opcode + 1
-	if ser.ResponseOpCode != 0 {
-		respOpcode = ser.ResponseOpCode
-	}
 	result.response = &wire.Frame{
 		Meta:    frame.Meta,
-		Opcode:  respOpcode,
+		Opcode:  ser.ResponseOpCode,
 		RPCID:   frame.RPCID,
 		Payload: respPayload,
 	}
@@ -466,7 +472,7 @@ func (c *BaseConn) beginShutdown(err error) {
 		return
 	}
 	c.writer.close()
-	if interrupter, ok := c.frameTransport.(interruptibleTransport); ok {
+	if interrupter, ok := c.FrameTransport.(interruptibleTransport); ok {
 		_ = interrupter.interrupt()
 	}
 	if err != nil {
@@ -485,7 +491,7 @@ func (c *BaseConn) closeTransport() {
 		return
 	}
 	c.transportClosed = true
-	if err := c.frameTransport.close(); err != nil && !errors.Is(err, net.ErrClosed) && c.closeErr == nil {
+	if err := c.FrameTransport.Close(); err != nil && !errors.Is(err, net.ErrClosed) && c.closeErr == nil {
 		c.closeErr = err
 	}
 }
@@ -499,7 +505,7 @@ func (c *BaseConn) finishShutdownIfReady() {
 func (c *BaseConn) readerLoop() {
 	defer c.submitEvent(readerStoppedEvent{})
 	for {
-		frame, err := c.readFrame()
+		frame, err := c.FrameTransport.ReadFrame()
 		if err != nil {
 			c.submitEvent(readFailedEvent{err: err})
 			return
@@ -517,7 +523,7 @@ func (c *BaseConn) writerLoop() {
 	for {
 		queued, available := c.writer.next()
 		if queued != nil {
-			if err := c.writeFrame(queued.frame); err != nil {
+			if err := c.FrameTransport.WriteFrame(queued.frame); err != nil {
 				c.submitEvent(writeFailedEvent{err: err})
 				return
 			}

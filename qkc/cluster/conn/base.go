@@ -25,21 +25,21 @@ type TypedHandler func(req any) (resp any, err error)
 // for a specific opcode.
 type OpSerializer struct {
 	NewRequest     func() any
+	NewResponse    func() any
 	Deserialize    func([]byte, any) error
 	Serialize      func(any) ([]byte, error)
 	ResponseOpCode byte
 }
 
-// OpSerializerFor creates an OpSerializer for request type R and response type S.
-func OpSerializerFor[R, S any]() *OpSerializer {
+// OpSerializerFor creates an OpSerializer for request type R and response type
+// S, with the response opcode set to respOp.
+func OpSerializerFor[R, S any](respOp byte) *OpSerializer {
 	return &OpSerializer{
-		NewRequest: func() any { return new(R) },
-		Deserialize: func(p []byte, v any) error {
-			return serialize.DeserializeFromBytes(p, v)
-		},
-		Serialize: func(v any) ([]byte, error) {
-			return serialize.SerializeToBytes(v)
-		},
+		NewRequest:     func() any { return new(R) },
+		NewResponse:    func() any { return new(S) },
+		Deserialize:    func(p []byte, v any) error { return serialize.DeserializeFromBytes(p, v) },
+		Serialize:      func(v any) ([]byte, error) { return serialize.SerializeToBytes(v) },
+		ResponseOpCode: respOp,
 	}
 }
 
@@ -56,7 +56,7 @@ const (
 // implementations. Protocol state is owned by one goroutine. Reader and
 // writer goroutines only convert transport I/O into owner events.
 type BaseConn struct {
-	frameTransport
+	FrameTransport
 
 	conn net.Conn
 
@@ -75,6 +75,8 @@ type BaseConn struct {
 	configMu      sync.RWMutex
 	typedHandlers map[byte]TypedHandler
 	nonRPCOps     map[byte]struct{}
+	// serializers is keyed by both request and response opcodes; each
+	// OpSerializer is installed under both keys by RegisterOpSerializers.
 	serializers   map[byte]*OpSerializer
 	forwarder     func(*wire.Frame) bool
 	validateRPCID func(clusterPeerID uint64, rpcID uint64) bool
@@ -100,12 +102,12 @@ type BaseConn struct {
 }
 
 // NewBaseConn creates a BaseConn using the supplied frame transport.
-func NewBaseConn(tr frameTransport, logger log.Logger) *BaseConn {
+func NewBaseConn(tr FrameTransport, logger log.Logger) *BaseConn {
 	if logger == nil {
 		logger = log.Root()
 	}
 	rc := &BaseConn{
-		frameTransport: tr,
+		FrameTransport: tr,
 		events:         make(chan connEvent, 64),
 		done:           make(chan struct{}),
 		shutdownDone:   make(chan struct{}),
@@ -172,6 +174,13 @@ func (c *BaseConn) RegisterTypedHandlers(handlers map[byte]TypedHandler) {
 }
 
 // RegisterOpSerializers registers serializers before Start is called.
+//
+// The input map is keyed by request opcodes. Each OpSerializer is also
+// installed under its ResponseOpCode, so the internal serializers map covers
+// both directions of every RPC. ResponseOpCode must be set: BaseConn
+// deserializes inbound response payloads before rpc_id matching, so an unknown
+// or malformed response closes the connection rather than being delivered to
+// the caller.
 func (c *BaseConn) RegisterOpSerializers(serializers map[byte]*OpSerializer) {
 	c.configMu.Lock()
 	defer c.configMu.Unlock()
@@ -182,7 +191,23 @@ func (c *BaseConn) RegisterOpSerializers(serializers map[byte]*OpSerializer) {
 		if ser == nil {
 			panic("serializer must not be nil")
 		}
+		if ser.NewRequest == nil {
+			panic("serializer NewRequest must not be nil")
+		}
+		if ser.NewResponse == nil {
+			panic("serializer NewResponse must not be nil")
+		}
+		if ser.Deserialize == nil {
+			panic("serializer Deserialize must not be nil")
+		}
+		if ser.Serialize == nil {
+			panic("serializer Serialize must not be nil")
+		}
+		if ser.ResponseOpCode == 0 {
+			panic("serializer ResponseOpCode must be set")
+		}
 		c.serializers[opcode] = ser
+		c.serializers[ser.ResponseOpCode] = ser
 	}
 }
 
@@ -249,7 +274,7 @@ func (c *BaseConn) SendRPCMeta(
 func (c *BaseConn) Error() <-chan error { return c.errChan }
 
 // RemoteAddr returns the transport's remote address.
-func (c *BaseConn) RemoteAddr() string { return c.frameTransport.RemoteAddr() }
+func (c *BaseConn) RemoteAddr() string { return c.FrameTransport.RemoteAddr() }
 
 // WaitUntilActive returns a channel closed after the connection becomes active
 // or closes before activation.
