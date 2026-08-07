@@ -107,9 +107,15 @@ python <path-to-goshard>/qkc/testdata/gen_exec_golden.py
 ```
 
 The checkout is taken from `$PYQUARKCHAIN`, defaulting to the current directory.
-The script's first two cases are the genesis allocations themselves, and it
-fails unless their state roots match the pinned values above — a mismatch
-elsewhere is then a real disagreement, not a case description that never reached
-`EvmState`.
+
+Two things guard the result. The script's first two cases are the genesis
+allocations themselves, and it fails unless their state roots match the pinned
+values above — a mismatch elsewhere is then a real disagreement, not a case
+description that never reached `EvmState`. And because that self-check says
+nothing about execution — changing `messages.py` leaves the genesis root
+untouched — every vector file records the oracle it came from: the pyquarkchain
+commit and a digest of each module that decides execution. The script refuses to
+run when one of those modules has uncommitted changes; `--allow-dirty` proceeds
+and names the edited modules in the output instead.
 
 Consumed by `qkc`, `qkc/config`, `qkc/types`, and `cmd/slave` tests.

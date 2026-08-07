@@ -28,16 +28,37 @@ The pyquarkchain checkout is taken from $PYQUARKCHAIN, defaulting to the
 current directory.
 """
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
-from fractions import Fraction
 
 _TESTDATA_DIR = os.path.dirname(os.path.abspath(__file__))
 _QKC_DIR = os.path.dirname(_TESTDATA_DIR)
 _OUT_DIR = os.path.join(_TESTDATA_DIR, "exec_golden")
 
-sys.path.insert(0, os.environ.get("PYQUARKCHAIN", os.getcwd()))
+_PYQUARKCHAIN = os.path.abspath(os.environ.get("PYQUARKCHAIN", os.getcwd()))
+_ALLOW_DIRTY = "--allow-dirty" in sys.argv
+
+# The modules that decide what these vectors say. Their digests go into the
+# output so a vector can be traced back to the exact source that produced it:
+# the genesis self-check cannot do that job, since changing execution semantics
+# leaves the genesis state root untouched.
+_ORACLE_MODULES = (
+    "quarkchain/evm/messages.py",
+    "quarkchain/evm/state.py",
+    "quarkchain/evm/transactions.py",
+    "quarkchain/evm/specials.py",
+    "quarkchain/evm/opcodes.py",
+    "quarkchain/cluster/shard_state.py",
+    "quarkchain/core.py",
+    "quarkchain/genesis.py",
+    "quarkchain/config.py",
+    "quarkchain/utils.py",
+)
+
+sys.path.insert(0, _PYQUARKCHAIN)
 try:
     from quarkchain.cluster.cluster_config import ClusterConfig
     from quarkchain.core import Address, CrossShardTransactionDeposit
@@ -57,6 +78,48 @@ except ImportError as exc:  # pragma: no cover - operator feedback only
 
 # ---------------------------------------------------------------------------
 # helpers
+
+
+def oracle_provenance():
+    """Identify the pyquarkchain the vectors were taken from.
+
+    A golden vector is only as auditable as its oracle. Recording the commit,
+    refusing a dirty checkout and digesting the modules that decide execution
+    is what makes a regenerated file's differences attributable.
+    """
+    def git(*args):
+        return subprocess.check_output(
+            ("git", "-C", _PYQUARKCHAIN) + args, text=True
+        ).strip()
+
+    try:
+        commit = git("rev-parse", "HEAD")
+        # Only the modules above are checked for local edits. A dirty script or
+        # an untracked note has no bearing on what the vectors say, and failing
+        # on those would only teach the operator to pass --allow-dirty by habit.
+        status = git("status", "--porcelain", "--", *_ORACLE_MODULES)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        sys.exit("cannot read the pyquarkchain checkout at {}: {}".format(_PYQUARKCHAIN, exc))
+
+    # Porcelain lines are two status characters, a space, then the path.
+    dirty = sorted(line.split(maxsplit=1)[-1] for line in status.splitlines() if line.strip())
+    if dirty and not _ALLOW_DIRTY:
+        sys.exit(
+            "these pyquarkchain modules decide what the vectors say and have "
+            "uncommitted changes:\n  {}\ncommit or stash them so the vectors "
+            "name a reproducible oracle, or pass --allow-dirty to record the "
+            "edits in the output instead".format("\n  ".join(dirty))
+        )
+
+    digests = {}
+    for relative in _ORACLE_MODULES:
+        with open(os.path.join(_PYQUARKCHAIN, relative), "rb") as f:
+            digests[relative] = hashlib.sha256(f.read()).hexdigest()[:16]
+    return {
+        "pyquarkchain_commit": commit,
+        "dirty_modules": dirty,
+        "module_digests": digests,
+    }
 
 
 def _hex(data):
@@ -232,7 +295,18 @@ def build_state_case(networks, case):
     full_shard_id = case.get("full_shard_id", 1)
     state = make_evm_state(cluster_config, full_shard_id)
     alloc = case["pre_alloc"]
+
+    # The allocation is committed before the operations run, so they start from
+    # a state that has been through the trie -- accounts read back from leaves,
+    # nothing left touched from having been created. Executing against a still
+    # dirty cache is a shape that only occurs while genesis is being built, and
+    # it changes the answers: an account nothing touches is skipped by commit
+    # entirely, so a case run against uncommitted allocations can pin a result
+    # that no block would ever produce.
     apply_alloc(state, alloc)
+    state.commit()
+    pre_state_root = _hex(state.trie.root_hash)
+
     run_state_ops(state, case["ops"])
     state.commit()
 
@@ -250,6 +324,10 @@ def build_state_case(networks, case):
         "network": case["network"],
         "full_shard_id": full_shard_id,
         "pre_alloc": alloc,
+        # The root the allocation commits to, before any operation runs. A
+        # consumer that reaches a different one has a problem in its allocation
+        # handling, not in the operations under test.
+        "pre_state_root": pre_state_root,
         "ops": case["ops"],
         "post_state_root": _hex(state.trie.root_hash),
         "accounts": observe(state, recipients, slots),
@@ -399,10 +477,14 @@ def state_cases(networks):
             "name": "revert_does_not_restore_reset_balances",
             "comment": "reset_balances journals the restore onto a misspelled "
             "attribute (state.py:192-198), so reverting brings back the token trie "
-            "but not the balances; the account stays drained",
+            "but not the balances; the account stays drained. The opening credit "
+            "is what makes that observable: reset_balances marks nothing touched, "
+            "so without it commit would skip the account and both a faithful and "
+            "a naively correct implementation would agree",
             "network": "devnet",
             "pre_alloc": {A + "00000001": {"balances": {"QKC": "5"}, "code": "0x6000"}},
             "ops": [
+                {"op": "delta_token_balance", "address": A, "token": "QKC", "value": "1"},
                 {"op": "snapshot"},
                 {"op": "reset_balances", "address": A},
                 {"op": "revert"},
@@ -410,8 +492,10 @@ def state_cases(networks):
         },
         {
             "name": "revert_after_del_account",
-            "comment": "del_account is six journaled steps; what a revert puts back "
-            "is whatever those journal entries actually restore",
+            "comment": "reverting del_account leaves the trie untouched: unwinding "
+            "its six steps ends at the touched flag set_nonce journaled, which was "
+            "False, so commit skips the account rather than rewriting the leaf it "
+            "would otherwise have drained (a selfdestruct in a reverted frame)",
             "network": "devnet",
             "pre_alloc": {
                 A
@@ -570,29 +654,52 @@ def build_message_case(networks, case):
     recipients = {a[:40] for a in case["pre_alloc"]}
     recipients.add(case.get("block_coinbase", C))
 
+    # Building and dumping the input stays outside the guarded call below: only
+    # the execution may raise on purpose. A case must also say which outcome it
+    # is pinning, so that a broken constructor, a drifted API or a crash in the
+    # success path cannot quietly become a "this is rejected" vector that the Go
+    # side then asserts forever.
+    expect = case["expect"]
+    if expect not in ("success", "rejected"):
+        raise SystemExit("case {}: expect must be success or rejected".format(case["name"]))
+
     inputs = []
-    result = {}
-    try:
-        if "tx" in case:
-            tx = build_tx(case["tx"], qkc_config)
-            inputs.append({"kind": "transaction", "transaction": dump_tx(tx)})
-            recipients.add(tx.sender.hex())
-            if tx.to:
-                recipients.add(tx.to.hex())
-            success, output = apply_transaction(state, tx, tx.hash)
-        else:
-            deposit = build_deposit(case["deposit"])
-            inputs.append({"kind": "deposit", "deposit": dump_deposit(deposit)})
-            recipients.add(deposit.from_address.recipient.hex())
-            recipients.add(deposit.to_address.recipient.hex())
-            success, output = apply_xshard_deposit(
-                state, deposit, case.get("gas_used_start", 0)
-            )
+    if "tx" in case:
+        tx = build_tx(case["tx"], qkc_config)
+        inputs.append({"kind": "transaction", "transaction": dump_tx(tx)})
+        recipients.add(tx.sender.hex())
+        if tx.to:
+            recipients.add(tx.to.hex())
+
+        def execute():
+            return apply_transaction(state, tx, tx.hash)
+    else:
+        deposit = build_deposit(case["deposit"])
+        inputs.append({"kind": "deposit", "deposit": dump_deposit(deposit)})
+        recipients.add(deposit.from_address.recipient.hex())
+        recipients.add(deposit.to_address.recipient.hex())
+
+        def execute():
+            return apply_xshard_deposit(state, deposit, case.get("gas_used_start", 0))
+
+    if expect == "success":
+        success, output = execute()
         result = {"success": bool(success), "output": _hex(bytes(output))}
-    except Exception as exc:  # noqa: BLE001 - the rejection itself is the vector
-        # The Go side asserts that execution is rejected, not the wording:
-        # the message is pyquarkchain's and carries no consensus meaning.
-        result = {"rejected": True, "error_type": type(exc).__name__, "error": str(exc)}
+    else:
+        try:
+            execute()
+        except Exception as exc:  # noqa: BLE001 - the rejection is the vector
+            # Consumers assert that execution is refused, not the wording: the
+            # message is pyquarkchain's and carries no consensus meaning.
+            result = {
+                "rejected": True,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        else:
+            raise SystemExit(
+                "case {}: expected a rejection, execution succeeded".format(case["name"])
+            )
 
     state.commit()
     return {
@@ -600,6 +707,7 @@ def build_message_case(networks, case):
         "comment": case["comment"],
         "network": case["network"],
         "full_shard_id": full_shard_id,
+        "expect": expect,
         "context": {
             "timestamp": case["timestamp"],
             "gas_limit": state.gas_limit,
@@ -630,6 +738,7 @@ def message_cases():
     return [
         {
             "name": "in_shard_transfer",
+            "expect": "success",
             "comment": "plain in-shard QKC transfer: nonce increments before gas is "
             "bought, fee lands in the coinbase and in block_fee_tokens",
             "network": "devnet",
@@ -646,6 +755,7 @@ def message_cases():
         },
         {
             "name": "in_shard_transfer_nonce_too_high",
+            "expect": "rejected",
             "comment": "apply_transaction re-validates, so a future nonce is "
             "rejected and nothing is written",
             "network": "devnet",
@@ -662,6 +772,7 @@ def message_cases():
         },
         {
             "name": "in_shard_transfer_insufficient_balance",
+            "expect": "rejected",
             "comment": "the balance check covers value plus the whole gas budget",
             "network": "devnet",
             "timestamp": 1,
@@ -677,6 +788,7 @@ def message_cases():
         },
         {
             "name": "xshard_deposit_to_empty_account",
+            "expect": "success",
             "comment": "post-EVM deposit: the value is credited to the sender on "
             "this shard first, then moved by an EVM message (messages.py:368-377)",
             "network": "devnet",
@@ -717,16 +829,22 @@ def check_genesis_selfcheck(state_vectors):
             )
 
 
-def write(filename, comment, vectors):
+def write(filename, comment, source, vectors):
     path = os.path.join(_OUT_DIR, filename)
     with open(path, "w") as f:
-        json.dump({"_comment": comment, "cases": vectors}, f, indent=2, sort_keys=False)
+        json.dump(
+            {"_comment": comment, "source": source, "cases": vectors},
+            f,
+            indent=2,
+            sort_keys=False,
+        )
         f.write("\n")
     print("wrote {} ({} cases)".format(path, len(vectors)))
 
 
 def main():
     os.makedirs(_OUT_DIR, exist_ok=True)
+    source = oracle_provenance()
     networks = load_networks()
 
     state_vectors = [build_state_case(networks, c) for c in state_cases(networks)]
@@ -737,7 +855,10 @@ def main():
             "Direct EvmState mutations and the state root they commit to, generated by",
             "qkc/testdata/gen_exec_golden.py against pyquarkchain. The genesis_alloc_*",
             "cases are the generator's self-check against minor_genesis_golden.json.",
+            "Allocations are committed before a case's operations run, so the",
+            "operations start from a state that has been through the trie.",
         ],
+        source,
         state_vectors,
     )
 
@@ -747,8 +868,10 @@ def main():
         [
             "Single transactions and cross-shard deposits driven through",
             "apply_transaction / apply_xshard_deposit, generated by",
-            "qkc/testdata/gen_exec_golden.py against pyquarkchain.",
+            "qkc/testdata/gen_exec_golden.py against pyquarkchain. Each case",
+            "declares whether it pins a successful execution or a rejection.",
         ],
+        source,
         message_vectors,
     )
 

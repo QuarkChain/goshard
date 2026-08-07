@@ -53,6 +53,7 @@ type goldenStateCase struct {
 	Comment  string                      `json:"comment"`
 	Network  string                      `json:"network"`
 	PreAlloc map[string]goldenAllocation `json:"pre_alloc"`
+	PreRoot  string                      `json:"pre_state_root"`
 	Ops      []goldenOp                  `json:"ops"`
 	Root     string                      `json:"post_state_root"`
 	Accounts map[string]goldenAccount    `json:"accounts"`
@@ -265,11 +266,24 @@ func checkAccounts(t *testing.T, state *StateDB, want map[string]goldenAccount) 
 // TestStateGolden replays every state-level vector: the same allocation, the
 // same operations, and then the state root pyquarkchain committed to, plus the
 // per-account reads that say where a mismatch came from.
+//
+// The allocation is committed before the operations run, as the generator does.
+// Executing against a still-dirty allocation would leave every allocated
+// account touched, and an account nothing touches is skipped by commit — so the
+// two arrangements do not answer the same question.
 func TestStateGolden(t *testing.T) {
 	for _, tc := range loadStateGolden(t) {
 		t.Run(tc.Name, func(t *testing.T) {
 			state := newTestState(t)
 			applyAlloc(t, state, tc.PreAlloc)
+			preRoot, err := state.Commit()
+			if err != nil {
+				t.Fatalf("commit allocation: %v", err)
+			}
+			if want := common.HexToHash(tc.PreRoot); preRoot != want {
+				t.Fatalf("allocation state root = %s, want %s", preRoot, want)
+			}
+
 			runOps(t, state, tc.Ops)
 
 			root, err := state.Commit()
@@ -433,6 +447,60 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	}
 	if root != base {
 		t.Errorf("root after reverting everything = %s, want the committed %s", root, base)
+	}
+}
+
+// TestCorruptTrieFailsLoudly: a missing trie node has to surface as an error,
+// not as an absent account. Reading it through geth's Must* accessors returns
+// nothing and logs, which would let a corrupt database read as an empty account,
+// silently drop the writes made against it, and still report a committed root —
+// the same root as before, since the failed update leaves the trie untouched.
+func TestCorruptTrieFailsLoudly(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	state, err := New(coretypes.EmptyRootHash, db, NewDatabase(db))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr := mustRecipient(t, "0x00000000000000000000000000000000000000a1")
+	other := mustRecipient(t, "0x00000000000000000000000000000000000000b2")
+	state.SetFullShardKey(1)
+	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(1000))
+	state.DeltaTokenBalance(other, qkcCommon.DefaultTokenID, big.NewInt(2000))
+	root, err := state.Commit()
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Drop every trie node but the root, so the leaves can no longer be resolved.
+	it := db.NewIterator(nil, nil)
+	var orphaned [][]byte
+	for it.Next() {
+		if key := common.CopyBytes(it.Key()); len(key) == common.HashLength && common.BytesToHash(key) != root {
+			orphaned = append(orphaned, key)
+		}
+	}
+	it.Release()
+	if len(orphaned) == 0 {
+		t.Fatal("nothing to corrupt: the trie is a single node")
+	}
+	for _, key := range orphaned {
+		if err := db.Delete(key); err != nil {
+			t.Fatalf("corrupt: %v", err)
+		}
+	}
+
+	corrupt, err := New(root, db, NewDatabase(db))
+	if err != nil {
+		return // Refusing to open at all is a loud enough failure.
+	}
+	corrupt.GetBalance(addr, qkcCommon.DefaultTokenID)
+	if corrupt.Error() == nil {
+		t.Error("reading an unresolvable account reported no error")
+	}
+	corrupt.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(500))
+	again, err := corrupt.Commit()
+	if err == nil {
+		t.Errorf("commit of a corrupt state succeeded with root %s (was %s)", again, root)
 	}
 }
 

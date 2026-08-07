@@ -36,7 +36,7 @@ type stateObject struct {
 	// from the trie and slots waiting to be written, which is why commit walks
 	// all of it. Writing back a value that was only read is a no-op for the root.
 	storage     map[common.Hash]common.Hash
-	storageTrie *trie.StateTrie
+	storageTrie *trie.Trie
 
 	// touched and deleted are the two flags commit dispatches on. del_account
 	// leaves the account touched=false, deleted=true, which is what makes it a
@@ -109,12 +109,12 @@ func (o *stateObject) setStorageRoot(root common.Hash) {
 	o.storageRoot, o.storageTrie = root, nil
 }
 
-func (o *stateObject) getTrie() (*trie.StateTrie, error) {
+func (o *stateObject) getTrie() (*trie.Trie, error) {
 	if o.storageTrie != nil {
 		return o.storageTrie, nil
 	}
 	owner := crypto.Keccak256Hash(o.address.Bytes())
-	tr, err := trie.NewStateTrie(trie.StorageTrieID(o.db.root, owner, o.storageRoot), o.db.triedb)
+	tr, err := trie.New(trie.StorageTrieID(o.db.root, owner, o.storageRoot), o.db.triedb)
 	if err != nil {
 		return nil, fmt.Errorf("account %s: open storage trie %s: %w", o.address.Hex(), o.storageRoot, err)
 	}
@@ -135,14 +135,21 @@ func (o *stateObject) getState(key common.Hash) common.Hash {
 		o.db.setError(err)
 		return common.Hash{}
 	}
-	// GetStorage strips the RLP string wrapper, leaving the big-endian integer
-	// with its leading zeros already gone — the encoding genesis_alloc.go writes.
-	enc, err := tr.GetStorage(common.Address{}, key.Bytes())
+	enc, err := tr.Get(hashKey(key.Bytes()))
 	if err != nil {
 		o.db.setError(fmt.Errorf("account %s: read storage %s: %w", o.address.Hex(), key, err))
 		return common.Hash{}
 	}
-	value := common.BytesToHash(enc)
+	// A slot holds the big-endian integer with its leading zeros stripped,
+	// wrapped as an RLP string — the encoding genesis_alloc.go writes.
+	var content []byte
+	if len(enc) > 0 {
+		if err := rlp.DecodeBytes(enc, &content); err != nil {
+			o.db.setError(fmt.Errorf("account %s: decode storage %s: %w", o.address.Hex(), key, err))
+			return common.Hash{}
+		}
+	}
+	value := common.BytesToHash(content)
 	o.storage[key] = value
 	return value
 }
@@ -161,13 +168,16 @@ func (o *stateObject) commitStorage() (*trienode.NodeSet, error) {
 	for key, value := range o.storage {
 		if value == (common.Hash{}) {
 			// A zero slot is absent, not stored as zero.
-			if err := tr.DeleteStorage(common.Address{}, key.Bytes()); err != nil {
+			if err := tr.Delete(hashKey(key.Bytes())); err != nil {
 				return nil, fmt.Errorf("account %s: delete storage %s: %w", o.address.Hex(), key, err)
 			}
 			continue
 		}
-		trimmed := common.TrimLeftZeroes(value.Bytes())
-		if err := tr.UpdateStorage(common.Address{}, key.Bytes(), trimmed); err != nil {
+		enc, err := rlp.EncodeToBytes(common.TrimLeftZeroes(value.Bytes()))
+		if err != nil {
+			return nil, fmt.Errorf("account %s: encode storage %s: %w", o.address.Hex(), key, err)
+		}
+		if err := tr.Update(hashKey(key.Bytes()), enc); err != nil {
 			return nil, fmt.Errorf("account %s: write storage %s: %w", o.address.Hex(), key, err)
 		}
 	}

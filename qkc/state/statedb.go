@@ -39,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
@@ -55,6 +56,13 @@ import (
 func NewDatabase(db ethdb.Database) *triedb.Database {
 	return triedb.NewDatabase(db, triedb.HashDefaults)
 }
+
+// hashKey is the keying pyquarkchain's SecureTrie applies to every key
+// (quarkchain/evm/securetrie.py). geth's StateTrie wraps the same hashing, but
+// only behind Must* accessors that log a missing node and carry on returning
+// nothing — which would turn a corrupt database into an absent account. The
+// plain trie is used instead so every read and write reports its errors.
+func hashKey(key []byte) []byte { return crypto.Keccak256(key) }
 
 // executionContext is what pyquarkchain keeps on State outside the trie
 // (STATE_DEFAULTS, state.py:45). A snapshot copies it wholesale and a revert
@@ -94,7 +102,7 @@ func (c executionContext) clone() executionContext {
 type StateDB struct {
 	db     ethdb.Database
 	triedb *triedb.Database
-	trie   *trie.StateTrie
+	trie   *trie.Trie
 	root   common.Hash
 
 	stateObjects map[account.Recipient]*stateObject
@@ -117,7 +125,7 @@ type revision struct {
 
 // New opens the state a root names.
 func New(root common.Hash, db ethdb.Database, tdb *triedb.Database) (*StateDB, error) {
-	tr, err := trie.NewStateTrie(trie.StateTrieID(root), tdb)
+	tr, err := trie.New(trie.StateTrieID(root), tdb)
 	if err != nil {
 		return nil, fmt.Errorf("open state trie %s: %w", root, err)
 	}
@@ -152,7 +160,13 @@ func (s *StateDB) getStateObject(addr account.Recipient) *stateObject {
 		return obj
 	}
 	obj := newObject(s, addr, s.ctx.fullShardKey)
-	if enc := s.trie.MustGet(addr.Bytes()); len(enc) > 0 {
+	enc, err := s.trie.Get(hashKey(addr.Bytes()))
+	if err != nil {
+		// A missing node is a corrupt database, not an absent account. Recording
+		// it here is what stops Commit from later writing a root derived from a
+		// state it could not read.
+		s.setError(fmt.Errorf("account %s: read leaf: %w", addr.Hex(), err))
+	} else if len(enc) > 0 {
 		acct := new(Account)
 		if err := rlp.DecodeBytes(enc, acct); err != nil {
 			s.setError(fmt.Errorf("account %s: decode leaf: %w", addr.Hex(), err))
@@ -479,14 +493,24 @@ func (s *StateDB) Commit() (common.Hash, error) {
 			obj.dirtyCode = false
 		}
 		if obj.empty() {
-			s.trie.MustDelete(addr.Bytes())
+			if err := s.trie.Delete(hashKey(addr.Bytes())); err != nil {
+				return common.Hash{}, fmt.Errorf("account %s: delete leaf: %w", addr.Hex(), err)
+			}
 			continue
 		}
 		blob, err := obj.encode()
 		if err != nil {
 			return common.Hash{}, err
 		}
-		s.trie.MustUpdate(addr.Bytes(), blob)
+		if err := s.trie.Update(hashKey(addr.Bytes()), blob); err != nil {
+			return common.Hash{}, fmt.Errorf("account %s: write leaf: %w", addr.Hex(), err)
+		}
+	}
+
+	// A read that failed above left the objects incomplete, and hashing them
+	// would produce a root for a state that was never read.
+	if s.dbErr != nil {
+		return common.Hash{}, s.dbErr
 	}
 
 	root, set := s.trie.Commit(false)
@@ -515,7 +539,7 @@ func (s *StateDB) Commit() (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("write code: %w", err)
 	}
 
-	tr, err := trie.NewStateTrie(trie.StateTrieID(root), s.triedb)
+	tr, err := trie.New(trie.StateTrieID(root), s.triedb)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("reopen state trie %s: %w", root, err)
 	}
