@@ -1,10 +1,9 @@
 // Copyright 2026-2027, QuarkChain.
 
-// Package state holds the QuarkChain state encoding. A QuarkChain account carries
-// per-token balances and the full shard key of the address that owns it, so the
-// leaves of the state trie differ from geth's — the trie machinery underneath is
-// geth's, unchanged. Only the leaf encoding lives here; the callers that build a
-// trie out of these accounts own the trie writes.
+// The state trie's leaf encoding. A QuarkChain account carries per-token
+// balances and the full shard key of the address that owns it, so the leaves
+// differ from geth's — the trie machinery underneath is geth's, unchanged.
+
 package state
 
 import "github.com/ethereum/go-ethereum/common"
