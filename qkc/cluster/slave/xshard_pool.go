@@ -18,7 +18,7 @@ type XshardPool struct {
 	mu       sync.RWMutex
 	conns    map[uint32][]*XshardConn
 	inbound  []*XshardConn
-	slaveIDs map[string]bool // Tracks slave IDs to prevent duplicate connections
+	slaveIDs map[string]bool // Known remote slave identities (Python's slave_ids set). Used for outbound duplicate dialing prevention (VerifyAndAddToShards) and HasSlaveID queries. A single remote slave may have multiple XshardConn objects; this is an identity registry, not a connection count.
 	watched  map[*XshardConn]struct{}
 	closed   bool
 	log      log.Logger
@@ -26,6 +26,9 @@ type XshardPool struct {
 
 // NewXshardPool creates a new, empty connection pool.
 func NewXshardPool(logger log.Logger) *XshardPool {
+	if logger == nil {
+		logger = log.Root()
+	}
 	return &XshardPool{
 		conns:    make(map[uint32][]*XshardConn),
 		slaveIDs: make(map[string]bool),
@@ -36,7 +39,10 @@ func NewXshardPool(logger log.Logger) *XshardPool {
 
 // Add adds a connection to the pool for the given full shard ID.
 // If the pool is already closed, the connection is closed immediately.
-// If the slave ID is already tracked, the connection is closed and a warning is logged.
+// This method is a test helper for direct indexing without identity verification.
+// For production outbound connections, use VerifyAndAddToShards instead.
+// Unlike VerifyAndAddToShards, Add does not reject duplicate slave IDs —
+// slaveIDs is an identity registry, not a connection uniqueness constraint.
 func (p *XshardPool) Add(fullShardID uint32, conn *XshardConn) {
 	p.mu.Lock()
 	if p.closed {
@@ -46,16 +52,7 @@ func (p *XshardPool) Add(fullShardID uint32, conn *XshardConn) {
 		return
 	}
 
-	// Check for duplicate slave ID (matches Python's slave_ids deduplication)
 	remoteID := string(conn.RemoteID())
-	if remoteID != "" && p.slaveIDs[remoteID] {
-		p.mu.Unlock()
-		conn.Close()
-		p.log.Warn("duplicate slave connection rejected", "slave_id", remoteID, "full_shard_id", fullShardID)
-		return
-	}
-
-	// Track the slave ID
 	if remoteID != "" {
 		p.slaveIDs[remoteID] = true
 	}
@@ -124,7 +121,8 @@ func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn,
 	if remoteID != "" && p.slaveIDs[remoteID] {
 		p.mu.Unlock()
 		conn.Close()
-		return fmt.Errorf("duplicate slave connection rejected: %s", remoteID)
+		p.log.Info("outbound xshard connection skipped: duplicate slave id", "remote_id", remoteID, "remote", conn.RemoteAddr())
+		return nil
 	}
 	if remoteID != "" {
 		p.slaveIDs[remoteID] = true
@@ -295,20 +293,27 @@ func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 		return false
 	}
 
-	// Register slave ID for deduplication
-	if len(remoteID) > 0 && p.slaveIDs[string(remoteID)] {
-		p.mu.Unlock()
-		conn.Close()
-		p.log.Warn("duplicate inbound slave connection rejected", "slave_id", string(remoteID), "remote", conn.RemoteAddr())
-		return false
-	}
+	// Record slave identity (Python's slave_ids set).
+	// Inbound connections are not deduplicated: a single remote slave may
+	// have multiple connections (e.g., bidirectional S1↔S2 where both sides
+	// initiate). Outbound deduplication is handled by VerifyAndAddToShards.
 	if len(remoteID) > 0 {
 		p.slaveIDs[string(remoteID)] = true
 	}
 
-	// Index by remote shard IDs for routing
+	// Index by remote shard IDs for routing.
+	// Skip if already indexed for this shard — WatchAndIndex is idempotent.
 	for _, shardID := range shardList {
-		p.conns[shardID] = append(p.conns[shardID], conn)
+		found := false
+		for _, c := range p.conns[shardID] {
+			if c == conn {
+				found = true
+				break
+			}
+		}
+		if !found {
+			p.conns[shardID] = append(p.conns[shardID], conn)
+		}
 	}
 
 	// Remove from inbound tracking now that the connection is indexed.
@@ -449,16 +454,18 @@ func (p *XshardPool) hasRemoteIDLocked(remoteID string) bool {
 	return false
 }
 
-// OutboundSize returns the number of outbound connections (indexed by shard ID).
+// OutboundSize returns the number of unique outbound connections.
 func (p *XshardPool) OutboundSize() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	total := 0
+	seen := make(map[*XshardConn]struct{})
 	for _, conns := range p.conns {
-		total += len(conns)
+		for _, conn := range conns {
+			seen[conn] = struct{}{}
+		}
 	}
-	return total
+	return len(seen)
 }
 
 // InboundSize returns the number of tracked inbound connections.

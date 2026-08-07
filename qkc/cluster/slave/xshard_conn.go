@@ -84,7 +84,8 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 
 	// Register handlers for all slave-to-slave RPCs.
 	// PING/PONG is the slave-to-slave identity exchange.
-	// ADD_XSHARD_TX_LIST and BATCH_ADD_XSHARD_TX_LIST are stubs for protocol compatibility.
+	// ADD_XSHARD_TX_LIST and BATCH_ADD_XSHARD_TX_LIST are fail-fast stubs.
+	// If invoked, the connection is closed to expose the unimplemented path.
 	xc.BaseConn.RegisterTypedHandlers(map[byte]conn.TypedHandler{
 		// ── Permanent connection handler ───────────────────────────────
 		// PING/PONG is the slave-to-slave identity exchange.
@@ -92,9 +93,11 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 		byte(wire.ClusterOpPing): xc.handlePing,
 
 		// ── Migration stubs ─────────────────────────────────────────────────
-		// Wire messages are registered for protocol opcode coverage.
-		// Business logic is out of scope for this migration; handlers return
-		// ErrHandlerNotImplemented until the corresponding implementation is migrated.
+		// Wire messages and serializers are registered for protocol opcode coverage.
+		// Handlers return ErrHandlerNotImplemented to trigger connection close.
+		// This is intentional fail-fast: if any of these opcodes are invoked
+		// before their implementation is migrated, the connection dies to
+		// prevent silent data loss.
 
 		byte(wire.ClusterOpAddXshardTxListRequest):      xc.handleAddXshardTxList,
 		byte(wire.ClusterOpBatchAddXshardTxListRequest): xc.handleBatchAddXshardTxList,
@@ -107,6 +110,12 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 // the shard list, and returns a PONG with this slave's identity.
 func (x *XshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
+
+	// Reject empty slave ID — a peer without a valid identity cannot be used
+	// for routing or deduplication.
+	if len(ping.ID) == 0 {
+		return nil, fmt.Errorf("empty slave ID in PING")
+	}
 
 	// Record peer identity (only on first ping, matches Python's "if not self.id")
 	x.stateMu.Lock()
@@ -136,25 +145,27 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 
 // handleAddXshardTxList is the ADD_XSHARD_TX_LIST_REQUEST stub.
 //
-// The wire message is registered for protocol coverage, but xshard transaction
-// processing is not part of this migration.
+// Business logic is not migrated yet. This handler intentionally
+// returns ErrHandlerNotImplemented so that invoking an unsupported
+// migration path fails fast instead of silently accepting requests.
 func (x *XshardConn) handleAddXshardTxList(req any) (any, error) {
 	_ = req.(*wire.AddXshardTxListRequest)
 
 	// TODO(xshard): implement xshard transaction processing.
-	x.Logger().Warn("AddXshardTxList stub invoked — transaction will be discarded", "remote", x.RemoteAddr())
+	x.Logger().Warn("AddXshardTxList stub invoked — closing connection (not implemented)", "remote", x.RemoteAddr())
 	return nil, conn.ErrHandlerNotImplemented
 }
 
 // handleBatchAddXshardTxList is the BATCH_ADD_XSHARD_TX_LIST_REQUEST stub.
 //
-// The wire message is registered for protocol coverage, but batch xshard
-// processing is not part of this migration.
+// Business logic is not migrated yet. This handler intentionally
+// returns ErrHandlerNotImplemented so that invoking an unsupported
+// migration path fails fast instead of silently accepting requests.
 func (x *XshardConn) handleBatchAddXshardTxList(req any) (any, error) {
 	_ = req.(*wire.BatchAddXshardTxListRequest)
 
 	// TODO(xshard): implement batch xshard transaction processing.
-	x.Logger().Warn("BatchAddXshardTxList stub invoked — transactions will be discarded", "remote", x.RemoteAddr())
+	x.Logger().Warn("BatchAddXshardTxList stub invoked — closing connection (not implemented)", "remote", x.RemoteAddr())
 	return nil, conn.ErrHandlerNotImplemented
 }
 
@@ -204,7 +215,12 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
-		RootTip:         nil, // slave-to-slave: no root tip required
+		// TODO: Port RootBlock wire type.
+		// Slave-to-slave PING does not consume root tip currently.
+		// Python still serializes an empty RootBlockHeader for this field,
+		// but RootBlock wire representation is not migrated yet.
+		// Keep nil until the RootBlock type and encoding are implemented.
+		RootTip: nil,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("serialize ping: %w", err)
