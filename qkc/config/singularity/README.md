@@ -89,4 +89,27 @@ print('gas_limit  ', block.header.evm_gas_limit, block.meta.evm_xshard_gas_limit
 "
 ```
 
+## Execution golden vectors
+
+The execution layer is pinned the same way, but by a script rather than a one-liner:
+[`qkc/testdata/gen_exec_golden.py`](../../testdata/gen_exec_golden.py) drives
+pyquarkchain's own `EvmState` and writes `qkc/testdata/exec_golden/*.json`.
+It reads the two configs in this directory, so the vectors are bound to the
+configs goshard ships rather than to whatever a pyquarkchain checkout happens to
+carry.
+
+Regenerate with:
+
+```
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed:
+python <path-to-goshard>/qkc/testdata/gen_exec_golden.py
+```
+
+The checkout is taken from `$PYQUARKCHAIN`, defaulting to the current directory.
+The script's first two cases are the genesis allocations themselves, and it
+fails unless their state roots match the pinned values above — a mismatch
+elsewhere is then a real disagreement, not a case description that never reached
+`EvmState`.
+
 Consumed by `qkc`, `qkc/config`, `qkc/types`, and `cmd/slave` tests.
