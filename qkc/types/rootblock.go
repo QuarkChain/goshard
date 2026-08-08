@@ -199,10 +199,8 @@ type extrootblock struct {
 func NewRootBlock(header *RootBlockHeader, mbHeaders MinorBlockHeaders, trackingdata []byte) *RootBlock {
 	b := &RootBlock{header: CopyRootBlockHeader(header), td: new(big.Int)}
 
-	if len(mbHeaders) == 0 {
-		b.header.MinorHeaderHash = EmptyHash
-	} else {
-		b.header.MinorHeaderHash = CalculateMerkleRoot(MinorBlockHeaders(mbHeaders))
+	b.header.MinorHeaderHash = CalculateMerkleRoot(MinorBlockHeaders(mbHeaders))
+	if len(mbHeaders) > 0 {
 		b.minorBlockHeaders = make(MinorBlockHeaders, len(mbHeaders))
 		copy(b.minorBlockHeaders, mbHeaders)
 	}

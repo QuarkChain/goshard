@@ -99,6 +99,14 @@ func TestRootBlockEncoding(t *testing.T) {
 
 }
 
+func TestNewRootBlockEmptyMinorHeaderRoot(t *testing.T) {
+	block := NewRootBlock(&RootBlockHeader{}, nil, nil)
+	want := common.HexToHash("0xdaa77426c30c02a43d9fba4e841a6556c524d47030762eb14dc4af897e605d9b")
+	if got := block.MinorHeaderHash(); got != want {
+		t.Fatalf("empty minor header root mismatch: got %s, want %s", got, want)
+	}
+}
+
 func TestRootBlockSignRefreshesHash(t *testing.T) {
 	block := NewRootBlockWithHeader(&RootBlockHeader{
 		CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),

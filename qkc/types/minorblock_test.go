@@ -193,6 +193,15 @@ func TestCalculateMerkleRoot(t *testing.T) {
 	check("merkleRootHash", CalculateMerkleRoot(list).Hex(), "0xf175a1f35419972b352b2e2a7bbba6a6ade1c5a59da57114b23438bd3dbf82f2")
 }
 
+func TestNewMinorBlockEmptyTransactionRoot(t *testing.T) {
+	header, meta := testMinorBlockHeader()
+	block := NewMinorBlock(header, meta, nil, nil, nil)
+	want := common.HexToHash("0xdaa77426c30c02a43d9fba4e841a6556c524d47030762eb14dc4af897e605d9b")
+	if got := block.TxHash(); got != want {
+		t.Fatalf("empty transaction root mismatch: got %s, want %s", got, want)
+	}
+}
+
 // Golden bytes and hashes below come from pyquarkchain, over the two
 // transactions goldenTxs builds:
 //

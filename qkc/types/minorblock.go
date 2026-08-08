@@ -186,10 +186,8 @@ func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transa
 	if len(txs) != len(receipts) {
 		panic("txs count don't match receipts count.")
 	}
-	if len(txs) == 0 {
-		b.meta.TxHash = EmptyHash
-	} else {
-		b.meta.TxHash = CalculateMerkleRoot(Transactions(txs))
+	b.meta.TxHash = CalculateMerkleRoot(Transactions(txs))
+	if len(txs) > 0 {
 		b.transactions = make(Transactions, len(txs))
 		copy(b.transactions, txs)
 	}

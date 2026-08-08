@@ -346,8 +346,8 @@ func TestCommitGenesisState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CommitGenesisState: %v", err)
 			}
-			if stateRoot != block.Meta.Root {
-				t.Errorf("committed state root = %s, want the derived meta root %s", stateRoot, block.Meta.Root)
+			if stateRoot != block.Meta().Root {
+				t.Errorf("committed state root = %s, want the derived meta root %s", stateRoot, block.Meta().Root)
 			}
 			if !rawdb.HasLegacyTrieNode(db, stateRoot) {
 				t.Errorf("state root %s was not written to the database", stateRoot)
