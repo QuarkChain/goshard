@@ -61,7 +61,9 @@ func WriteBlockContentLookupEntriesWithCrossShardHashList(db DatabaseWriter, blo
 
 // DeleteBlockContentLookupEntry removes all transaction data associated with a hash.
 func DeleteBlockContentLookupEntry(db DatabaseDeleter, hash common.Hash) {
-	db.Delete(lookupKey(hash))
+	if err := db.Delete(lookupKey(hash)); err != nil {
+		log.Crit("Failed to delete content lookup entry", "err", err)
+	}
 }
 
 // ReadMinorHeader retrieves a specific MinorHeader from the database, along with

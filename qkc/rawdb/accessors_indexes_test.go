@@ -6,14 +6,14 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // Tests that positional lookup metadata can be stored and retrieved.
 func TestLookupStorage(t *testing.T) {
-	db := ethdb.NewMemDatabase()
+	db := memorydb.New()
 
 	//nonce uint64, to account.Recipient, amount *big.Int, gasLimit uint64, gasPrice *big.Int, fromFullShardId uint32, toFullShardId uint32, networkId uint32, version uint32, data []byte) *EvmTransaction {
 	tx1 := types.NewEvmTransaction(1, account.BytesToIdentityRecipient([]byte{0x11}), big.NewInt(111), 1111, big.NewInt(11111), 0, 1, 1, 0, []byte{0x11, 0x11, 0x11}, 0, 0)

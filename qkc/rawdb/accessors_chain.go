@@ -332,34 +332,23 @@ func HasReceipts(db DatabaseReader, hash common.Hash) bool {
 	return true
 }
 
-// ReadReceipts retrieves all the transaction receipts belonging to a block.
+// ReadReceipts retrieves the consensus-encoded receipts belonging to a block.
 func ReadReceipts(db DatabaseReader, hash common.Hash) types.Receipts {
-	// Retrieve the flattened receipt slice
 	data, _ := db.Get(blockReceiptsKey(hash))
 	if len(data) == 0 {
 		return nil
 	}
-	// Convert the receipts from their storage form to their internal representation
-	storageReceipts := []*types.ReceiptForStorage{}
-	if err := rlp.DecodeBytes(data, &storageReceipts); err != nil {
+	var receipts types.Receipts
+	if err := rlp.DecodeBytes(data, &receipts); err != nil {
 		log.Error("Invalid receipt array RLP", "hash", hash, "err", err)
 		return nil
-	}
-	receipts := make(types.Receipts, len(storageReceipts))
-	for i, receipt := range storageReceipts {
-		receipts[i] = (*types.Receipt)(receipt)
 	}
 	return receipts
 }
 
-// WriteReceipts stores all the transaction receipts belonging to a block.
+// WriteReceipts stores the consensus encoding of all receipts belonging to a block.
 func WriteReceipts(db DatabaseWriter, hash common.Hash, receipts types.Receipts) {
-	// Convert the receipts into their storage form and serialize them
-	storageReceipts := make([]*types.ReceiptForStorage, len(receipts))
-	for i, receipt := range receipts {
-		storageReceipts[i] = (*types.ReceiptForStorage)(receipt)
-	}
-	bytes, err := rlp.EncodeToBytes(storageReceipts)
+	bytes, err := rlp.EncodeToBytes(receipts)
 	if err != nil {
 		log.Crit("Failed to encode block receipts", "err", err)
 	}
@@ -471,7 +460,7 @@ func WriteTotalTx(db DatabaseWriter, hash common.Hash, txCount uint32) {
 }
 func ReadTotalTx(db DatabaseReader, hash common.Hash) *uint32 {
 	data, _ := db.Get(totalTxCountKey(hash))
-	if len(data) == 0 {
+	if len(data) != 4 {
 		return nil
 	}
 	number := binary.BigEndian.Uint32(data)
@@ -600,7 +589,7 @@ func GetMinorBlockCoinbaseToken(db DatabaseReader, hash common.Hash) *qkcCommon.
 }
 
 func ContainMinorBlockByHash(db DatabaseReader, hash common.Hash) bool {
-	if has, err := db.Has(blockKey(hash)); !has || err != nil {
+	if has, err := db.Has(makeMinorBlockCoinbase(hash)); !has || err != nil {
 		return false
 	}
 	return true
@@ -631,6 +620,9 @@ func PutXShardDepositHashList(db DatabaseWriter, h common.Hash, hList *HashList)
 
 func GetXShardDepositHashList(db DatabaseReader, h common.Hash) *HashList {
 	data, _ := db.Get(makeXShardDepositHashList(h))
+	if len(data) == 0 {
+		return nil
+	}
 	hList := new(HashList)
 	if err := serialize.DeserializeFromBytes(data, hList); err != nil {
 		log.Error("GetXShardDepositHashList", "DeserializeFromBytes err", err)

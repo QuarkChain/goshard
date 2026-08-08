@@ -5,11 +5,11 @@ package rawdb
 import (
 	"testing"
 
-	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 )
 
 func TestDatabaseVersionStorage(t *testing.T) {
-	db := ethdb.NewMemDatabase()
+	db := memorydb.New()
 	if got := ReadDatabaseVersion(db); got != 0 {
 		t.Fatalf("empty database version = %d, want 0", got)
 	}
