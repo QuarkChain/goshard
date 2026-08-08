@@ -193,12 +193,23 @@ func TestCalculateMerkleRoot(t *testing.T) {
 	check("merkleRootHash", CalculateMerkleRoot(list).Hex(), "0xf175a1f35419972b352b2e2a7bbba6a6ade1c5a59da57114b23438bd3dbf82f2")
 }
 
-func TestNewMinorBlockEmptyTransactionRoot(t *testing.T) {
+func TestNewMinorBlockEmptyDerivedFields(t *testing.T) {
 	header, meta := testMinorBlockHeader()
+	header.Bloom[0] = 1
 	block := NewMinorBlock(header, meta, nil, nil, nil)
-	want := common.HexToHash("0xdaa77426c30c02a43d9fba4e841a6556c524d47030762eb14dc4af897e605d9b")
-	if got := block.TxHash(); got != want {
-		t.Fatalf("empty transaction root mismatch: got %s, want %s", got, want)
+	wantTxRoot := common.HexToHash("0xdaa77426c30c02a43d9fba4e841a6556c524d47030762eb14dc4af897e605d9b")
+	if got := block.TxHash(); got != wantTxRoot {
+		t.Fatalf("empty transaction root mismatch: got %s, want %s", got, wantTxRoot)
+	}
+	wantReceiptRoot := common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
+	if got := block.ReceiptHash(); got != wantReceiptRoot {
+		t.Fatalf("empty receipt root mismatch: got %s, want %s", got, wantReceiptRoot)
+	}
+	if got := block.Bloom(); got != (Bloom{}) {
+		t.Fatalf("empty receipt bloom mismatch: got %x", got)
+	}
+	if got, want := block.MetaHash(), block.Meta().Hash(); got != want {
+		t.Fatalf("meta hash mismatch: got %s, want %s", got, want)
 	}
 }
 

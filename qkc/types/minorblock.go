@@ -192,12 +192,9 @@ func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transa
 		copy(b.transactions, txs)
 	}
 
-	if len(receipts) == 0 {
-		b.meta.ReceiptHash = EmptyHash
-	} else {
-		b.meta.ReceiptHash = DeriveSha(Receipts(receipts))
-		b.header.Bloom = CreateBloom(receipts)
-	}
+	b.meta.ReceiptHash = DeriveSha(Receipts(receipts))
+	b.header.Bloom = CreateBloom(receipts)
+	b.header.MetaHash = b.meta.Hash()
 
 	if len(trackingdata) > 0 {
 		b.trackingdata = make([]byte, len(trackingdata))

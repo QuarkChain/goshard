@@ -137,7 +137,7 @@ func TestReconcileGenesisBlockTamperedMeta(t *testing.T) {
 
 	meta := *expected.Meta()
 	meta.Root = common.HexToHash("0xdead")
-	tampered := types.NewMinorBlock(expected.Header(), &meta, nil, nil, nil)
+	tampered := types.NewMinorBlockWithHeader(expected.Header(), &meta)
 	if tampered.Hash() != expected.Hash() {
 		t.Fatal("tampering with the meta moved the block hash: this test no longer covers what it claims")
 	}
