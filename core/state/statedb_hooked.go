@@ -63,6 +63,18 @@ func (s *hookedStateDB) GetBalance(addr common.Address) *uint256.Int {
 	return s.inner.GetBalance(addr)
 }
 
+func (s *hookedStateDB) GetMntBalance(addr common.Address, tokenID uint64) *uint256.Int {
+	return s.inner.GetMntBalance(addr, tokenID)
+}
+
+func (s *hookedStateDB) AddMntBalance(addr common.Address, amount *uint256.Int, tokenID uint64) {
+	s.inner.AddMntBalance(addr, amount, tokenID)
+}
+
+func (s *hookedStateDB) SubMntBalance(addr common.Address, amount *uint256.Int, tokenID uint64) {
+	s.inner.SubMntBalance(addr, amount, tokenID)
+}
+
 func (s *hookedStateDB) GetNonce(addr common.Address) uint64 {
 	return s.inner.GetNonce(addr)
 }
