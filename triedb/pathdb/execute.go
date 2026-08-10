@@ -90,8 +90,7 @@ func apply(db database.NodeDatabase, prevRoot common.Hash, postRoot common.Hash,
 // existent in post-state. Apply the reverse diff and verify if the storage
 // root matches the one in prev-state account.
 func updateAccount(ctx *context, db database.NodeDatabase, addr common.Address) error {
-	// The account was present in prev-state, decode it from the
-	// 'slim-rlp' format bytes.
+	// The account was present in prev-state, decode it from the slim-RLP format.
 	addrHash := crypto.Keccak256Hash(addr.Bytes())
 	prev, err := types.FullAccount(ctx.accounts[addr])
 	if err != nil {

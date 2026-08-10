@@ -25,6 +25,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 )
@@ -60,7 +62,7 @@ func TestDump(t *testing.T) {
 	s.state, _ = New(root, tdb)
 	got := string(s.state.Dump(nil))
 	want := `{
-    "root": "71edff0130dd2385947095001c73d9e28d862fc286fca2b922ca6f6f3cddfdd2",
+    "root": "c35a032efd1d99e0348bc4e29ff402133c643fb3c4550e377ab351ca57de387a",
     "accounts": {
         "0x0000000000000000000000000000000000000001": {
             "balance": "22",
@@ -119,7 +121,7 @@ func TestIterativeDump(t *testing.T) {
 	s.state.IterativeDump(nil, json.NewEncoder(b))
 	// check that DumpToCollector contains the state objects that are in trie
 	got := b.String()
-	want := `{"root":"0xd5710ea8166b7b04bc2bfb129d7db12931cee82f75ca8e2d075b4884322bf3de"}
+	want := `{"root":"0x7b190b66d76c5b2d5bd1bf02f1918437d910a2e825a16465cf57d1bd1c2433fe"}
 {"balance":"22","nonce":0,"root":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","codeHash":"0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470","address":"0x0000000000000000000000000000000000000001","key":"0x1468288056310c82aa4c01a7e12a10f8111a0560e72b700555479031b86c357d"}
 {"balance":"1337","nonce":0,"root":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","codeHash":"0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470","address":"0x0000000000000000000000000000000000000000","key":"0x5380c7b7ae81a58eb98d9c78de4a1fd7fd9535fc953ed2be602daaa41767312a"}
 {"balance":"0","nonce":0,"root":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","codeHash":"0x87874902497a5bb968da31a2998d8f22e949d1ef6214bcdedd8bae24cca4b9e3","code":"0x03030303030303","address":"0x0000000000000000000000000000000000000102","key":"0xa17eacbc25cda025e81db9c5c62868822c73ce097cee2a63e33a2e41268358a1"}
@@ -186,6 +188,69 @@ func TestSnapshot(t *testing.T) {
 func TestSnapshotEmpty(t *testing.T) {
 	s := newStateEnv()
 	s.state.RevertToSnapshot(s.state.Snapshot())
+}
+
+func TestBalanceChangeTracksQKCPresence(t *testing.T) {
+	state, _ := New(types.EmptyRootHash, NewDatabaseForTesting())
+	addr := common.BytesToAddress([]byte("qkc-presence"))
+	obj := state.getOrNewStateObject(addr)
+
+	obj.SetBalance(new(uint256.Int))
+	if obj.data.MntBalances != nil {
+		t.Fatal("unchanged zero balance created a QKC presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, nil)
+
+	snapshot := state.Snapshot()
+	obj.SetBalance(uint256.NewInt(1000))
+	if obj.data.MntBalances == nil {
+		t.Fatal("balance change did not create a QKC presence marker")
+	}
+	obj.SetBalance(new(uint256.Int))
+	if obj.data.MntBalances == nil {
+		t.Fatal("draining QKC balance removed its presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
+
+	state.RevertToSnapshot(snapshot)
+	obj = state.getStateObject(addr)
+	if obj.data.MntBalances != nil {
+		t.Fatal("snapshot revert did not restore the nil QKC presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, nil)
+}
+
+func TestBalanceChangeRevertKeepsExistingQKCPresence(t *testing.T) {
+	state, _ := New(types.EmptyRootHash, NewDatabaseForTesting())
+	addr := common.BytesToAddress([]byte("qkc-existing"))
+	obj := state.getOrNewStateObject(addr)
+	obj.data.MntBalances = qkccommon.NewEmptyTokenBalances()
+
+	snapshot := state.Snapshot()
+	obj.SetBalance(uint256.NewInt(1000))
+	state.RevertToSnapshot(snapshot)
+	if state.getStateObject(addr).data.MntBalances == nil {
+		t.Fatal("snapshot revert removed an existing QKC presence marker")
+	}
+}
+
+func assertAccountTokenBalance(t *testing.T, account *types.StateAccount, want []byte) {
+	t.Helper()
+	encoded, err := rlp.EncodeToBytes(account)
+	if err != nil {
+		t.Fatalf("failed to encode account: %v", err)
+	}
+	var fields []rlp.RawValue
+	if err := rlp.DecodeBytes(encoded, &fields); err != nil {
+		t.Fatalf("failed to decode account fields: %v", err)
+	}
+	var tokenBalance []byte
+	if err := rlp.DecodeBytes(fields[1], &tokenBalance); err != nil {
+		t.Fatalf("failed to decode token balance: %v", err)
+	}
+	if !bytes.Equal(tokenBalance, want) {
+		t.Fatalf("unexpected token balance encoding: have %x, want %x", tokenBalance, want)
+	}
 }
 
 func TestCreateObjectRevert(t *testing.T) {
