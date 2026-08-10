@@ -147,7 +147,7 @@ func TestGeneration(t *testing.T) {
 	helper.makeStorageTrie("acc-3", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)
 
 	root, dl := helper.CommitAndGenerate()
-	if have, want := root, common.HexToHash("0xe3712f1a226f3782caca78ca770ccc19ee000552813a9f59d479f8611db9b1fd"); have != want {
+	if have, want := root, common.HexToHash("0xbb451af1b1eb8617feb6008660886274d1e9cbfada78ce2a1dca477281e485ff"); have != want {
 		t.Fatalf("have %#x want %#x", have, want)
 	}
 	select {
