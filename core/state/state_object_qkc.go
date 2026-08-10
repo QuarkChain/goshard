@@ -1,0 +1,109 @@
+// Copyright 2026-2027, QuarkChain.
+// This file is part of the go-ethereum library.
+//
+// The go-ethereum library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The go-ethereum library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+
+package state
+
+import (
+	"github.com/ethereum/go-ethereum/log"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/holiman/uint256"
+)
+
+func (s *stateObject) SetMntBalance(amount *uint256.Int, tokenID uint64) {
+	if !s.canSetMntBalance(amount, tokenID) {
+		return
+	}
+	s.setMntBalance(amount, tokenID)
+}
+
+func (s *stateObject) canSetMntBalance(amount *uint256.Int, tokenID uint64) bool {
+	if tokenID == qkccommon.DefaultTokenID {
+		log.Error("SetMntBalance called with QKC tokenID; use SetBalance", "addr", s.address)
+		return false
+	}
+	if amount != nil && !amount.IsZero() && s.GetMntBalance(tokenID).IsZero() {
+		cnt := s.nonZeroMntBalanceCount()
+		if !s.Balance().IsZero() {
+			cnt++
+		}
+		if cnt >= qkccommon.TokenTrieThreshold {
+			log.Error("SetMntBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
+			return false
+		}
+	}
+	return true
+}
+
+func (s *stateObject) nonZeroMntBalanceCount() int {
+	if s.data.MntBalances == nil {
+		return 0
+	}
+	cnt := 0
+	for _, balance := range s.data.MntBalances.GetBalanceMap() {
+		if !balance.IsZero() {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+func (s *stateObject) setMntBalance(amount *uint256.Int, tokenID uint64) {
+	if s.data.MntBalances == nil {
+		s.data.MntBalances = qkccommon.NewEmptyTokenBalances()
+	}
+	s.data.MntBalances.SetValue(amount, tokenID)
+}
+
+func (s *stateObject) AddMntBalance(amount *uint256.Int, tokenID uint64) {
+	if amount.IsZero() {
+		return
+	}
+	if tokenID == qkccommon.DefaultTokenID {
+		log.Error("AddMntBalance called with QKC tokenID; use AddBalance", "addr", s.address)
+		return
+	}
+	cur := s.GetMntBalance(tokenID)
+	s.SetMntBalance(new(uint256.Int).Add(cur, amount), tokenID)
+}
+
+func (s *stateObject) SubMntBalance(amount *uint256.Int, tokenID uint64) {
+	if amount.IsZero() {
+		return
+	}
+	if tokenID == qkccommon.DefaultTokenID {
+		log.Error("SubMntBalance called with QKC tokenID; use SubBalance", "addr", s.address)
+		return
+	}
+	cur := s.GetMntBalance(tokenID)
+	s.SetMntBalance(new(uint256.Int).Sub(cur, amount), tokenID)
+}
+
+func (s *stateObject) GetMntBalance(tokenID uint64) *uint256.Int {
+	if s.data.MntBalances == nil {
+		return new(uint256.Int)
+	}
+	return s.data.MntBalances.GetTokenBalance(tokenID)
+}
+
+// IsBlankMnt reports whether the account holds no non-QKC (MNT) token balances.
+// It is consumed by empty() so that the EIP-158 empty-account check spans every
+// token, matching pyquarkchain's _Account.is_blank (which evaluates
+// token_balances.is_blank() across all tokens). Without this, an account with
+// nonce==0 / QKC==0 / MNT!=0 / no code would be pruned here but kept by
+// pyquarkchain, producing a divergent state root.
+func (s *stateObject) IsBlankMnt() bool {
+	return s.data.MntBalances == nil || s.data.MntBalances.IsBlank()
+}
