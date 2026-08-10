@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 )
@@ -157,6 +158,21 @@ func (db *MPTDatabase) Commit(update *StateUpdate) error {
 	}
 	// Encode the state mutations in the MPT format
 	accounts, accountOrigin, storages, storageOrigin := update.EncodeMPTState()
+
+	// QKC fork: re-encode accountOrigin from slim-RLP to QKC 6-element format.
+	// EncodeMPTState produces slim-RLP (needed by snapshot and state_sizer).
+	// pathdb/execute.go and database_test.go both require QKC format in accountOrigin
+	// because it must match the trie leaf format (also QKC) for history verification.
+	// TestSlimRLPRoundTripEquivalence proves this conversion is lossless for non-MNT accounts.
+	for addr, prev := range update.AccountsOrigin {
+		if prev != nil {
+			data, err := rlp.EncodeToBytes(prev)
+			if err != nil {
+				return err
+			}
+			accountOrigin[addr] = data
+		}
+	}
 
 	// If snapshotting is enabled, update the snapshot tree with this new version
 	if db.snap != nil && db.snap.Snapshot(update.OriginRoot) != nil {
