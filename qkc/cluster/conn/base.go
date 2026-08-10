@@ -58,8 +58,6 @@ const (
 type BaseConn struct {
 	FrameTransport
 
-	conn net.Conn
-
 	events       chan connEvent
 	done         chan struct{}
 	shutdownDone chan struct{}
@@ -136,9 +134,7 @@ func NewBaseConnFromConn(
 	writeFrame func(io.Writer, *wire.Frame) error,
 	logger log.Logger,
 ) *BaseConn {
-	rc := NewBaseConn(newTransport(conn, readFrame, writeFrame), logger)
-	rc.conn = conn
-	return rc
+	return NewBaseConn(newTransport(conn, readFrame, writeFrame), logger)
 }
 
 // Start transitions the connection to ACTIVE and starts the transport loops.

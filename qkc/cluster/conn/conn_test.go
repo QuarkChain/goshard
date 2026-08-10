@@ -131,16 +131,6 @@ func registerPingSerializer(t *testing.T, conn *BaseConn) {
 
 // ── TCP test pair helper ──────────────────────────────────────────────────────
 
-// writeRawFrame writes a raw frame directly to the underlying TCP connection,
-// bypassing the connection's frame writer. Used to craft malformed/invalid frames
-// for protocol-validation tests.
-func writeRawFrame(t *testing.T, conn net.Conn, frame *wire.Frame) {
-	t.Helper()
-	if err := wire.WriteFrameNoMeta(conn, frame); err != nil {
-		t.Fatalf("write raw frame: %v", err)
-	}
-}
-
 // newTestBaseConnPair creates a pair of BaseConns connected over a local TCP
 // socket, with PING/PONG serializer and a minimal PING handler registered on the
 // server side. The caller is responsible for calling cleanup.
@@ -731,28 +721,34 @@ func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {
 // TestBaseConn_RPCIDMonotonic verifies RPC ID monotonic validation.
 // Sending a duplicate RPC ID causes the server to close the connection.
 func TestBaseConn_RPCIDMonotonic(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
+	tr := newFakeFrameTransport()
+	server := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, server)
+	server.RegisterTypedHandlers(map[byte]TypedHandler{
+		byte(wire.ClusterOpPing): func(req any) (any, error) {
+			return &wire.PongResponse{}, nil
+		},
+	})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("client"),
 		FullShardIDList: []uint32{0x00010001},
 	})
 
-	// Manually send two PING frames with the same RPC ID (=1).
-	writeRawFrame(t, client.conn, &wire.Frame{
+	// Inject two PING frames with the same RPC ID (=1).
+	tr.frames <- &wire.Frame{
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1,
 		Payload: pingPayload,
-	})
-	writeRawFrame(t, client.conn, &wire.Frame{
+	}
+	tr.frames <- &wire.Frame{
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1, // duplicate rpc_id: should trigger close
 		Payload: pingPayload,
-	})
+	}
 
 	select {
 	case <-server.WaitUntilClosed():
@@ -768,11 +764,17 @@ func TestBaseConn_RPCIDMonotonic(t *testing.T) {
 // TestBaseConn_RPCIDDecreasing verifies that a decreasing RPC ID closes the
 // connection.
 func TestBaseConn_RPCIDDecreasing(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
+	tr := newFakeFrameTransport()
+	server := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, server)
+	server.RegisterTypedHandlers(map[byte]TypedHandler{
+		byte(wire.ClusterOpPing): func(req any) (any, error) {
+			return &wire.PongResponse{}, nil
+		},
+	})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("client"),
@@ -780,16 +782,16 @@ func TestBaseConn_RPCIDDecreasing(t *testing.T) {
 	})
 
 	// Send rpc_id=2 then rpc_id=1 (decreasing).
-	writeRawFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   2,
 		Payload: pingPayload,
-	})
-	writeRawFrame(t, client.conn, &wire.Frame{
+	}
+	tr.frames <- &wire.Frame{
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1, // decreasing rpc_id: should trigger close
 		Payload: pingPayload,
-	})
+	}
 
 	select {
 	case <-server.WaitUntilClosed():
@@ -845,11 +847,17 @@ func TestDispatch_UnsupportedOpcodeClosesConnection(t *testing.T) {
 // trailing bytes after a valid message causes the connection to close. The
 // deserializer must consume exactly the payload length — no more, no less.
 func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
+	tr := newFakeFrameTransport()
+	server := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, server)
+	server.RegisterTypedHandlers(map[byte]TypedHandler{
+		byte(wire.ClusterOpPing): func(req any) (any, error) {
+			return &wire.PongResponse{}, nil
+		},
+	})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
 	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("client"),
@@ -860,11 +868,11 @@ func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
 	}
 	malformedPayload := append(pingPayload, 0xFF)
 
-	writeRawFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1,
 		Payload: malformedPayload,
-	})
+	}
 
 	select {
 	case <-server.WaitUntilClosed():
@@ -909,10 +917,11 @@ func TestDispatch_ExactPayloadProcessesNormally(t *testing.T) {
 // response with a malformed payload (trailing bytes) causes the receiver to
 // close the connection.
 func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
+	tr := newFakeFrameTransport()
+	client := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, client)
+	defer client.Close()
 
-	server.Start()
 	client.Start()
 
 	// Append a trailing byte to a valid PONG payload so deserialization fails.
@@ -927,11 +936,11 @@ func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
 	}
 	malformedPong := append(pongPayload, 0xFF)
 
-	writeRawFrame(t, server.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Opcode:  byte(wire.ClusterOpPong),
 		RPCID:   1,
 		Payload: malformedPong,
-	})
+	}
 
 	select {
 	case <-client.WaitUntilClosed():
@@ -944,19 +953,20 @@ func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
 // with an opcode that is neither a registered request handler nor a registered
 // response opcode causes the receiver to close the connection.
 func TestDispatch_UnknownResponseOpcodeClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
+	tr := newFakeFrameTransport()
+	client := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, client)
+	defer client.Close()
 
-	server.Start()
 	client.Start()
 
 	// 0xFF is not a registered ClusterOp on either side: no handler and no
 	// response serializer. The receiver must close the connection.
-	writeRawFrame(t, server.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Opcode:  0xFF,
 		RPCID:   1,
 		Payload: []byte{0x00},
-	})
+	}
 
 	select {
 	case <-client.WaitUntilClosed():
