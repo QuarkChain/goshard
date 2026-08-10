@@ -54,10 +54,7 @@ func goldenTxs() []*Transaction {
 		[]byte{1, 2, 3}, 12345, 1234)
 	tx2.SetVRS(big.NewInt(28), big.NewInt(0x11223344), big.NewInt(0x55667788))
 
-	return []*Transaction{
-		{TxType: EvmTx, EvmTx: tx1},
-		{TxType: EvmTx, EvmTx: tx2},
-	}
+	return []*Transaction{tx1, tx2}
 }
 
 // testMinorBlockHeader returns a header and meta with every pointer field
@@ -159,16 +156,16 @@ func TestMinorBlockTxListRoundTrip(t *testing.T) {
 		t.Fatalf("decoded %d transactions, want %d", len(got.Transactions), len(want))
 	}
 	for i, tx := range got.Transactions {
-		if tx.TxType != EvmTx {
-			t.Errorf("tx %d: TxType = %d, want %d", i, tx.TxType, EvmTx)
+		if tx.Type() != EvmTxType {
+			t.Errorf("tx %d: type = %d, want %d", i, tx.Type(), EvmTxType)
 		}
 		if tx.Hash() != want[i].Hash() {
 			t.Errorf("tx %d hash = %s, want %s", i, tx.Hash(), want[i].Hash())
 		}
-		if got, want := tx.EvmTx.Nonce(), want[i].EvmTx.Nonce(); got != want {
+		if got, want := tx.Nonce(), want[i].Nonce(); got != want {
 			t.Errorf("tx %d nonce = %d, want %d", i, got, want)
 		}
-		if got, want := tx.EvmTx.Data(), want[i].EvmTx.Data(); !bytes.Equal(got, want) {
+		if got, want := tx.Data(), want[i].Data(); !bytes.Equal(got, want) {
 			t.Errorf("tx %d data = %x, want %x", i, got, want)
 		}
 	}
