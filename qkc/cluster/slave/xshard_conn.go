@@ -240,6 +240,13 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 		return nil, nil, fmt.Errorf("deserialize pong: %w", err)
 	}
 
+	if len(pong.ID) == 0 {
+		return nil, nil, fmt.Errorf("empty slave ID in PONG")
+	}
+
+	if len(pong.FullShardIDList) == 0 {
+		return nil, nil, fmt.Errorf("empty shard list in PONG")
+	}
 	return pong.ID, pong.FullShardIDList, nil
 }
 
