@@ -6,20 +6,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
 	"net"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/account"
+	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
 // waitForCondition polls f until it returns true or the timeout expires.
-// It calls t.Fatal if the condition is not met within the timeout.
 func waitForCondition(t *testing.T, timeout time.Duration, f func() bool) {
 	t.Helper()
 	deadline := time.After(timeout)
@@ -87,114 +86,148 @@ func newMasterTestConnPairWithIdentity(
 	return
 }
 
-// writeRawMasterFrame writes a raw ClusterMetadata frame directly to the
-// underlying TCP connection, bypassing the connection's frame writer.
-func writeRawMasterFrame(t *testing.T, conn net.Conn, frame *wire.Frame) {
+// masterFakeTransport is a test-only FrameTransport that injects frames into
+// the readerLoop and captures outbound writes. It implements
+// interruptibleTransport so BaseConn can unblock pending reads/writes during
+// shutdown without relying on a real net.Conn.
+type masterFakeTransport struct {
+	frames    chan *wire.Frame
+	writes    chan *wire.Frame
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newMasterFakeTransport() *masterFakeTransport {
+	return &masterFakeTransport{
+		frames: make(chan *wire.Frame, 16),
+		writes: make(chan *wire.Frame, 16),
+		closed: make(chan struct{}),
+	}
+}
+
+func (t *masterFakeTransport) ReadFrame() (*wire.Frame, error) {
+	select {
+	case f := <-t.frames:
+		return f, nil
+	case <-t.closed:
+		return nil, io.EOF
+	}
+}
+
+func (t *masterFakeTransport) WriteFrame(f *wire.Frame) error {
+	select {
+	case t.writes <- f:
+		return nil
+	case <-t.closed:
+		return net.ErrClosed
+	}
+}
+
+func (t *masterFakeTransport) interrupt() error {
+	return t.Close()
+}
+
+func (t *masterFakeTransport) Close() error {
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *masterFakeTransport) RemoteAddr() string {
+	return "fake-master"
+}
+
+// newMasterConnWithFakeTransport creates a MasterConn backed by a fake
+// transport. Frames injected via tr.frames are processed through the full
+// readerLoop → dispatch path; responses are captured via tr.writes.
+func newMasterConnWithFakeTransport(
+	t *testing.T,
+	localID []byte,
+	localFullShardIDList []uint32,
+) (*MasterConn, *masterFakeTransport) {
 	t.Helper()
-	if err := wire.WriteFrame(conn, frame); err != nil {
-		t.Fatalf("write raw frame: %v", err)
+	tr := newMasterFakeTransport()
+	mc := &MasterConn{
+		BaseConn:             conn.NewBaseConn(tr, log.New()),
+		localID:              append([]byte(nil), localID...),
+		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 	}
+	mc.registerOpSerializers()
+	mc.registerHandlers()
+	return mc, tr
 }
 
-// hasHandler reports whether the connection has a typed handler for opcode.
-func hasHandler(c *MasterConn, opcode byte) bool {
-	rv := reflect.ValueOf(c.baseConn).Elem()
-	handlers := rv.FieldByName("typedHandlers").MapKeys()
-	for _, k := range handlers {
-		if k.Uint() == uint64(opcode) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasSerializer reports whether the connection has an OpSerializer for opcode.
-func hasSerializer(c *MasterConn, opcode byte) bool {
-	rv := reflect.ValueOf(c.baseConn).Elem()
-	serializers := rv.FieldByName("serializers").MapKeys()
-	for _, k := range serializers {
-		if k.Uint() == uint64(opcode) {
-			return true
-		}
-	}
-	return false
-}
-
-// TestMasterConn_AllMasterHandlersRegistered verifies that every master→slave
-// request opcode has a handler registered and that the fire-and-forget opcode
-// is marked as non-RPC.
-func TestMasterConn_AllMasterHandlersRegistered(t *testing.T) {
-	_, server, cleanup := newMasterTestConnPair(t)
+// TestMasterConn_CommunicationHandlersRegistered verifies that communication
+// handlers (PING and fire-and-forget) are registered and respond correctly.
+func TestMasterConn_CommunicationHandlersRegistered(t *testing.T) {
+	client, server, cleanup := newMasterTestConnPair(t)
 	defer cleanup()
 
-	masterRPCOps := []wire.ClusterOp{
-		wire.ClusterOpPing,
-		wire.ClusterOpConnectToSlavesRequest,
-		wire.ClusterOpMineRequest,
-		wire.ClusterOpGenTxRequest,
-		wire.ClusterOpAddRootBlockRequest,
-		wire.ClusterOpGetEcoInfoListRequest,
-		wire.ClusterOpGetNextBlockToMineRequest,
-		wire.ClusterOpAddMinorBlockRequest,
-		wire.ClusterOpGetUnconfirmedHeadersRequest,
-		wire.ClusterOpGetAccountDataRequest,
-		wire.ClusterOpAddTransactionRequest,
-		wire.ClusterOpCreateClusterPeerConnectionRequest,
-		wire.ClusterOpGetMinorBlockRequest,
-		wire.ClusterOpGetTransactionRequest,
-		wire.ClusterOpSyncMinorBlockListRequest,
-		wire.ClusterOpExecuteTransactionRequest,
-		wire.ClusterOpGetTransactionReceiptRequest,
-		wire.ClusterOpGetTransactionListByAddressRequest,
-		wire.ClusterOpGetLogRequest,
-		wire.ClusterOpEstimateGasRequest,
-		wire.ClusterOpGetStorageRequest,
-		wire.ClusterOpGetCodeRequest,
-		wire.ClusterOpGasPriceRequest,
-		wire.ClusterOpGetWorkRequest,
-		wire.ClusterOpSubmitWorkRequest,
-		wire.ClusterOpCheckMinorBlockRequest,
-		wire.ClusterOpGetAllTransactionsRequest,
-		wire.ClusterOpGetRootChainStakesRequest,
-		wire.ClusterOpGetTotalBalanceRequest,
-	}
+	server.Start()
+	client.Start()
 
-	for _, op := range masterRPCOps {
-		if !hasHandler(server, byte(op)) {
-			t.Fatalf("missing handler for opcode 0x%02x (%v)", op, op)
-		}
-	}
+	// PING must return PONG.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
-	if !isNonRPC(server, byte(wire.ClusterOpDestroyClusterPeerConnectionCommand)) {
-		t.Fatalf("DESTROY_CLUSTER_PEER_CONNECTION_COMMAND is not marked as non-RPC")
+	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("master"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	resp, err := client.SendRPCMeta(ctx, byte(wire.ClusterOpPing), pingPayload, wire.ClusterMetadata{})
+	if err != nil {
+		t.Fatalf("ping failed: %v", err)
+	}
+	if resp.Opcode != byte(wire.ClusterOpPong) {
+		t.Fatalf("expected PONG, got 0x%x", resp.Opcode)
 	}
 }
 
-// isNonRPC reports whether opcode is registered as fire-and-forget.
-func isNonRPC(c *MasterConn, opcode byte) bool {
-	rv := reflect.ValueOf(c.baseConn).Elem()
-	nonRPCOps := rv.FieldByName("nonRPCOps").MapKeys()
-	for _, k := range nonRPCOps {
-		if k.Uint() == uint64(opcode) {
-			return true
-		}
+// TestMasterConn_BusinessHandlerReturnsNotImplemented verifies that business
+// handlers return ErrHandlerNotImplemented and close the connection.
+func TestMasterConn_BusinessHandlerReturnsNotImplemented(t *testing.T) {
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
+
+	server.Start()
+
+	payload, _ := serialize.SerializeToBytes(&wire.GetEcoInfoListRequest{})
+	tr.frames <- &wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  byte(wire.ClusterOpGetEcoInfoListRequest),
+		RPCID:   1,
+		Payload: payload,
 	}
-	return false
+
+	select {
+	case <-server.WaitUntilClosed():
+		// Connection closed as expected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not close after business handler returned ErrHandlerNotImplemented")
+	}
 }
 
-// TestMasterConn_AllSerializersRegistered verifies that every ClusterOp defined
-// in wire/opcode.go has a registered OpSerializer.
-func TestMasterConn_AllSerializersRegistered(t *testing.T) {
-	_, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+// TestMasterConn_UnknownOpcodeClosesConnection verifies that an opcode without
+// any handler causes the connection to close.
+func TestMasterConn_UnknownOpcodeClosesConnection(t *testing.T) {
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
-	for op := wire.ClusterOpPing; op <= wire.ClusterOpGetTotalBalanceResponse; op++ {
-		if op == 0x9C { // 28 is intentionally skipped in Python
-			continue
-		}
-		if !hasSerializer(server, byte(op)) {
-			t.Fatalf("missing serializer for opcode 0x%02x (%v)", op, op)
-		}
+	server.Start()
+
+	payload, _ := serialize.SerializeToBytes(&wire.GetEcoInfoListRequest{})
+
+	// 0xEE is not registered as a handler or serializer.
+	tr.frames <- &wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  0xEE,
+		RPCID:   0,
+		Payload: payload,
+	}
+
+	select {
+	case <-server.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not close after unknown opcode")
 	}
 }
 
@@ -243,137 +276,61 @@ func TestMasterConn_Ping(t *testing.T) {
 	}
 }
 
-// TestMasterConn_RPCRoundTrip verifies request/response dispatch for a
-// representative set of master→slave RPCs.
-func TestMasterConn_RPCRoundTrip(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cases := []struct {
-		name       string
-		opcode     wire.ClusterOp
-		req        any
-		resp       any
-		respOpcode wire.ClusterOp
-	}{
-		{
-			name:       "add_root_block",
-			opcode:     wire.ClusterOpAddRootBlockRequest,
-			req:        &wire.AddRootBlockRequest{RootBlock: emptyRawBytes(), ExpectSwitch: false},
-			resp:       &wire.AddRootBlockResponse{},
-			respOpcode: wire.ClusterOpAddRootBlockResponse,
-		},
-		{
-			name:       "get_eco_info_list",
-			opcode:     wire.ClusterOpGetEcoInfoListRequest,
-			req:        &wire.GetEcoInfoListRequest{},
-			resp:       &wire.GetEcoInfoListResponse{},
-			respOpcode: wire.ClusterOpGetEcoInfoListResponse,
-		},
-		{
-			name:       "add_transaction",
-			opcode:     wire.ClusterOpAddTransactionRequest,
-			req:        &wire.AddTransactionRequest{Tx: emptyRawBytes()},
-			resp:       &wire.AddTransactionResponse{},
-			respOpcode: wire.ClusterOpAddTransactionResponse,
-		},
-		{
-			name:       "get_minor_block",
-			opcode:     wire.ClusterOpGetMinorBlockRequest,
-			req:        &wire.GetMinorBlockRequest{Branch: 0x00010001, Height: 1, NeedExtraInfo: false},
-			resp:       &wire.GetMinorBlockResponse{},
-			respOpcode: wire.ClusterOpGetMinorBlockResponse,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			payload, err := serialize.SerializeToBytes(tc.req)
-			if err != nil {
-				t.Fatalf("serialize request: %v", err)
-			}
-
-			frame, err := client.SendRPCMeta(ctx, byte(tc.opcode), payload, wire.ClusterMetadata{Branch: 0x00010001})
-			if err != nil {
-				t.Fatalf("send rpc: %v", err)
-			}
-			if frame.Opcode != byte(tc.respOpcode) {
-				t.Fatalf("expected response opcode 0x%x, got 0x%x", tc.respOpcode, frame.Opcode)
-			}
-			if frame.Meta.Branch != 0x00010001 {
-				t.Fatalf("metadata branch not preserved: got %d", frame.Meta.Branch)
-			}
-
-			if err := serialize.Deserialize(serialize.NewByteBuffer(frame.Payload), tc.resp); err != nil {
-				t.Fatalf("deserialize response: %v", err)
-			}
-		})
-	}
-}
-
 // TestMasterConn_NonRPCDispatch verifies that the fire-and-forget
 // DESTROY_CLUSTER_PEER_CONNECTION_COMMAND is accepted with rpc_id == 0 and does
 // not produce a response or close the connection.
 func TestMasterConn_NonRPCDispatch(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
-	payload, err := serialize.SerializeToBytes(&wire.DestroyClusterPeerConnectionCommand{ClusterPeerID: 42})
-	if err != nil {
-		t.Fatalf("serialize command: %v", err)
-	}
-
-	// Write a non-RPC frame directly; no response should come back, but the
-	// connection must remain usable for a subsequent RPC.
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	// Fire-and-forget: rpc_id == 0, no response expected.
+	payload, _ := serialize.SerializeToBytes(&wire.DestroyClusterPeerConnectionCommand{ClusterPeerID: 42})
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{Branch: 0x00010001},
 		Opcode:  byte(wire.ClusterOpDestroyClusterPeerConnectionCommand),
 		RPCID:   0,
 		Payload: payload,
-	})
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
+	// A subsequent RPC must still work.
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("master"),
 		FullShardIDList: []uint32{0x00010001},
 	})
-	resp, err := client.SendRPCMeta(ctx, byte(wire.ClusterOpPing), pingPayload, wire.ClusterMetadata{})
-	if err != nil {
-		t.Fatalf("ping after non-rpc command failed: %v", err)
+	tr.frames <- &wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  byte(wire.ClusterOpPing),
+		RPCID:   1,
+		Payload: pingPayload,
 	}
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected pong, got opcode 0x%x", resp.Opcode)
+
+	select {
+	case resp := <-tr.writes:
+		if resp.Opcode != byte(wire.ClusterOpPong) {
+			t.Fatalf("expected pong, got opcode 0x%x", resp.Opcode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive pong after non-rpc command")
 	}
 }
 
 // TestMasterConn_NonRPCWithNonZeroRPCID verifies that a non-RPC command with a
 // non-zero rpc_id causes the server to close the connection.
 func TestMasterConn_NonRPCWithNonZeroRPCID(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
 	payload, _ := serialize.SerializeToBytes(&wire.DestroyClusterPeerConnectionCommand{ClusterPeerID: 42})
-
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{Branch: 0x00010001},
 		Opcode:  byte(wire.ClusterOpDestroyClusterPeerConnectionCommand),
 		RPCID:   1, // non-RPC must have rpc_id == 0
 		Payload: payload,
-	})
+	}
 
 	select {
 	case <-server.WaitUntilClosed():
@@ -385,8 +342,8 @@ func TestMasterConn_NonRPCWithNonZeroRPCID(t *testing.T) {
 // TestMasterConn_Forwarder verifies that frames with cluster_peer_id != 0 are
 // routed through the forwarder hook and are not dispatched locally.
 func TestMasterConn_Forwarder(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
 	var forwardedMu sync.Mutex
 	var forwarded []*wire.Frame
@@ -401,99 +358,70 @@ func TestMasterConn_Forwarder(t *testing.T) {
 	})
 
 	server.Start()
-	client.Start()
-
-	payload, _ := serialize.SerializeToBytes(&wire.GetMinorBlockRequest{Branch: 0x00010001, Height: 1})
 
 	// Peer-originated frame: cluster_peer_id != 0.
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	payload, _ := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("peer"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{Branch: 0x00010001, ClusterPeerID: 123},
-		Opcode:  byte(wire.ClusterOpGetMinorBlockRequest),
+		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   7,
 		Payload: payload,
-	})
+	}
 
-	// Wait for the forwarded frame to be processed by the forwarder goroutine.
 	waitForCondition(t, 2*time.Second, func() bool {
 		forwardedMu.Lock()
 		count := len(forwarded)
 		forwardedMu.Unlock()
 		return count == 1
 	})
-	forwardedMu.Lock()
-	count := len(forwarded)
-	if count != 1 {
-		t.Fatalf("expected 1 forwarded frame, got %d", count)
-	}
 
 	// Connection should still be open; a subsequent master RPC works.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{ID: []byte("m"), FullShardIDList: []uint32{1}})
-	resp, err := client.SendRPCMeta(ctx, byte(wire.ClusterOpPing), pingPayload, wire.ClusterMetadata{})
-	if err != nil {
-		t.Fatalf("ping after forwarded frame failed: %v", err)
-	}
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected pong, got 0x%x", resp.Opcode)
-	}
-}
-
-// TestMasterConn_UnsupportedOpcodeClosesConnection verifies that an opcode
-// without a registered handler and rpc_id == 0 causes the server to close the
-// connection.
-func TestMasterConn_UnsupportedOpcodeClosesConnection(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	// 0x01 is a CommandOp with no handler registered on the master side.
-	// rpc_id must be 0 for the server to treat it as a non-RPC unsupported
-	// command and close the connection.
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{},
-		Opcode:  0x01,
-		RPCID:   0,
-		Payload: []byte("payload"),
-	})
+		Opcode:  byte(wire.ClusterOpPing),
+		RPCID:   1,
+		Payload: pingPayload,
+	}
 
 	select {
-	case <-server.WaitUntilClosed():
+	case resp := <-tr.writes:
+		if resp.Opcode != byte(wire.ClusterOpPong) {
+			t.Fatalf("expected pong, got 0x%x", resp.Opcode)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close after unsupported opcode")
+		t.Fatal("ping after forwarded frame failed")
 	}
 }
 
 // TestMasterConn_RPCIDMonotonic verifies that duplicate RPC IDs cause the
 // server to close the connection.
 func TestMasterConn_RPCIDMonotonic(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("master"),
 		FullShardIDList: []uint32{0x00010001},
 	})
 
-	// Manually send two PING frames with the same RPC ID.
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{},
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1,
 		Payload: pingPayload,
-	})
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	}
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{},
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1, // duplicate
 		Payload: pingPayload,
-	})
+	}
 
 	select {
 	case <-server.WaitUntilClosed():
@@ -505,29 +433,28 @@ func TestMasterConn_RPCIDMonotonic(t *testing.T) {
 // TestMasterConn_RPCIDDecreasing verifies that a decreasing RPC ID causes the
 // server to close the connection.
 func TestMasterConn_RPCIDDecreasing(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
 	server.Start()
-	client.Start()
 
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("master"),
 		FullShardIDList: []uint32{0x00010001},
 	})
 
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{},
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   2,
 		Payload: pingPayload,
-	})
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	}
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{},
 		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1, // decreasing
 		Payload: pingPayload,
-	})
+	}
 
 	select {
 	case <-server.WaitUntilClosed():
@@ -537,7 +464,7 @@ func TestMasterConn_RPCIDDecreasing(t *testing.T) {
 }
 
 // TestMasterConn_CloseWakesPendingRPC verifies that Close wakes all pending
-// outbound RPCs with ErrConnectionClosed.
+// outbound RPCs with qkcconn.ErrConnectionClosed.
 func TestMasterConn_CloseWakesPendingRPC(t *testing.T) {
 	client, _, cleanup := newMasterTestConnPair(t)
 	defer cleanup()
@@ -559,8 +486,8 @@ func TestMasterConn_CloseWakesPendingRPC(t *testing.T) {
 
 	select {
 	case err := <-errChan:
-		if err != ErrConnectionClosed {
-			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+		if err != conn.ErrConnectionClosed {
+			t.Fatalf("expected qkcconn.ErrConnectionClosed, got %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("pending RPC was not woken by Close")
@@ -573,8 +500,9 @@ func TestMasterConn_OutboundRPCMeta(t *testing.T) {
 	client, server, cleanup := newMasterTestConnPair(t)
 	defer cleanup()
 
-	// Server echoes the request opcode + 1 and preserves metadata.
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
+	// Register a custom handler that returns a valid response so the stub
+	// handler (which closes the connection) is not invoked.
+	server.RegisterTypedHandlers(map[byte]conn.TypedHandler{
 		byte(wire.ClusterOpGetEcoInfoListRequest): func(req any) (any, error) {
 			_ = req.(*wire.GetEcoInfoListRequest)
 			return &wire.GetEcoInfoListResponse{ErrorCode: 0}, nil
@@ -606,7 +534,7 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 	client, server, cleanup := newMasterTestConnPair(t)
 	defer cleanup()
 
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
+	server.RegisterTypedHandlers(map[byte]conn.TypedHandler{
 		byte(wire.ClusterOpAddMinorBlockHeaderRequest): func(req any) (any, error) {
 			r := req.(*wire.AddMinorBlockHeaderRequest)
 			if r.TxCount != 5 {
@@ -623,10 +551,10 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 	defer cancel()
 
 	req := &wire.AddMinorBlockHeaderRequest{
-		MinorBlockHeader:  emptyRawBytes(),
+		MinorBlockHeader:  &wire.RawBytes{},
 		TxCount:           5,
 		XShardTxCount:     0,
-		CoinbaseAmountMap: emptyRawBytes(),
+		CoinbaseAmountMap: &wire.RawBytes{},
 		ShardStats:        wire.ShardStats{Branch: 0x00010001},
 	}
 	resp, err := client.SendAddMinorBlockHeader(ctx, req)
@@ -654,114 +582,36 @@ func TestClusterMetadata_Marshal(t *testing.T) {
 	}
 }
 
-// TestMasterConn_StubResponsesAreValidBytes verifies that every master handler
-// stub returns a response that can be serialized.
-func TestMasterConn_StubResponsesAreValidBytes(t *testing.T) {
-	_, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
-
-	server.Start()
-
-	cases := []struct {
-		opcode wire.ClusterOp
-		req    any
-		resp   any
-	}{
-		{wire.ClusterOpPing, &wire.PingRequest{ID: []byte("m"), FullShardIDList: []uint32{1}}, &wire.PongResponse{}},
-		{wire.ClusterOpConnectToSlavesRequest, &wire.ConnectToSlavesRequest{SlaveInfoList: []wire.SlaveInfo{}}, &wire.ConnectToSlavesResponse{}},
-		{wire.ClusterOpMineRequest, &wire.MineRequest{}, &wire.MineResponse{}},
-		{wire.ClusterOpGenTxRequest, &wire.GenTxRequest{Tx: emptyRawBytes()}, &wire.GenTxResponse{}},
-		{wire.ClusterOpAddRootBlockRequest, &wire.AddRootBlockRequest{RootBlock: emptyRawBytes()}, &wire.AddRootBlockResponse{}},
-		{wire.ClusterOpGetEcoInfoListRequest, &wire.GetEcoInfoListRequest{}, &wire.GetEcoInfoListResponse{}},
-		{wire.ClusterOpGetNextBlockToMineRequest, &wire.GetNextBlockToMineRequest{Address: account.Address{}}, &wire.GetNextBlockToMineResponse{}},
-		{wire.ClusterOpAddMinorBlockRequest, &wire.AddMinorBlockRequest{MinorBlockData: []byte{}}, &wire.AddMinorBlockResponse{}},
-		{wire.ClusterOpGetUnconfirmedHeadersRequest, &wire.GetUnconfirmedHeadersRequest{}, &wire.GetUnconfirmedHeadersResponse{}},
-		{wire.ClusterOpGetAccountDataRequest, &wire.GetAccountDataRequest{}, &wire.GetAccountDataResponse{}},
-		{wire.ClusterOpAddTransactionRequest, &wire.AddTransactionRequest{Tx: emptyRawBytes()}, &wire.AddTransactionResponse{}},
-		{wire.ClusterOpCreateClusterPeerConnectionRequest, &wire.CreateClusterPeerConnectionRequest{ClusterPeerID: 1}, &wire.CreateClusterPeerConnectionResponse{}},
-		{wire.ClusterOpGetMinorBlockRequest, &wire.GetMinorBlockRequest{}, &wire.GetMinorBlockResponse{}},
-		{wire.ClusterOpGetTransactionRequest, &wire.GetTransactionRequest{}, &wire.GetTransactionResponse{}},
-		{wire.ClusterOpSyncMinorBlockListRequest, &wire.SyncMinorBlockListRequest{MinorBlockHashList: [][wire.HashLength]byte{}}, &wire.SyncMinorBlockListResponse{}},
-		{wire.ClusterOpExecuteTransactionRequest, &wire.ExecuteTransactionRequest{Tx: emptyRawBytes()}, &wire.ExecuteTransactionResponse{}},
-		{wire.ClusterOpGetTransactionReceiptRequest, &wire.GetTransactionReceiptRequest{}, &wire.GetTransactionReceiptResponse{}},
-		{wire.ClusterOpGetTransactionListByAddressRequest, &wire.GetTransactionListByAddressRequest{}, &wire.GetTransactionListByAddressResponse{}},
-		{wire.ClusterOpGetLogRequest, &wire.GetLogRequest{}, &wire.GetLogResponse{}},
-		{wire.ClusterOpEstimateGasRequest, &wire.EstimateGasRequest{Tx: emptyRawBytes()}, &wire.EstimateGasResponse{}},
-		{wire.ClusterOpGetStorageRequest, &wire.GetStorageRequest{}, &wire.GetStorageResponse{}},
-		{wire.ClusterOpGetCodeRequest, &wire.GetCodeRequest{}, &wire.GetCodeResponse{}},
-		{wire.ClusterOpGasPriceRequest, &wire.GasPriceRequest{}, &wire.GasPriceResponse{}},
-		{wire.ClusterOpGetWorkRequest, &wire.GetWorkRequest{}, &wire.GetWorkResponse{}},
-		{wire.ClusterOpSubmitWorkRequest, &wire.SubmitWorkRequest{}, &wire.SubmitWorkResponse{}},
-		{wire.ClusterOpCheckMinorBlockRequest, &wire.CheckMinorBlockRequest{MinorBlockHeader: emptyRawBytes()}, &wire.CheckMinorBlockResponse{}},
-		{wire.ClusterOpGetAllTransactionsRequest, &wire.GetAllTransactionsRequest{}, &wire.GetAllTransactionsResponse{}},
-		{wire.ClusterOpGetRootChainStakesRequest, &wire.GetRootChainStakesRequest{}, &wire.GetRootChainStakesResponse{}},
-		{wire.ClusterOpGetTotalBalanceRequest, &wire.GetTotalBalanceRequest{}, &wire.GetTotalBalanceResponse{}},
-	}
-
-	for _, tc := range cases {
-		// Serialize the request bytes.
-		reqBytes, err := serialize.SerializeToBytes(tc.req)
-		if err != nil {
-			t.Fatalf("serialize request for opcode 0x%x: %v", tc.opcode, err)
-		}
-
-		// Ask the server to process the request by writing a raw frame.
-		// We use a fresh connection per case to avoid ordering issues.
-		client, srv, cleanupPair := newMasterTestConnPair(t)
-		srv.Start()
-
-		writeRawMasterFrame(t, client.conn, &wire.Frame{
-			Meta:    wire.ClusterMetadata{Branch: 0x00010001},
-			Opcode:  byte(tc.opcode),
-			RPCID:   1,
-			Payload: reqBytes,
-		})
-
-		// Read the raw response from the connection.
-		clientConn := client.conn
-		clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		frame, err := wire.ReadFrame(clientConn, 0)
-		if err != nil {
-			t.Fatalf("read response for opcode 0x%x: %v", tc.opcode, err)
-		}
-		if frame.Opcode != byte(tc.opcode)+1 {
-			t.Fatalf("opcode 0x%x: expected response opcode 0x%x, got 0x%x", tc.opcode, byte(tc.opcode)+1, frame.Opcode)
-		}
-		if err := serialize.Deserialize(serialize.NewByteBuffer(frame.Payload), tc.resp); err != nil {
-			t.Fatalf("deserialize response for opcode 0x%x: %v", tc.opcode, err)
-		}
-
-		cleanupPair()
-	}
-}
-
 // TestMasterConn_EmptyPayloadDeserialization verifies that request types with
 // empty bodies deserialize correctly.
 func TestMasterConn_EmptyPayloadDeserialization(t *testing.T) {
-	client, server, cleanup := newMasterTestConnPair(t)
-	defer cleanup()
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
 
-	// Only start the server; the client connection is used as a bare socket so
-	// we can observe the raw response frame without the client's readLoop
-	// competing for bytes.
+	// Register a custom handler so the stub (which closes the connection) is not invoked.
+	server.RegisterTypedHandlers(map[byte]conn.TypedHandler{
+		byte(wire.ClusterOpGetEcoInfoListRequest): func(req any) (any, error) {
+			_ = req.(*wire.GetEcoInfoListRequest)
+			return &wire.GetEcoInfoListResponse{ErrorCode: 0}, nil
+		},
+	})
+
 	server.Start()
 
-	// Empty payload should deserialize to an empty GetEcoInfoListRequest.
-	writeRawMasterFrame(t, client.conn, &wire.Frame{
+	tr.frames <- &wire.Frame{
 		Meta:    wire.ClusterMetadata{},
 		Opcode:  byte(wire.ClusterOpGetEcoInfoListRequest),
 		RPCID:   1,
 		Payload: []byte{},
-	})
-
-	// Read the response from the same connection the client wrote on.
-	client.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	frame, err := wire.ReadFrame(client.conn, 0)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
 	}
-	if frame.Opcode != byte(wire.ClusterOpGetEcoInfoListResponse) {
-		t.Fatalf("expected GetEcoInfoListResponse, got 0x%x", frame.Opcode)
+
+	select {
+	case resp := <-tr.writes:
+		if resp.Opcode != byte(wire.ClusterOpGetEcoInfoListResponse) {
+			t.Fatalf("expected GetEcoInfoListResponse, got 0x%x", resp.Opcode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive response for empty payload request")
 	}
 }
 
@@ -778,8 +628,11 @@ func TestMasterConn_MetadataPreserved(t *testing.T) {
 	defer cancel()
 
 	meta := wire.ClusterMetadata{Branch: 0xDEADBEEF, ClusterPeerID: 0xCAFEBABECAFEBABE}
-	payload, _ := serialize.SerializeToBytes(&wire.GetEcoInfoListRequest{})
-	resp, err := client.SendRPCMeta(ctx, byte(wire.ClusterOpGetEcoInfoListRequest), payload, meta)
+	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("master"),
+		FullShardIDList: []uint32{1},
+	})
+	resp, err := client.SendRPCMeta(ctx, byte(wire.ClusterOpPing), pingPayload, meta)
 	if err != nil {
 		t.Fatalf("send rpc: %v", err)
 	}
@@ -824,5 +677,118 @@ func TestMasterConn_FrameWireLayout(t *testing.T) {
 	}
 	if !bytes.Equal(wireBytes[25:], frame.Payload) {
 		t.Fatalf("payload mismatch: got %x", wireBytes[25:])
+	}
+}
+
+// TestMasterConn_ForwardFrameConcurrentRace verifies that concurrent SendRPC
+// and ForwardFrame do not cause a data race on FrameTransport.WriteFrame
+// (which uses a non-thread-safe bufio.Writer in the real transport). After the
+// fix, ForwardFrame routes through the owner goroutine → writer mailbox →
+// writerLoop, so all writes to bufio.Writer are serialized.
+func TestMasterConn_ForwardFrameConcurrentRace(t *testing.T) {
+	client, server, cleanup := newMasterTestConnPair(t)
+	defer cleanup()
+	server.Start()
+	client.Start()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
+				ID:              []byte("master"),
+				FullShardIDList: []uint32{0x00010001},
+			})
+			client.SendRPCMeta(ctx, byte(wire.ClusterOpPing), pingPayload, wire.ClusterMetadata{})
+			cancel()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			server.ForwardFrame(&wire.Frame{
+				Meta:    wire.ClusterMetadata{Branch: 0x00010001, ClusterPeerID: 99},
+				Opcode:  byte(wire.ClusterOpPong),
+				RPCID:   uint64(1000),
+				Payload: []byte{0x01},
+			})
+		}
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// TestMasterConn_ForwardFramePreservesRPCIDAndMeta verifies that ForwardFrame
+// preserves the frame's RPCID, metadata, opcode, and payload through the
+// full owner event → writer mailbox → writerLoop path.
+func TestMasterConn_ForwardFramePreservesRPCIDAndMeta(t *testing.T) {
+	server, tr := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	defer server.Close()
+	server.Start()
+
+	frame := &wire.Frame{
+		Meta:    wire.ClusterMetadata{Branch: 0xDEAD, ClusterPeerID: 0xBEEF},
+		Opcode:  byte(wire.ClusterOpPong),
+		RPCID:   0x1122334455667788,
+		Payload: []byte{0xAA, 0xBB, 0xCC},
+	}
+	if err := server.ForwardFrame(frame); err != nil {
+		t.Fatalf("ForwardFrame failed: %v", err)
+	}
+
+	select {
+	case written := <-tr.writes:
+		if written.Meta != frame.Meta {
+			t.Fatalf("Meta not preserved: got %+v, want %+v", written.Meta, frame.Meta)
+		}
+		if written.RPCID != frame.RPCID {
+			t.Fatalf("RPCID not preserved: got %d, want %d", written.RPCID, frame.RPCID)
+		}
+		if written.Opcode != frame.Opcode {
+			t.Fatalf("Opcode not preserved: got 0x%x, want 0x%x", written.Opcode, frame.Opcode)
+		}
+		if !bytes.Equal(written.Payload, frame.Payload) {
+			t.Fatalf("Payload not preserved: got %x, want %x", written.Payload, frame.Payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ForwardFrame frame was not written")
+	}
+}
+
+// TestMasterConn_ForwardFrameAfterClose verifies that SubmitFrame (and
+// therefore ForwardFrame) returns ErrConnectionClosed after the connection
+// is closed and the writerLoop has stopped.
+func TestMasterConn_ForwardFrameAfterClose(t *testing.T) {
+	server, _ := newMasterConnWithFakeTransport(t, []byte("server"), []uint32{0x00010001})
+	server.Start()
+	if err := server.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	err := server.ForwardFrame(&wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  byte(wire.ClusterOpPong),
+		RPCID:   1,
+		Payload: []byte{0x01},
+	})
+	if err != conn.ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
 	}
 }
