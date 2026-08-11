@@ -58,7 +58,7 @@ const (
 type BaseConn struct {
 	FrameTransport
 
-	events       chan connEvent
+	events       *eventMailbox
 	done         chan struct{}
 	shutdownDone chan struct{}
 	activeChan   chan struct{}
@@ -67,8 +67,6 @@ type BaseConn struct {
 
 	ownerOnce sync.Once
 	startOnce sync.Once
-	submitMu  sync.Mutex
-	finished  bool
 
 	configMu      sync.RWMutex
 	typedHandlers map[byte]TypedHandler
@@ -106,7 +104,7 @@ func NewBaseConn(tr FrameTransport, logger log.Logger) *BaseConn {
 	}
 	rc := &BaseConn{
 		FrameTransport: tr,
-		events:         make(chan connEvent, 64),
+		events:         newEventMailbox(),
 		done:           make(chan struct{}),
 		shutdownDone:   make(chan struct{}),
 		activeChan:     make(chan struct{}),
@@ -152,6 +150,22 @@ func (c *BaseConn) Close() error {
 	c.submitEvent(closeRequestedEvent{})
 	<-c.shutdownDone
 	return c.closeErr
+}
+
+// SubmitFrame enqueues a pre-built frame for transmission through the
+// writerLoop. The frame's RPCID and metadata are preserved as-is; no RPC
+// tracking is created. Returns ErrConnectionClosed if the connection has
+// already finished.
+//
+// SubmitFrame is the correct path for virtual PeerConn responses. It
+// serializes the frame through the owner goroutine and writer mailbox so
+// that writerLoop remains the sole caller of FrameTransport.WriteFrame.
+func (c *BaseConn) SubmitFrame(f *wire.Frame) error {
+	c.ensureOwner()
+	if !c.submitEvent(submitFrameEvent{frame: f}) {
+		return ErrConnectionClosed
+	}
+	return nil
 }
 
 // RegisterTypedHandlers registers handlers before Start is called.

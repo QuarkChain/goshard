@@ -160,6 +160,76 @@ func (m *frameMailbox) close() {
 	}
 }
 
+// eventMailbox replaces the bounded events channel as the owner-to-event-queue
+// transport. Submitters append under the mutex and never block; the wake
+// notification is non-blocking, so an owner shutdown can always acquire the
+// mutex to close the mailbox.
+type eventMailbox struct {
+	mu     sync.Mutex
+	queue  []connEvent
+	wake   chan struct{}
+	closed bool
+}
+
+func newEventMailbox() *eventMailbox {
+	return &eventMailbox{wake: make(chan struct{}, 1)}
+}
+
+// Submit appends an event without blocking. It returns false iff the mailbox
+// has been closed (by finishOwner).
+func (m *eventMailbox) Submit(event connEvent) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	m.queue = append(m.queue, event)
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// Next pops the next queued event. It is only called by ownerLoop.
+//   - (event, true):  valid event dequeued.
+//   - (nil, true):    queue empty, mailbox still open → caller must wait on wake.
+//   - (nil, false):   queue empty and mailbox closed → caller must exit.
+func (m *eventMailbox) Next() (event connEvent, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.queue) > 0 {
+		event := m.queue[0]
+		// Release the popped slot so the consumed event is not retained by
+		// the backing array once it has been fully drained.
+		m.queue[0] = nil
+		m.queue = m.queue[1:]
+		return event, true
+	}
+	return nil, !m.closed
+}
+
+// Close marks the mailbox closed. Only finishOwner calls this. Pending events
+// are preserved for the finishOwner drain pass.
+func (m *eventMailbox) Close() {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
+// submitFrameEvent carries a pre-built frame to be written via the writer
+// mailbox. Used by virtual PeerConns to send responses back through the
+// master connection without creating a new RPC or modifying the frame's RPCID.
+type submitFrameEvent struct {
+	frame *wire.Frame
+}
+
+func (submitFrameEvent) isConnEvent() {}
+
 func (c *BaseConn) ensureOwner() {
 	c.ownerOnce.Do(func() {
 		go c.ownerLoop()
@@ -167,17 +237,10 @@ func (c *BaseConn) ensureOwner() {
 }
 
 func (c *BaseConn) submitEvent(event connEvent) bool {
-	c.submitMu.Lock()
-	defer c.submitMu.Unlock()
-	if c.finished {
-		return false
-	}
-	select {
-	case c.events <- event:
-		return true
-	case <-c.done:
-		return false
-	}
+	// Submitters never block: the mailbox append is mutex-protected and the
+	// wake notification is non-blocking, so a full queue or a concurrent
+	// shutdown cannot stall the caller or hold a lock the owner needs.
+	return c.events.Submit(event)
 }
 
 func (c *BaseConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool {
@@ -190,7 +253,19 @@ func (c *BaseConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool
 
 func (c *BaseConn) ownerLoop() {
 	for {
-		event := <-c.events
+		event, ok := c.events.Next()
+		if !ok {
+			// Mailbox closed and drained: finishOwner already performed
+			// cleanup, so exit.
+			return
+		}
+		if event == nil {
+			// Queue empty: wait for the next submission. done is closed
+			// only by finishOwner, which runs on this goroutine, so it can
+			// never fire while we are parked here.
+			<-c.events.wake
+			continue
+		}
 		switch event := event.(type) {
 		case startEvent:
 			c.handleStart()
@@ -217,33 +292,37 @@ func (c *BaseConn) ownerLoop() {
 			c.finishShutdownIfReady()
 		case closeRequestedEvent:
 			c.beginShutdown(event.err)
+		case submitFrameEvent:
+			c.handleSubmitFrame(event)
 		}
 		if c.shuttingDown && c.readerStopped && c.writerStopped {
 			c.finishOwner()
-			return
+			// finishOwner closed the mailbox; the loop will
+			// get !ok from Next on the next iteration and exit.
 		}
 	}
 }
 
 func (c *BaseConn) finishOwner() {
-	c.submitMu.Lock()
-	defer c.submitMu.Unlock()
-	if c.finished {
-		return
-	}
-	c.finished = true
+	// Close the mailbox: any subsequent Submit fails fast, so no new
+	// events can be enqueued while the owner drains. There is no
+	// lock-order inversion because submitters only hold the mailbox
+	// mutex briefly and never block inside it.
+	c.events.Close()
+	// Cleanup drain: only wake outbound RPC callers with
+	// ErrConnectionClosed. Do NOT dispatch any events through
+	// handleXXX — this is cleanup, not event processing.
 	for {
-		select {
-		case event := <-c.events:
-			if outbound, ok := event.(outboundRPCEvent); ok {
-				outbound.call.result <- rpcResult{err: ErrConnectionClosed}
-			}
-		default:
-			close(c.done)
-			close(c.shutdownDone)
-			return
+		event, ok := c.events.Next()
+		if !ok {
+			break
+		}
+		if outbound, ok := event.(outboundRPCEvent); ok {
+			outbound.call.result <- rpcResult{err: ErrConnectionClosed}
 		}
 	}
+	close(c.done)
+	close(c.shutdownDone)
 }
 
 func (c *BaseConn) handleStart() {
@@ -432,6 +511,20 @@ func (c *BaseConn) handleHandlerCompleted(event handlerCompletedEvent) {
 	}
 }
 
+// handleSubmitFrame enqueues a pre-built frame into the writer mailbox so that
+// writerLoop is the only goroutine that calls FrameTransport.WriteFrame.
+// The frame's RPCID and metadata are preserved as-is; no RPC tracking is
+// created. The mailbox rpcID is set to 0 so removeRPC (which handles only
+// rpcIDs >= 1 from handleOutboundRPC) does not affect forwarded frames.
+func (c *BaseConn) handleSubmitFrame(event submitFrameEvent) {
+	if c.state != ConnectionStateActive {
+		return
+	}
+	if !c.writer.enqueue(event.frame, 0) {
+		c.beginShutdown(ErrConnectionClosed)
+	}
+}
+
 func (c *BaseConn) handleReadFailed(err error) {
 	c.beginShutdown(err)
 }
@@ -510,9 +603,8 @@ func (c *BaseConn) readerLoop() {
 			c.submitEvent(readFailedEvent{err: err})
 			return
 		}
-		select {
-		case c.events <- frameReceivedEvent{frame: frame}:
-		case <-c.done:
+		if !c.submitEvent(frameReceivedEvent{frame: frame}) {
+			// Mailbox closed: shutdown is in progress, exit.
 			return
 		}
 	}
