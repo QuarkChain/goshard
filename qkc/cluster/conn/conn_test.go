@@ -3,6 +3,7 @@
 package conn
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -109,6 +110,32 @@ func (t *fakeFrameTransport) closes() int {
 	defer t.closeMu.Unlock()
 	return t.closeCount
 }
+
+// staticReaderTransport feeds wire.ReadFrame from a fixed byte stream so tests
+// can drive the frame-level EOF semantics (clean EOF vs truncated frame)
+// through the full readerLoop -> handleReadFailed path.
+type staticReaderTransport struct {
+	reader    io.Reader
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newStaticReaderTransport(r io.Reader) *staticReaderTransport {
+	return &staticReaderTransport{reader: r, closed: make(chan struct{})}
+}
+
+func (t *staticReaderTransport) ReadFrame() (*wire.Frame, error) {
+	return wire.ReadFrame(t.reader, 0)
+}
+
+func (t *staticReaderTransport) WriteFrame(*wire.Frame) error { return nil }
+
+func (t *staticReaderTransport) Close() error {
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *staticReaderTransport) RemoteAddr() string { return "static" }
 
 // validPongPayload returns a serialized empty PongResponse for tests that need
 // to feed valid response frames through the fake transport.
@@ -696,6 +723,48 @@ func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	if pending := conn.pendingLen(); pending != 0 {
 		t.Fatalf("pending RPCs remain after read failure: %d", pending)
 	}
+}
+
+// TestBaseConn_CleanEOFDoesNotPublishError verifies that a peer closing the
+// connection before the start of any frame (clean EOF, i.e. wire.ReadFrame
+// returning io.EOF) is a graceful close: the connection shuts down but the
+// Error channel receives nothing, matching Python's close() on EOF.
+func TestBaseConn_CleanEOFDoesNotPublishError(t *testing.T) {
+	tr := newStaticReaderTransport(bytes.NewReader(nil))
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	<-conn.WaitUntilClosed()
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after clean EOF")
+	}
+	select {
+	case err := <-conn.Error():
+		t.Fatalf("clean EOF published error: %v", err)
+	default:
+	}
+}
+
+// TestBaseConn_TruncatedFramePublishesError verifies that a truncated frame
+// (length header consumed, then EOF before the frame body) publishes an error
+// on the Error channel. wire.ReadFrame normalizes the zero-byte EOF on the
+// metadata read to io.ErrUnexpectedEOF, matching Python's "read unexpected
+// EOF" -> close_with_error().
+func TestBaseConn_TruncatedFramePublishesError(t *testing.T) {
+	// payload_len = 10 but the stream ends right after the length header.
+	tr := newStaticReaderTransport(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}))
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	select {
+	case err := <-conn.Error():
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("want io.ErrUnexpectedEOF, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("truncated frame did not publish an error")
+	}
+	<-conn.WaitUntilClosed()
 }
 
 func TestBaseConn_WriteFailureWakesPendingRPC(t *testing.T) {
