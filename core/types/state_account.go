@@ -73,9 +73,10 @@ func (acct *StateAccount) Copy() *StateAccount {
 // SlimAccount is a modified version of an Account, where the root is replaced
 // with a byte slice. This format can be used to represent full-consensus format
 // or slim format which replaces the empty root and code hash as nil byte slice.
-// MntBal and FullShardKey are rlp:"optional" so accounts without MNT tokens
-// still decode cleanly from pre-MNT snapshots (trailing optional fields decode
-// to nil / 0 when absent).
+// FullShardKey and MntBal are rlp:"optional" so accounts without QKC-specific
+// fields still decode cleanly from pre-MNT snapshots (trailing optional fields
+// decode to 0 / nil when absent). MntBal is last because it is less common, so
+// accounts with only FullShardKey don't need an empty MntBal placeholder.
 //
 // MntBal holds TokenBalances.SerializeToBytes() output rather than the
 // *TokenBalances value directly: TokenBalances stores its balances in an
@@ -89,8 +90,8 @@ type SlimAccount struct {
 	Root     []byte // Nil if root equals to types.EmptyRootHash
 	CodeHash []byte // Nil if hash equals to types.EmptyCodeHash
 	// QKC-specific fields; both optional so old snapshots remain readable.
-	MntBal       []byte `rlp:"optional"` // SerializeToBytes output; nil = MntBalances nil
 	FullShardKey uint32 `rlp:"optional"` // QuarkChain shard key
+	MntBal       []byte `rlp:"optional"` // SerializeToBytes output; nil = MntBalances nil
 }
 
 // SlimAccountRLP encodes the state account in 'slim RLP' format.

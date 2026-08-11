@@ -173,9 +173,20 @@ func TestStateAccountDecodeRejectsUnsupportedTokenBalanceEncoding(t *testing.T) 
 // and re-committed a corrupted account, forking the trie root.
 func TestSlimAccountRoundtripPreservesMNT(t *testing.T) {
 	cases := []struct {
-		name string
-		acct StateAccount
+		name         string
+		acct         StateAccount
+		wantElements int
 	}{
+		{
+			name: "no MNT, no shard",
+			acct: StateAccount{
+				Nonce:    1,
+				Balance:  uint256.NewInt(100),
+				Root:     EmptyRootHash,
+				CodeHash: EmptyCodeHash[:],
+			},
+			wantElements: 4,
+		},
 		{
 			name: "no MNT, shard set",
 			acct: StateAccount{
@@ -185,6 +196,20 @@ func TestSlimAccountRoundtripPreservesMNT(t *testing.T) {
 				CodeHash:     EmptyCodeHash[:],
 				FullShardKey: 0x1a2b,
 			},
+			wantElements: 5,
+		},
+		{
+			name: "MNT, no shard",
+			acct: StateAccount{
+				Nonce:    8,
+				Balance:  uint256.NewInt(4000),
+				Root:     EmptyRootHash,
+				CodeHash: EmptyCodeHash[:],
+				MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+					100: uint256.NewInt(500),
+				}),
+			},
+			wantElements: 6,
 		},
 		{
 			name: "MNT + shard set",
@@ -199,12 +224,17 @@ func TestSlimAccountRoundtripPreservesMNT(t *testing.T) {
 				}),
 				FullShardKey: 0x2f3e,
 			},
+			wantElements: 6,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			slim := SlimAccountRLP(tc.acct)
+			var elements []rlp.RawValue
+			require.NoError(t, rlp.DecodeBytes(slim, &elements))
+			assert.Len(t, elements, tc.wantElements)
+
 			decoded, err := FullAccount(slim)
 			require.NoError(t, err)
 
