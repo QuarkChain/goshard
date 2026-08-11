@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -377,6 +378,159 @@ func TestConcurrentCloseAndSendRPC(t *testing.T) {
 	if conn.State() != ConnectionStateClosed {
 		t.Fatalf("expected closed state, got %v", conn.State())
 	}
+}
+
+// TestBaseConn_SubmitWhileShutdown verifies that concurrent SubmitFrame and
+// SendRPC during Close neither deadlock, race, nor panic. This is a
+// regression test for the ownerLoop submitEvent lock-order inversion: when
+// the event queue was a bounded channel, a full queue made submitters hold
+// submitMu while blocked, so finishOwner could never acquire the lock to
+// close done. With the mailbox model, submitters never block and shutdown
+// always completes.
+func TestBaseConn_SubmitWhileShutdown(t *testing.T) {
+	base := newFakeFrameTransport()
+	base.writes = make(chan *wire.Frame, 4096)
+	base.writeStarted = make(chan struct{})
+	base.releaseWrite = make(chan struct{})
+	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	const submitters = 64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(submitters)
+	for i := 0; i < submitters; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 1000; j++ {
+				if i%2 == 0 {
+					if err := conn.SubmitFrame(&wire.Frame{
+						Meta:    wire.ClusterMetadata{Branch: 1, ClusterPeerID: 99},
+						Opcode:  byte(wire.ClusterOpPong),
+						RPCID:   uint64(j),
+						Payload: []byte{0x01},
+					}); err != nil && err != ErrConnectionClosed {
+						t.Errorf("unexpected SubmitFrame error: %v", err)
+					}
+				} else {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+					_, _ = conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+					cancel()
+				}
+			}
+		}()
+	}
+
+	close(start)
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked with concurrent SubmitFrame/SendRPC")
+	}
+	wg.Wait()
+
+	if conn.State() != ConnectionStateClosed {
+		t.Fatalf("expected closed state, got %v", conn.State())
+	}
+}
+
+// TestEventMailbox_LateHandlerCompletedAfterClose verifies the shutdown
+// discard path for a handler goroutine that finishes after the mailbox is
+// closed. The delayed handlerCompletedEvent must be dropped (Submit returns
+// false) without panicking, shutdown must still complete, and no goroutine
+// may leak. The drop-on-close behavior is intentional and is not changed.
+func TestEventMailbox_LateHandlerCompletedAfterClose(t *testing.T) {
+	base := newFakeFrameTransport()
+	base.releaseWrite = make(chan struct{})
+	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
+	conn := NewBaseConn(tr, log.New())
+
+	const op = byte(wire.ClusterOpPing)
+	conn.RegisterOpSerializers(map[byte]*OpSerializer{
+		op: OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+	})
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	conn.RegisterTypedHandlers(map[byte]TypedHandler{
+		op: func(req any) (any, error) {
+			close(handlerStarted)
+			<-releaseHandler
+			return &wire.PongResponse{}, nil
+		},
+	})
+
+	before := runtime.NumGoroutine()
+	conn.Start()
+	<-conn.WaitUntilActive()
+
+	// Feed a request frame: readerLoop -> ownerLoop -> dispatch goroutine,
+	// which parks inside the handler.
+	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{FullShardIDList: []uint32{1}})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+	base.frames <- &wire.Frame{Meta: wire.ClusterMetadata{}, Opcode: op, RPCID: 1, Payload: pingPayload}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	// Trigger shutdown while the handler goroutine is still in flight.
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked with in-flight handler")
+	}
+
+	// The mailbox must be closed and drained by finishOwner.
+	select {
+	case <-conn.shutdownDone:
+	default:
+		t.Fatal("shutdownDone not closed after Close returned")
+	}
+	if conn.State() != ConnectionStateClosed {
+		t.Fatalf("expected closed state, got %v", conn.State())
+	}
+	if conn.events.Submit(handlerCompletedEvent{frame: &wire.Frame{}}) {
+		t.Fatal("Submit returned true after mailbox close")
+	}
+	if _, ok := conn.events.Next(); ok {
+		t.Fatal("Next reported an open mailbox after close")
+	}
+
+	// Release the handler: dispatch submits its handlerCompletedEvent after
+	// the mailbox is closed. The event is dropped, no panic occurs, and the
+	// dispatch goroutine exits.
+	close(releaseHandler)
+	waitForGoroutines(t, before)
+}
+
+// waitForGoroutines polls until the goroutine count drops back to (or below)
+// the baseline, failing the test if it never does.
+func waitForGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baseline {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak: %d goroutines, baseline %d", runtime.NumGoroutine(), baseline)
 }
 
 func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
