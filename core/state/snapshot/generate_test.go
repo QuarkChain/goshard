@@ -62,7 +62,7 @@ func testGeneration(t *testing.T, scheme string) {
 	helper.makeStorageTrie("acc-3", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)
 
 	root, snap := helper.CommitAndGenerate()
-	if have, want := root, common.HexToHash("0xe3712f1a226f3782caca78ca770ccc19ee000552813a9f59d479f8611db9b1fd"); have != want {
+	if have, want := root, common.HexToHash("0xbb451af1b1eb8617feb6008660886274d1e9cbfada78ce2a1dca477281e485ff"); have != want {
 		t.Fatalf("have %#x want %#x", have, want)
 	}
 	select {
@@ -433,15 +433,16 @@ func testGenerateCorruptAccountTrie(t *testing.T, scheme string) {
 	// without any storage slots to keep the test smaller.
 	helper := newHelper(scheme)
 
-	helper.addTrieAccount("acc-1", &types.StateAccount{Balance: uint256.NewInt(1), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}) // 0xc7a30f39aff471c95d8a837497ad0e49b65be475cc0953540f80cfcdbdcd9074
-	helper.addTrieAccount("acc-2", &types.StateAccount{Balance: uint256.NewInt(2), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}) // 0x65145f923027566669a1ae5ccac66f945b55ff6eaeb17d2ea8e048b7d381f2d7
-	helper.addTrieAccount("acc-3", &types.StateAccount{Balance: uint256.NewInt(3), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}) // 0x19ead688e907b0fab07176120dceec244a72aff2f0aa51e8b827584e378772f4
+	helper.addTrieAccount("acc-1", &types.StateAccount{Balance: uint256.NewInt(1), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()})
+	helper.addTrieAccount("acc-2", &types.StateAccount{Balance: uint256.NewInt(2), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()})
+	helper.addTrieAccount("acc-3", &types.StateAccount{Balance: uint256.NewInt(3), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()})
 
-	root := helper.Commit() // Root: 0xa04693ea110a31037fb5ee814308a6f1d76bdab0b11676bdf4541d2de55ba978
+	root := helper.Commit() // Root: 0x154490afdfdcaeb4ef1c288d9d820a38159453288a6919cbdd936408033d36d7
 
-	// Delete an account trie node and ensure the generator chokes
+	// Delete an account trie node and ensure the generator chokes.
+	// targetHash is the hash of the node at path 0x0c in the QKC-encoded trie.
 	targetPath := []byte{0xc}
-	targetHash := common.HexToHash("0x65145f923027566669a1ae5ccac66f945b55ff6eaeb17d2ea8e048b7d381f2d7")
+	targetHash := common.HexToHash("0x1a6c40e21b4fd283fa73a210af425d49496bc280a9c4e99cbd764ad557224705")
 
 	rawdb.DeleteTrieNode(helper.diskdb, common.Hash{}, targetPath, targetHash, scheme)
 
@@ -477,11 +478,11 @@ func testGenerateMissingStorageTrie(t *testing.T, scheme string) {
 		acc3   = hashData([]byte("acc-3"))
 		helper = newHelper(scheme)
 	)
-	stRoot := helper.makeStorageTrie("acc-1", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)                         // 0xddefcd9376dd029653ef384bd2f0a126bb755fe84fdcc9e7cf421ba454f2bc67
-	helper.addTrieAccount("acc-1", &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()})              // 0x9250573b9c18c664139f3b6a7a8081b7d8f8916a8fcc5d94feec6c29f5fd4e9e
-	helper.addTrieAccount("acc-2", &types.StateAccount{Balance: uint256.NewInt(2), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}) // 0x65145f923027566669a1ae5ccac66f945b55ff6eaeb17d2ea8e048b7d381f2d7
+	stRoot := helper.makeStorageTrie("acc-1", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)
+	helper.addTrieAccount("acc-1", &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()})
+	helper.addTrieAccount("acc-2", &types.StateAccount{Balance: uint256.NewInt(2), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()})
 	stRoot = helper.makeStorageTrie("acc-3", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)
-	helper.addTrieAccount("acc-3", &types.StateAccount{Balance: uint256.NewInt(3), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()}) // 0x50815097425d000edfc8b3a4a13e175fc2bdcfee8bdfbf2d1ff61041d3c235b2
+	helper.addTrieAccount("acc-3", &types.StateAccount{Balance: uint256.NewInt(3), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()})
 
 	root := helper.Commit()
 
@@ -517,11 +518,11 @@ func testGenerateCorruptStorageTrie(t *testing.T, scheme string) {
 	// two of which also has the same 3-slot storage trie attached.
 	helper := newHelper(scheme)
 
-	stRoot := helper.makeStorageTrie("acc-1", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)                         // 0xddefcd9376dd029653ef384bd2f0a126bb755fe84fdcc9e7cf421ba454f2bc67
-	helper.addTrieAccount("acc-1", &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()})              // 0x9250573b9c18c664139f3b6a7a8081b7d8f8916a8fcc5d94feec6c29f5fd4e9e
-	helper.addTrieAccount("acc-2", &types.StateAccount{Balance: uint256.NewInt(2), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}) // 0x65145f923027566669a1ae5ccac66f945b55ff6eaeb17d2ea8e048b7d381f2d7
+	stRoot := helper.makeStorageTrie("acc-1", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)
+	helper.addTrieAccount("acc-1", &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()})
+	helper.addTrieAccount("acc-2", &types.StateAccount{Balance: uint256.NewInt(2), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()})
 	stRoot = helper.makeStorageTrie("acc-3", []string{"key-1", "key-2", "key-3"}, []string{"val-1", "val-2", "val-3"}, true)
-	helper.addTrieAccount("acc-3", &types.StateAccount{Balance: uint256.NewInt(3), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()}) // 0x50815097425d000edfc8b3a4a13e175fc2bdcfee8bdfbf2d1ff61041d3c235b2
+	helper.addTrieAccount("acc-3", &types.StateAccount{Balance: uint256.NewInt(3), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()})
 
 	root := helper.Commit()
 
@@ -563,11 +564,11 @@ func testGenerateWithExtraAccounts(t *testing.T, scheme string) {
 		)
 		acc := &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()}
 		val, _ := rlp.EncodeToBytes(acc)
-		helper.accTrie.MustUpdate([]byte("acc-1"), val) // 0x9250573b9c18c664139f3b6a7a8081b7d8f8916a8fcc5d94feec6c29f5fd4e9e
+		helper.accTrie.MustUpdate([]byte("acc-1"), val)
 
-		// Identical in the snap
+		// Identical in the snap (snapshot always uses slim-RLP format)
 		key := hashData([]byte("acc-1"))
-		rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-1")), []byte("val-1"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-2")), []byte("val-2"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-3")), []byte("val-3"))
@@ -582,9 +583,8 @@ func testGenerateWithExtraAccounts(t *testing.T, scheme string) {
 			true,
 		)
 		acc := &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()}
-		val, _ := rlp.EncodeToBytes(acc)
 		key := hashData([]byte("acc-2"))
-		rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("b-key-1")), []byte("b-val-1"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("b-key-2")), []byte("b-val-2"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("b-key-3")), []byte("b-val-3"))
@@ -639,11 +639,11 @@ func testGenerateWithManyExtraAccounts(t *testing.T, scheme string) {
 		)
 		acc := &types.StateAccount{Balance: uint256.NewInt(1), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()}
 		val, _ := rlp.EncodeToBytes(acc)
-		helper.accTrie.MustUpdate([]byte("acc-1"), val) // 0x9250573b9c18c664139f3b6a7a8081b7d8f8916a8fcc5d94feec6c29f5fd4e9e
+		helper.accTrie.MustUpdate([]byte("acc-1"), val)
 
-		// Identical in the snap
+		// Identical in the snap (snapshot always uses slim-RLP format)
 		key := hashData([]byte("acc-1"))
-		rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-1")), []byte("val-1"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-2")), []byte("val-2"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-3")), []byte("val-3"))
@@ -652,9 +652,8 @@ func testGenerateWithManyExtraAccounts(t *testing.T, scheme string) {
 		// 100 accounts exist only in snapshot
 		for i := 0; i < 1000; i++ {
 			acc := &types.StateAccount{Balance: uint256.NewInt(uint64(i)), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}
-			val, _ := rlp.EncodeToBytes(acc)
 			key := hashData(fmt.Appendf(nil, "acc-%d", i))
-			rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
+			rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
 		}
 	}
 	root, snap := helper.CommitAndGenerate()
@@ -698,13 +697,15 @@ func testGenerateWithExtraBeforeAndAfter(t *testing.T, scheme string) {
 		helper.accTrie.MustUpdate(common.HexToHash("0x03").Bytes(), val)
 		helper.accTrie.MustUpdate(common.HexToHash("0x07").Bytes(), val)
 
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x01"), val)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x02"), val)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x03"), val)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x04"), val)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x05"), val)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x06"), val)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x07"), val)
+		// Snapshot always uses slim-RLP format.
+		snapVal := types.SlimAccountRLP(*acc)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x01"), snapVal)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x02"), snapVal)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x03"), snapVal)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x04"), snapVal)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x05"), snapVal)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x06"), snapVal)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x07"), snapVal)
 	}
 	root, snap := helper.CommitAndGenerate()
 	select {
