@@ -18,23 +18,31 @@ type XshardPool struct {
 	mu       sync.RWMutex
 	conns    map[uint32][]*XshardConn
 	inbound  []*XshardConn
-	slaveIDs map[string]bool // Tracks slave IDs to prevent duplicate connections
+	slaveIDs map[string]bool // Known remote slave identities (Python's slave_ids set). Used for outbound duplicate dialing prevention (VerifyAndAddToShards) and HasSlaveID queries. A single remote slave may have multiple XshardConn objects; this is an identity registry, not a connection count.
+	watched  map[*XshardConn]struct{}
 	closed   bool
 	log      log.Logger
 }
 
 // NewXshardPool creates a new, empty connection pool.
 func NewXshardPool(logger log.Logger) *XshardPool {
+	if logger == nil {
+		logger = log.Root()
+	}
 	return &XshardPool{
 		conns:    make(map[uint32][]*XshardConn),
 		slaveIDs: make(map[string]bool),
+		watched:  make(map[*XshardConn]struct{}),
 		log:      logger,
 	}
 }
 
 // Add adds a connection to the pool for the given full shard ID.
 // If the pool is already closed, the connection is closed immediately.
-// If the slave ID is already tracked, the connection is closed and a warning is logged.
+// This method is a test helper for direct indexing without identity verification.
+// For production outbound connections, use VerifyAndAddToShards instead.
+// Unlike VerifyAndAddToShards, Add does not reject duplicate slave IDs —
+// slaveIDs is an identity registry, not a connection uniqueness constraint.
 func (p *XshardPool) Add(fullShardID uint32, conn *XshardConn) {
 	p.mu.Lock()
 	if p.closed {
@@ -44,21 +52,13 @@ func (p *XshardPool) Add(fullShardID uint32, conn *XshardConn) {
 		return
 	}
 
-	// Check for duplicate slave ID (matches Python's slave_ids deduplication)
 	remoteID := string(conn.RemoteID())
-	if remoteID != "" && p.slaveIDs[remoteID] {
-		p.mu.Unlock()
-		conn.Close()
-		p.log.Warn("duplicate slave connection rejected", "slave_id", remoteID, "full_shard_id", fullShardID)
-		return
-	}
-
-	// Track the slave ID
 	if remoteID != "" {
 		p.slaveIDs[remoteID] = true
 	}
 
 	p.conns[fullShardID] = append(p.conns[fullShardID], conn)
+	p.watchConnectionLocked(conn)
 	p.mu.Unlock()
 	p.log.Info("added xshard connection", "full_shard_id", fullShardID, "remote", conn.RemoteAddr())
 }
@@ -121,7 +121,8 @@ func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn,
 	if remoteID != "" && p.slaveIDs[remoteID] {
 		p.mu.Unlock()
 		conn.Close()
-		return fmt.Errorf("duplicate slave connection rejected: %s", remoteID)
+		p.log.Info("outbound xshard connection skipped: duplicate slave id", "remote_id", remoteID, "remote", conn.RemoteAddr())
+		return nil
 	}
 	if remoteID != "" {
 		p.slaveIDs[remoteID] = true
@@ -131,6 +132,7 @@ func (p *XshardPool) VerifyAndAddToShards(ctx context.Context, conn *XshardConn,
 	for _, shardID := range shardList {
 		p.conns[shardID] = append(p.conns[shardID], conn)
 	}
+	p.watchConnectionLocked(conn)
 	p.mu.Unlock()
 
 	p.log.Info("verified and added xshard connection", "remote_id", remoteID, "remote", conn.RemoteAddr())
@@ -153,45 +155,35 @@ func (p *XshardPool) Remove(fullShardID uint32, conn *XshardConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	conns := p.conns[fullShardID]
-	for i, c := range conns {
-		if c == conn {
-			copy(conns[i:], conns[i+1:])
-			conns[len(conns)-1] = nil
-			p.conns[fullShardID] = conns[:len(conns)-1]
-			if len(p.conns[fullShardID]) == 0 {
-				delete(p.conns, fullShardID)
-			}
-			if remoteID := string(conn.RemoteID()); remoteID != "" {
-				delete(p.slaveIDs, remoteID)
-			}
-			p.log.Info("removed xshard connection", "full_shard_id", fullShardID, "remote", conn.RemoteAddr())
-			return
-		}
+	if p.removeConnectionLocked(conn) {
+		p.log.Info("removed xshard connection", "full_shard_id", fullShardID, "remote", conn.RemoteAddr())
 	}
 }
 
 // RemoveTarget removes and closes all connections for a full shard ID.
 func (p *XshardPool) RemoveTarget(fullShardID uint32) {
 	p.mu.Lock()
-	conns := p.conns[fullShardID]
-	delete(p.conns, fullShardID)
-	for _, conn := range conns {
-		if remoteID := string(conn.RemoteID()); remoteID != "" {
-			delete(p.slaveIDs, remoteID)
+	targetConns := make([]*XshardConn, 0, len(p.conns[fullShardID]))
+	seen := make(map[*XshardConn]struct{})
+	for _, conn := range p.conns[fullShardID] {
+		if _, ok := seen[conn]; !ok {
+			seen[conn] = struct{}{}
+			targetConns = append(targetConns, conn)
 		}
+	}
+	for _, conn := range targetConns {
+		p.removeConnectionLocked(conn)
 	}
 	p.mu.Unlock()
 
-	for _, conn := range conns {
+	for _, conn := range targetConns {
 		conn.Close()
 	}
-	p.log.Info("removed all xshard connections to shard", "full_shard_id", fullShardID)
+	p.log.Info("removed all xshard connections to shard", "full_shard_id", fullShardID, "connections", len(targetConns))
 }
 
 // SendXshardTx broadcasts xshard transactions to all active connections for the
-// target shard via RPC. Returns the first successful response or an error if no
-// connection exists or all connections fail.
+// target shard via RPC. Returns a successful protocol response or an error if all attempts fail.
 //
 // This matches Python's broadcast_xshard_tx_list behavior: sends to ALL connections
 // concurrently and checks that all responses have error_code == 0.
@@ -231,13 +223,20 @@ func (p *XshardPool) SendXshardTx(ctx context.Context, fullShardID uint32, paylo
 	}
 	wg.Wait()
 
-	// Check all responses (matches Python's check(all([response.error_code == 0 ...])))
+	// Validate every response: decode as AddXshardTxListResponse, check opcode
+	// and error_code == 0 (matches Python's check(all([response.error_code == 0 for _, response, _ in responses]))).
 	var firstErr error
 	var firstResp *wire.Frame
 	for _, r := range results {
 		if r.err != nil {
 			if firstErr == nil {
 				firstErr = r.err
+			}
+			continue
+		}
+		if _, err := ParseAddXshardTxListResponse(r.resp); err != nil {
+			if firstErr == nil {
+				firstErr = err
 			}
 			continue
 		}
@@ -266,6 +265,7 @@ func (p *XshardPool) TrackInbound(conn *XshardConn) {
 		return
 	}
 	p.inbound = append(p.inbound, conn)
+	p.watchConnectionLocked(conn)
 	p.mu.Unlock()
 	p.log.Info("tracked inbound xshard connection", "remote", conn.RemoteAddr())
 }
@@ -293,14 +293,27 @@ func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 		return false
 	}
 
-	// Register slave ID for deduplication
+	// Record slave identity (Python's slave_ids set).
+	// Inbound connections are not deduplicated: a single remote slave may
+	// have multiple connections (e.g., bidirectional S1↔S2 where both sides
+	// initiate). Outbound deduplication is handled by VerifyAndAddToShards.
 	if len(remoteID) > 0 {
 		p.slaveIDs[string(remoteID)] = true
 	}
 
-	// Index by remote shard IDs for routing
+	// Index by remote shard IDs for routing.
+	// Skip if already indexed for this shard — WatchAndIndex is idempotent.
 	for _, shardID := range shardList {
-		p.conns[shardID] = append(p.conns[shardID], conn)
+		found := false
+		for _, c := range p.conns[shardID] {
+			if c == conn {
+				found = true
+				break
+			}
+		}
+		if !found {
+			p.conns[shardID] = append(p.conns[shardID], conn)
+		}
 	}
 
 	// Remove from inbound tracking now that the connection is indexed.
@@ -314,6 +327,7 @@ func (p *XshardPool) WatchAndIndex(conn *XshardConn) bool {
 			break
 		}
 	}
+	p.watchConnectionLocked(conn)
 	p.mu.Unlock()
 
 	p.log.Info("indexed inbound xshard connection", "remote_id", string(remoteID), "shards", shardList)
@@ -353,24 +367,105 @@ func (p *XshardPool) Close() {
 	p.conns = nil
 	p.inbound = nil
 	p.slaveIDs = nil
+	p.watched = nil
 	p.mu.Unlock()
 
+	seen := make(map[*XshardConn]struct{}, len(allConns))
 	for _, conn := range allConns {
+		if _, ok := seen[conn]; ok {
+			continue
+		}
+		seen[conn] = struct{}{}
 		conn.Close()
 	}
-	p.log.Info("xshard pool closed", "connections", len(allConns))
+	p.log.Info("xshard pool closed", "connections", len(seen))
 }
 
-// OutboundSize returns the number of outbound connections (indexed by shard ID).
+// watchConnectionLocked registers a connection for automatic pool eviction.
+// The caller must hold p.mu.
+func (p *XshardPool) watchConnectionLocked(conn *XshardConn) {
+	if _, ok := p.watched[conn]; ok {
+		return
+	}
+	p.watched[conn] = struct{}{}
+	go func() {
+		<-conn.WaitUntilClosed()
+		p.mu.Lock()
+		p.removeConnectionLocked(conn)
+		delete(p.watched, conn)
+		p.mu.Unlock()
+	}()
+}
+
+// removeConnectionLocked removes conn from every route and lifecycle index.
+// The caller must hold p.mu. It does not close conn.
+func (p *XshardPool) removeConnectionLocked(conn *XshardConn) bool {
+	removed := false
+	for shardID, conns := range p.conns {
+		kept := conns[:0]
+		for _, candidate := range conns {
+			if candidate == conn {
+				removed = true
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		for i := len(kept); i < len(conns); i++ {
+			conns[i] = nil
+		}
+		if len(kept) == 0 {
+			delete(p.conns, shardID)
+		} else {
+			p.conns[shardID] = kept
+		}
+	}
+	for i, candidate := range p.inbound {
+		if candidate == conn {
+			copy(p.inbound[i:], p.inbound[i+1:])
+			p.inbound[len(p.inbound)-1] = nil
+			p.inbound = p.inbound[:len(p.inbound)-1]
+			removed = true
+			break
+		}
+	}
+	if removed {
+		if remoteID := string(conn.RemoteID()); remoteID != "" {
+			if !p.hasRemoteIDLocked(remoteID) {
+				delete(p.slaveIDs, remoteID)
+			}
+		}
+	}
+	return removed
+}
+
+func (p *XshardPool) hasRemoteIDLocked(remoteID string) bool {
+	for _, conns := range p.conns {
+		for _, conn := range conns {
+			if string(conn.RemoteID()) == remoteID {
+				return true
+			}
+		}
+	}
+	for _, conn := range p.inbound {
+		if string(conn.RemoteID()) == remoteID {
+			return true
+		}
+	}
+	return false
+}
+
+// OutboundSize returns the number of unique outbound connections.
 func (p *XshardPool) OutboundSize() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	total := 0
+	seen := make(map[*XshardConn]struct{})
 	for _, conns := range p.conns {
-		total += len(conns)
+		for _, conn := range conns {
+			seen[conn] = struct{}{}
+		}
 	}
-	return total
+	return len(seen)
 }
 
 // InboundSize returns the number of tracked inbound connections.
