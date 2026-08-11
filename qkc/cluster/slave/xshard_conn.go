@@ -219,7 +219,9 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 		// Slave-to-slave PING does not consume root tip currently.
 		// Python still serializes an empty RootBlockHeader for this field,
 		// but RootBlock wire representation is not migrated yet.
+		//
 		// Keep nil until the RootBlock type and encoding are implemented.
+		// Non-nil RootTip received from Python peers is not supported yet.
 		RootTip: nil,
 	})
 	if err != nil {

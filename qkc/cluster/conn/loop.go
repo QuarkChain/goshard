@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -526,6 +527,13 @@ func (c *BaseConn) handleSubmitFrame(event submitFrameEvent) {
 }
 
 func (c *BaseConn) handleReadFailed(err error) {
+	// A clean EOF means the peer closed the connection before sending the
+	// next frame. This matches Python's close() behavior and is not treated
+	// as a connection error. Truncated frames are reported by wire.ReadFrame
+	// as non-EOF errors and follow the error shutdown path.
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
 	c.beginShutdown(err)
 }
 
