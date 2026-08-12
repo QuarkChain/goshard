@@ -7,10 +7,11 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
 
-// virtualTransport implements frameTransport for PeerConn. It has no TCP
+// virtualTransport implements conn.FrameTransport for PeerConn. It has no TCP
 // socket; inbound frames are pushed by the Dispatcher via receive(), and
 // outbound frames are forwarded through the associated MasterConn.
 type virtualTransport struct {
@@ -35,16 +36,16 @@ func newVirtualTransport(clusterPeerID uint64, branch uint32, masterConn *Master
 	}
 }
 
-func (vt *virtualTransport) readFrame() (*wire.Frame, error) {
+func (vt *virtualTransport) ReadFrame() (*wire.Frame, error) {
 	select {
 	case frame := <-vt.inbound:
 		return frame, nil
 	case <-vt.closedChan:
-		return nil, ErrConnectionClosed
+		return nil, conn.ErrConnectionClosed
 	}
 }
 
-func (vt *virtualTransport) writeFrame(f *wire.Frame) error {
+func (vt *virtualTransport) WriteFrame(f *wire.Frame) error {
 	// PeerShardConnection in Python always writes with the shard branch and its
 	// own cluster_peer_id so the master can route the frame back to the peer.
 	f.Meta = wire.ClusterMetadata{
@@ -54,7 +55,7 @@ func (vt *virtualTransport) writeFrame(f *wire.Frame) error {
 	return vt.masterConn.ForwardFrame(f)
 }
 
-func (vt *virtualTransport) close() error {
+func (vt *virtualTransport) Close() error {
 	vt.closeOnce.Do(func() { close(vt.closedChan) })
 	return nil
 }
@@ -82,7 +83,7 @@ func (vt *virtualTransport) receive(frame *wire.Frame) bool {
 // responsibilities: independent RPC ID namespace, CommandOp handler dispatch,
 // and lifecycle tied to master commands.
 type PeerConn struct {
-	*baseConn
+	*conn.BaseConn
 
 	clusterPeerID uint64
 	branch        uint32
@@ -94,7 +95,7 @@ type PeerConn struct {
 func NewPeerConn(clusterPeerID uint64, branch uint32, masterConn *MasterConn, logger log.Logger) *PeerConn {
 	vt := newVirtualTransport(clusterPeerID, branch, masterConn)
 	pc := &PeerConn{
-		baseConn:      newBaseConn(vt, logger),
+		BaseConn:      conn.NewBaseConn(vt, logger),
 		clusterPeerID: clusterPeerID,
 		branch:        branch,
 		vt:            vt,
@@ -108,60 +109,51 @@ func NewPeerConn(clusterPeerID uint64, branch uint32, masterConn *MasterConn, lo
 // its own control traffic. PeerConn must not use this value.
 const ReservedClusterPeerID = 0
 
-// registerOpSerializers registers serializers for every CommandOp so that both
-// inbound requests and outbound responses can be (de)serialized.
+// registerOpSerializers registers serializers for the CommandOps that
+// PeerShardConnection handles. Only shard-level opcodes are registered;
+// master-only (root-level) opcodes are handled by Peer on the Master side and
+// never reach PeerShardConnection.
+//
+// Python reference: PeerShardConnection uses OP_SERIALIZER_MAP for
+// serialization but only OP_NONRPC_MAP + OP_RPC_MAP define what it actually
+// handles. See quarkchain/cluster/shard.py.
 func (pc *PeerConn) registerOpSerializers() {
-	pc.baseConn.RegisterOpSerializers(map[byte]*OpSerializer{
-		// §1 Hello / master-only
-		byte(wire.CommandOpHello):                          OpSerializerFor[wire.HelloCommand, wire.HelloCommand](),
-		byte(wire.CommandOpNewMinorBlockHeaderList):        OpSerializerFor[wire.NewMinorBlockHeaderListCommand, wire.NewMinorBlockHeaderListCommand](),
-		byte(wire.CommandOpNewTransactionList):             OpSerializerFor[wire.NewTransactionListCommand, wire.NewTransactionListCommand](),
-		byte(wire.CommandOpGetPeerListRequest):             OpSerializerFor[wire.GetPeerListRequest, wire.GetPeerListResponse](),
-		byte(wire.CommandOpGetPeerListResponse):            OpSerializerFor[wire.GetPeerListResponse, wire.GetPeerListRequest](),
-		byte(wire.CommandOpGetRootBlockHeaderListRequest):  OpSerializerFor[wire.GetRootBlockHeaderListRequest, wire.GetRootBlockHeaderListResponse](),
-		byte(wire.CommandOpGetRootBlockHeaderListResponse): OpSerializerFor[wire.GetRootBlockHeaderListResponse, wire.GetRootBlockHeaderListRequest](),
-		byte(wire.CommandOpGetRootBlockListRequest):        OpSerializerFor[wire.GetRootBlockListRequest, wire.GetRootBlockListResponse](),
-		byte(wire.CommandOpGetRootBlockListResponse):       OpSerializerFor[wire.GetRootBlockListResponse, wire.GetRootBlockListRequest](),
+	pc.BaseConn.RegisterOpSerializers(map[byte]*conn.OpSerializer{
+		// Non-RPC commands (fire-and-forget). Response opcode mirrors the
+		// command opcode (same convention as DestroyClusterPeerConnectionCommand).
+		byte(wire.CommandOpNewMinorBlockHeaderList): conn.OpSerializerFor[wire.NewMinorBlockHeaderListCommand, wire.NewMinorBlockHeaderListCommand](byte(wire.CommandOpNewMinorBlockHeaderList)),
+		byte(wire.CommandOpNewTransactionList):      conn.OpSerializerFor[wire.NewTransactionListCommand, wire.NewTransactionListCommand](byte(wire.CommandOpNewTransactionList)),
+		byte(wire.CommandOpNewBlockMinor):           conn.OpSerializerFor[wire.NewBlockMinorCommand, wire.NewBlockMinorCommand](byte(wire.CommandOpNewBlockMinor)),
 
-		// §2 Slave RPC request/response pairs
-		byte(wire.CommandOpGetMinorBlockListRequest):        OpSerializerFor[wire.GetMinorBlockListRequest, wire.GetMinorBlockListResponse](),
-		byte(wire.CommandOpGetMinorBlockListResponse):       OpSerializerFor[wire.GetMinorBlockListResponse, wire.GetMinorBlockListRequest](),
-		byte(wire.CommandOpGetMinorBlockHeaderListRequest):  OpSerializerFor[wire.GetMinorBlockHeaderListRequest, wire.GetMinorBlockHeaderListResponse](),
-		byte(wire.CommandOpGetMinorBlockHeaderListResponse): OpSerializerFor[wire.GetMinorBlockHeaderListResponse, wire.GetMinorBlockHeaderListRequest](),
-
-		// §3 More master-only / root-chain peer opcodes
-		byte(wire.CommandOpNewBlockMinor):                           OpSerializerFor[wire.NewBlockMinorCommand, wire.NewBlockMinorCommand](),
-		byte(wire.CommandOpPing):                                    OpSerializerFor[wire.PingPongCommand, wire.PingPongCommand](),
-		byte(wire.CommandOpPong):                                    OpSerializerFor[wire.PingPongCommand, wire.PingPongCommand](),
-		byte(wire.CommandOpGetRootBlockHeaderListWithSkipRequest):   OpSerializerFor[wire.GetRootBlockHeaderListWithSkipRequest, wire.GetRootBlockHeaderListResponse](),
-		byte(wire.CommandOpGetRootBlockHeaderListWithSkipResponse):  OpSerializerFor[wire.GetRootBlockHeaderListResponse, wire.GetRootBlockHeaderListWithSkipRequest](),
-		byte(wire.CommandOpNewRootBlock):                            OpSerializerFor[wire.NewRootBlockCommand, wire.NewRootBlockCommand](),
-		byte(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest):  OpSerializerFor[wire.GetMinorBlockHeaderListWithSkipRequest, wire.GetMinorBlockHeaderListResponse](),
-		byte(wire.CommandOpGetMinorBlockHeaderListWithSkipResponse): OpSerializerFor[wire.GetMinorBlockHeaderListResponse, wire.GetMinorBlockHeaderListWithSkipRequest](),
+		// RPC request/response pairs. Matches PeerShardConnection.OP_RPC_MAP.
+		byte(wire.CommandOpGetMinorBlockListRequest):               conn.OpSerializerFor[wire.GetMinorBlockListRequest, wire.GetMinorBlockListResponse](byte(wire.CommandOpGetMinorBlockListResponse)),
+		byte(wire.CommandOpGetMinorBlockHeaderListRequest):         conn.OpSerializerFor[wire.GetMinorBlockHeaderListRequest, wire.GetMinorBlockHeaderListResponse](byte(wire.CommandOpGetMinorBlockHeaderListResponse)),
+		byte(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest): conn.OpSerializerFor[wire.GetMinorBlockHeaderListWithSkipRequest, wire.GetMinorBlockHeaderListResponse](byte(wire.CommandOpGetMinorBlockHeaderListWithSkipResponse)),
 	})
 }
 
-// registerHandlers registers the shard-level peer handlers. These are stubs;
-// real implementations require the shard runtime to be ported.
+// registerHandlers registers handlers for the shard-level CommandOps that
+// PeerShardConnection handles. Master-only (root-level) opcodes (PING,
+// GET_PEER_LIST_REQUEST, GET_ROOT_BLOCK_HEADER_LIST_REQUEST, etc.) are handled
+// by Peer on the Master side and never reach PeerShardConnection — they are not
+// registered here.
+//
+// Python reference: PeerShardConnection.OP_NONRPC_MAP + OP_RPC_MAP in
+// quarkchain/cluster/shard.py.
 func (pc *PeerConn) registerHandlers() {
-	pc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
-		// ── Migration stubs ─────────────────────────────────────────────
-		// These handlers exist only to preserve protocol compatibility.
-		// Real implementations must be added outside the connection layer.
-		// After migration, remove these stub registrations and handlers.
-
-		// Non-RPC commands (fire-and-forget).
+	pc.BaseConn.RegisterTypedHandlers(map[byte]conn.TypedHandler{
+		// Non-RPC commands (fire-and-forget). Python: OP_NONRPC_MAP.
 		byte(wire.CommandOpNewMinorBlockHeaderList): pc.handleNewMinorBlockHeaderList,
 		byte(wire.CommandOpNewTransactionList):      pc.handleNewTransactionList,
 		byte(wire.CommandOpNewBlockMinor):           pc.handleNewBlockMinor,
 
-		// RPC requests; responses use opcode+1.
+		// RPC request handlers. Python: OP_RPC_MAP.
 		byte(wire.CommandOpGetMinorBlockListRequest):               pc.handleGetMinorBlockListRequest,
 		byte(wire.CommandOpGetMinorBlockHeaderListRequest):         pc.handleGetMinorBlockHeaderListRequest,
 		byte(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest): pc.handleGetMinorBlockHeaderListWithSkipRequest,
 	})
 
-	pc.baseConn.RegisterNonRPCOps([]byte{
+	pc.BaseConn.RegisterNonRPCOps([]byte{
 		byte(wire.CommandOpNewMinorBlockHeaderList),
 		byte(wire.CommandOpNewTransactionList),
 		byte(wire.CommandOpNewBlockMinor),
@@ -172,10 +164,10 @@ func (pc *PeerConn) registerHandlers() {
 // for the PeerConn read loop. Frames received after close are dropped.
 func (pc *PeerConn) HandleFrame(frame *wire.Frame) error {
 	if pc.Closed() {
-		return ErrConnectionClosed
+		return conn.ErrConnectionClosed
 	}
 	if !pc.vt.receive(frame) {
-		return ErrConnectionClosed
+		return conn.ErrConnectionClosed
 	}
 	return nil
 }
@@ -186,48 +178,42 @@ func (pc *PeerConn) ClusterPeerID() uint64 { return pc.clusterPeerID }
 // Branch returns the shard branch this virtual connection serves.
 func (pc *PeerConn) Branch() uint32 { return pc.branch }
 
-// ── stub handlers ────────────────────────────────────────────────────────────
+// ── Non-RPC stubs ────────────────────────────────────────────────────────────
 
 func (pc *PeerConn) handleNewMinorBlockHeaderList(req any) (any, error) {
 	_ = req.(*wire.NewMinorBlockHeaderListCommand)
 	// TODO: delegate to shard synchronizer once Shard Runtime is ported.
-	return nil, nil
+	return nil, conn.ErrHandlerNotImplemented
 }
 
 func (pc *PeerConn) handleNewTransactionList(req any) (any, error) {
 	_ = req.(*wire.NewTransactionListCommand)
 	// TODO: delegate to shard tx pool once Shard Runtime is ported.
-	return nil, nil
+	return nil, conn.ErrHandlerNotImplemented
 }
 
 func (pc *PeerConn) handleNewBlockMinor(req any) (any, error) {
 	_ = req.(*wire.NewBlockMinorCommand)
 	// TODO: delegate to shard block processing once Shard Runtime is ported.
-	return nil, nil
+	return nil, conn.ErrHandlerNotImplemented
 }
+
+// ── Shard-level RPC stubs ────────────────────────────────────────────────────
 
 func (pc *PeerConn) handleGetMinorBlockListRequest(req any) (any, error) {
 	_ = req.(*wire.GetMinorBlockListRequest)
 	// TODO: fetch blocks from shard state db once Shard Runtime is ported.
-	return &wire.GetMinorBlockListResponse{MinorBlockList: []*wire.RawBytes{}}, nil
+	return nil, conn.ErrHandlerNotImplemented
 }
 
 func (pc *PeerConn) handleGetMinorBlockHeaderListRequest(req any) (any, error) {
 	_ = req.(*wire.GetMinorBlockHeaderListRequest)
 	// TODO: fetch headers from shard state db once Shard Runtime is ported.
-	return &wire.GetMinorBlockHeaderListResponse{
-		RootTip:         nil,
-		ShardTip:        nil,
-		BlockHeaderList: []*wire.RawBytes{},
-	}, nil
+	return nil, conn.ErrHandlerNotImplemented
 }
 
 func (pc *PeerConn) handleGetMinorBlockHeaderListWithSkipRequest(req any) (any, error) {
 	_ = req.(*wire.GetMinorBlockHeaderListWithSkipRequest)
 	// TODO: fetch headers from shard state db once Shard Runtime is ported.
-	return &wire.GetMinorBlockHeaderListResponse{
-		RootTip:         nil,
-		ShardTip:        nil,
-		BlockHeaderList: []*wire.RawBytes{},
-	}, nil
+	return nil, conn.ErrHandlerNotImplemented
 }

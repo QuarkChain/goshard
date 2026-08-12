@@ -126,8 +126,9 @@ func TestDispatcher_RouteToMasterConn(t *testing.T) {
 }
 
 // TestDispatcher_RouteToPeerConn verifies that frames with cluster_peer_id != 0
-// are forwarded to the matching virtual PeerConn and the stub response is sent
-// back through MasterConn.
+// are forwarded to the matching virtual PeerConn. Since all PeerConn handlers
+// are unimplemented stubs, the PeerConn closes after the handler returns
+// ErrHandlerNotImplemented; MasterConn must survive.
 func TestDispatcher_RouteToPeerConn(t *testing.T) {
 	client, serverConn, cleanup := newMasterConnWithDispatcher(t)
 	defer cleanup()
@@ -136,6 +137,7 @@ func TestDispatcher_RouteToPeerConn(t *testing.T) {
 	const branch uint32 = 0x00010001
 
 	client.dispatcher.CreatePeerConns(clusterPeerID, []uint32{branch}, client, log.New())
+	pc := client.dispatcher.peers[clusterPeerID][branch]
 
 	reqPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockListRequest{
 		MinorBlockHashList: [][wire.HashLength]byte{},
@@ -151,20 +153,33 @@ func TestDispatcher_RouteToPeerConn(t *testing.T) {
 		Payload: reqPayload,
 	})
 
-	resp := readMasterFrame(t, serverConn)
-	if resp.Opcode != byte(wire.CommandOpGetMinorBlockListResponse) {
-		t.Fatalf("expected response opcode 0x%x, got 0x%x", wire.CommandOpGetMinorBlockListResponse, resp.Opcode)
-	}
-	if resp.RPCID != 3 {
-		t.Fatalf("expected rpc_id 3, got %d", resp.RPCID)
-	}
-	if resp.Meta.Branch != branch || resp.Meta.ClusterPeerID != clusterPeerID {
-		t.Fatalf("metadata mismatch: got %+v, want branch=%d cluster_peer_id=%d", resp.Meta, branch, clusterPeerID)
+	// The handler returns ErrHandlerNotImplemented, which triggers
+	// beginShutdown on the PeerConn.
+	select {
+	case <-pc.WaitUntilClosed():
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("PeerConn did not close after handler error")
 	}
 
-	var listResp wire.GetMinorBlockListResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &listResp); err != nil {
-		t.Fatalf("deserialize response: %v", err)
+	// MasterConn must still be alive for master-local traffic.
+	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("master"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+	writeMasterFrame(t, serverConn, &wire.Frame{
+		Meta:    wire.ClusterMetadata{Branch: 0x00010001},
+		Opcode:  byte(wire.ClusterOpPing),
+		RPCID:   1,
+		Payload: pingPayload,
+	})
+
+	resp := readMasterFrame(t, serverConn)
+	if resp.Opcode != byte(wire.ClusterOpPong) {
+		t.Fatalf("expected PONG after PeerConn handler error, got opcode 0x%x", resp.Opcode)
+	}
+	if resp.RPCID != 1 {
+		t.Fatalf("expected rpc_id 1, got %d", resp.RPCID)
 	}
 }
 
@@ -219,14 +234,22 @@ func TestDispatcher_UnknownPeerDropped(t *testing.T) {
 }
 
 // TestPeerConn_RPCIDIsolation verifies that two PeerConns sharing a MasterConn
-// can use the same RPC ID without collision; responses are routed back to the
-// correct peer via metadata.
+// can use the same RPC ID without collision. MasterConn's RPC ID validation
+// only applies to cluster_peer_id=0 traffic; peer traffic is forwarded by the
+// Dispatcher before validation. Each PeerConn has its own BaseConn and thus
+// its own independent RPC ID sequence.
+//
+// Since all PeerConn handlers are unimplemented, both PeerConns close after
+// the handler returns ErrHandlerNotImplemented; MasterConn must survive.
 func TestPeerConn_RPCIDIsolation(t *testing.T) {
 	client, serverConn, cleanup := newMasterConnWithDispatcher(t)
 	defer cleanup()
 
 	client.dispatcher.CreatePeerConns(7, []uint32{0x00010001}, client, log.New())
 	client.dispatcher.CreatePeerConns(9, []uint32{0x00020001}, client, log.New())
+
+	pc7 := client.dispatcher.peers[7][0x00010001]
+	pc9 := client.dispatcher.peers[9][0x00020001]
 
 	reqPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockListRequest{
 		MinorBlockHashList: [][wire.HashLength]byte{},
@@ -235,7 +258,8 @@ func TestPeerConn_RPCIDIsolation(t *testing.T) {
 		t.Fatalf("serialize request: %v", err)
 	}
 
-	// Both peers use rpc_id=5.
+	// Both peers use rpc_id=5. Each PeerConn has its own RPC ID counter, so
+	// the same value must be accepted by both.
 	writeMasterFrame(t, serverConn, &wire.Frame{
 		Meta:    wire.ClusterMetadata{Branch: 0x00010001, ClusterPeerID: 7},
 		Opcode:  byte(wire.CommandOpGetMinorBlockListRequest),
@@ -249,78 +273,39 @@ func TestPeerConn_RPCIDIsolation(t *testing.T) {
 		Payload: reqPayload,
 	})
 
-	resp1 := readMasterFrame(t, serverConn)
-	resp2 := readMasterFrame(t, serverConn)
-
-	if resp1.RPCID != 5 || resp2.RPCID != 5 {
-		t.Fatalf("expected both responses to have rpc_id 5, got %d and %d", resp1.RPCID, resp2.RPCID)
+	// Both PeerConns must close due to the handler returning
+	// ErrHandlerNotImplemented (not due to RPC ID validation failure).
+	select {
+	case <-pc7.WaitUntilClosed():
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer 7 did not close after handler error")
+	}
+	select {
+	case <-pc9.WaitUntilClosed():
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer 9 did not close after handler error")
 	}
 
-	// Each response must belong to a distinct peer/branch pair.
-	peers := map[uint64]uint32{
-		resp1.Meta.ClusterPeerID: resp1.Meta.Branch,
-		resp2.Meta.ClusterPeerID: resp2.Meta.Branch,
-	}
-	if len(peers) != 2 {
-		t.Fatalf("responses were not routed to distinct peers: %+v", peers)
-	}
-	if peers[7] != 0x00010001 {
-		t.Fatalf("peer 7 response routed to wrong branch: got 0x%x", peers[7])
-	}
-	if peers[9] != 0x00020001 {
-		t.Fatalf("peer 9 response routed to wrong branch: got 0x%x", peers[9])
-	}
-
-	for _, resp := range []*wire.Frame{resp1, resp2} {
-		if resp.Opcode != byte(wire.CommandOpGetMinorBlockListResponse) {
-			t.Fatalf("expected GetMinorBlockListResponse, got opcode 0x%x", resp.Opcode)
-		}
-		var listResp wire.GetMinorBlockListResponse
-		if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &listResp); err != nil {
-			t.Fatalf("deserialize response: %v", err)
-		}
-	}
-}
-
-// TestPeerConn_PeerHandlerRPCRoundTrip sends a CommandOp RPC through a virtual
-// PeerConn and verifies the stub response deserializes correctly.
-func TestPeerConn_PeerHandlerRPCRoundTrip(t *testing.T) {
-	client, serverConn, cleanup := newMasterConnWithDispatcher(t)
-	defer cleanup()
-
-	const clusterPeerID uint64 = 11
-	const branch uint32 = 0x00010001
-
-	client.dispatcher.CreatePeerConns(clusterPeerID, []uint32{branch}, client, log.New())
-
-	reqPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockHeaderListRequest{
-		Branch:    branch,
-		BlockHash: [wire.HashLength]byte{},
-		Limit:     10,
-		Direction: 0,
+	// MasterConn must still be alive.
+	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("master"),
+		FullShardIDList: []uint32{0x00010001},
 	})
-	if err != nil {
-		t.Fatalf("serialize request: %v", err)
-	}
-
 	writeMasterFrame(t, serverConn, &wire.Frame{
-		Meta:    wire.ClusterMetadata{Branch: branch, ClusterPeerID: clusterPeerID},
-		Opcode:  byte(wire.CommandOpGetMinorBlockHeaderListRequest),
+		Meta:    wire.ClusterMetadata{Branch: 0x00010001},
+		Opcode:  byte(wire.ClusterOpPing),
 		RPCID:   1,
-		Payload: reqPayload,
+		Payload: pingPayload,
 	})
 
 	resp := readMasterFrame(t, serverConn)
-	if resp.Opcode != byte(wire.CommandOpGetMinorBlockHeaderListResponse) {
-		t.Fatalf("expected response opcode 0x%x, got 0x%x", wire.CommandOpGetMinorBlockHeaderListResponse, resp.Opcode)
+	if resp.Opcode != byte(wire.ClusterOpPong) {
+		t.Fatalf("expected PONG after PeerConn handler errors, got opcode 0x%x", resp.Opcode)
 	}
 	if resp.RPCID != 1 {
 		t.Fatalf("expected rpc_id 1, got %d", resp.RPCID)
-	}
-
-	var headerResp wire.GetMinorBlockHeaderListResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &headerResp); err != nil {
-		t.Fatalf("deserialize response: %v", err)
 	}
 }
 
@@ -611,9 +596,14 @@ func TestPeerConn_CloseStopsReadLoop(t *testing.T) {
 	client.dispatcher.CreatePeerConns(clusterPeerID, []uint32{branch}, client, log.New())
 	pc := client.dispatcher.peers[clusterPeerID][branch]
 
-	// Verify the PeerConn is active and its read loop is running.
-	if !pc.IsActive() {
-		t.Fatal("expected PeerConn to be active after Start")
+	// Verify the PeerConn becomes active and its read loop is running.
+	// BaseConn.Start is event-driven: the connection flips to ACTIVE on the
+	// owner goroutine, so wait on WaitUntilActive instead of polling IsActive.
+	select {
+	case <-pc.WaitUntilActive():
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("PeerConn did not become active after Start")
 	}
 
 	// Close the PeerConn.

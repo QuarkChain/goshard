@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"slices"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
@@ -37,12 +36,13 @@ type MasterConn struct {
 	// immutable — handlers and Close() read it without synchronization.
 	dispatcher *Dispatcher
 
-	// peerRPCIDs tracks the most recent inbound RPC ID per cluster_peer_id.
-	// cluster_peer_id == 0 is the master itself; each non-zero peer has its
-	// own independent monotonic sequence so PeerConns sharing this MasterConn
-	// do not collide on rpc_id.
+	// lastMasterRPCID tracks the most recent inbound RPC ID from the master
+	// (cluster_peer_id=0). This matches Python's AbstractConnection.peer_rpc_id,
+	// which is a single integer. Peer traffic (cluster_peer_id != 0) is forwarded
+	// by the Dispatcher to PeerConn, which maintains its own independent rpc_id
+	// sequence.
 	// Only accessed by readLoop; no lock needed.
-	peerRPCIDs map[uint64]int64
+	lastMasterRPCID int64
 }
 
 // NewMasterConn dials the master at addr and returns a MasterConn.
@@ -70,10 +70,10 @@ func newMasterConn(cn net.Conn, maxPayloadSize uint32, localID []byte, localFull
 		BaseConn:             conn.NewBaseConnFromConn(cn, readFrame, wire.WriteFrame, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
-		peerRPCIDs:           make(map[uint64]int64),
+		lastMasterRPCID:      -1,
 	}
 
-	mc.baseConn.validateRPCID = mc.validatePeerRPCID
+	mc.BaseConn.SetValidateRPCID(mc.validateMasterRPCID)
 
 	mc.registerOpSerializers()
 	mc.registerHandlers()
@@ -182,18 +182,20 @@ func (mc *MasterConn) registerHandlers() {
 	})
 }
 
-// validatePeerRPCID validates inbound RPC IDs independently for each
-// cluster_peer_id. This lets multiple PeerConns share one MasterConn without
-// colliding on rpc_id.
-func (mc *MasterConn) validatePeerRPCID(clusterPeerID uint64, rpcID uint64) bool {
-	last, ok := mc.peerRPCIDs[clusterPeerID]
-	if !ok {
-		last = -1
+// validateMasterRPCID validates inbound RPC IDs for master traffic (cluster_peer_id=0).
+// This matches Python's AbstractConnection.validate_and_update_peer_rpc_id, which uses
+// a single integer. Peer traffic (cluster_peer_id != 0) is forwarded to PeerConn and
+// never reaches this function.
+func (mc *MasterConn) validateMasterRPCID(clusterPeerID uint64, rpcID uint64) bool {
+	// Only master traffic (cluster_peer_id=0) is validated here; peer traffic is
+	// forwarded to PeerConn by the Dispatcher.
+	if clusterPeerID != 0 {
+		return true // Should not reach here due to Dispatcher.RouteFrame
 	}
-	if int64(rpcID) <= last {
+	if int64(rpcID) <= mc.lastMasterRPCID {
 		return false
 	}
-	mc.peerRPCIDs[clusterPeerID] = int64(rpcID)
+	mc.lastMasterRPCID = int64(rpcID)
 	return true
 }
 
@@ -233,7 +235,7 @@ func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
 
 	d := mc.dispatcher
 	if d != nil {
-		d.CreatePeerConns(r.ClusterPeerID, mc.localFullShardIDList, mc, mc.baseConn.log)
+		d.CreatePeerConns(r.ClusterPeerID, mc.localFullShardIDList, mc, mc.BaseConn.Logger())
 	}
 
 	return &wire.CreateClusterPeerConnectionResponse{ErrorCode: 0}, nil
@@ -252,17 +254,30 @@ func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
 	return nil, nil
 }
 
-// SetForwarder installs a raw-frame forwarder hook for peer traffic
-// (cluster_peer_id != 0). The Dispatcher uses this to route frames to
-// virtual PeerConns.
-func (mc *MasterConn) SetForwarder(f func(*wire.Frame) bool) {
-	mc.BaseConn.SetForwarder(f)
+// SetDispatcher wires the dispatcher used to route peer traffic
+// (cluster_peer_id != 0) to virtual PeerConns. It must be called before
+// Start(); the dispatcher is read without synchronization once the connection
+// is active.
+func (mc *MasterConn) SetDispatcher(d *Dispatcher) {
+	if mc.State() != conn.ConnectionStateConnecting {
+		panic("dispatcher must be set before Start")
+	}
+	mc.dispatcher = d
+	mc.BaseConn.SetForwarder(d.RouteFrame)
 }
 
 // ForwardFrame writes a raw frame to the underlying TCP transport. It is used
 // by virtual PeerConns to send responses back to the master.
 func (mc *MasterConn) ForwardFrame(f *wire.Frame) error {
 	return mc.BaseConn.SubmitFrame(f)
+}
+
+// Close closes the master connection and all associated peer connections.
+func (mc *MasterConn) Close() error {
+	if d := mc.dispatcher; d != nil {
+		d.Close()
+	}
+	return mc.BaseConn.Close()
 }
 
 // SendRPCMeta sends a request with ClusterMetadata and waits for the response.

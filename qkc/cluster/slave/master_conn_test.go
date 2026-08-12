@@ -150,7 +150,9 @@ func newMasterConnWithFakeTransport(
 		BaseConn:             conn.NewBaseConn(tr, log.New()),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
+		lastMasterRPCID:      -1,
 	}
+	mc.BaseConn.SetValidateRPCID(mc.validateMasterRPCID)
 	mc.registerOpSerializers()
 	mc.registerHandlers()
 	return mc, tr
@@ -347,7 +349,7 @@ func TestMasterConn_Forwarder(t *testing.T) {
 
 	var forwardedMu sync.Mutex
 	var forwarded []*wire.Frame
-	server.SetForwarder(func(frame *wire.Frame) bool {
+	server.BaseConn.SetForwarder(func(frame *wire.Frame) bool {
 		if frame.Meta.ClusterPeerID == 0 {
 			return false
 		}

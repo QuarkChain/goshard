@@ -245,6 +245,21 @@ func (c *BaseConn) SetForwarder(f func(*wire.Frame) bool) {
 	c.forwarder = f
 }
 
+// SetValidateRPCID installs a custom RPC request ID validation hook. It is
+// invoked by the owner goroutine for every inbound RPC request before
+// dispatch. The default validates a single monotonic sequence shared by all
+// peers; connections that route traffic for multiple cluster_peer_ids (e.g.
+// MasterConn with virtual PeerConns) can install a per-peer validator so each
+// peer keeps an independent rpc_id sequence.
+func (c *BaseConn) SetValidateRPCID(f func(clusterPeerID uint64, rpcID uint64) bool) {
+	c.configMu.Lock()
+	defer c.configMu.Unlock()
+	if c.State() != ConnectionStateConnecting {
+		panic("validateRPCID must be set before Start")
+	}
+	c.validateRPCID = f
+}
+
 // SendRPC sends a request without metadata and waits for its response.
 func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*wire.Frame, error) {
 	return c.SendRPCMeta(ctx, opcode, payload, wire.ClusterMetadata{})
