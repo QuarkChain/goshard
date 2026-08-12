@@ -3,7 +3,6 @@
 package slave
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -34,42 +33,6 @@ func NewDispatcher(logger log.Logger) *Dispatcher {
 		peers: make(map[uint64]map[uint32]*PeerConn),
 		log:   logger,
 	}
-}
-
-// Register adds an already-created PeerConn to the registry. It returns an
-// error if a PeerConn for the same cluster_peer_id and branch already exists.
-func (d *Dispatcher) Register(pc *PeerConn) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	branchMap, ok := d.peers[pc.ClusterPeerID()]
-	if !ok {
-		branchMap = make(map[uint32]*PeerConn)
-		d.peers[pc.ClusterPeerID()] = branchMap
-	}
-	if _, exists := branchMap[pc.Branch()]; exists {
-		return fmt.Errorf("peer connection already exists for cluster_peer_id %d branch %d", pc.ClusterPeerID(), pc.Branch())
-	}
-	branchMap[pc.Branch()] = pc
-	return nil
-}
-
-// Unregister removes a single PeerConn from the registry. It returns the
-// removed PeerConn (if any) without closing it.
-func (d *Dispatcher) Unregister(clusterPeerID uint64, branch uint32) *PeerConn {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	branchMap, ok := d.peers[clusterPeerID]
-	if !ok {
-		return nil
-	}
-	pc := branchMap[branch]
-	delete(branchMap, branch)
-	if len(branchMap) == 0 {
-		delete(d.peers, clusterPeerID)
-	}
-	return pc
 }
 
 // CreatePeerConns creates and starts one PeerConn per branch for the given
