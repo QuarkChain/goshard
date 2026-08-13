@@ -981,6 +981,129 @@ func TestBaseConn_StartOnClosedConnectionIsNoOp(t *testing.T) {
 	}
 }
 
+// TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted is a deterministic
+// regression test for the Start()/Close() lifecycle deadlock. If Start()'s CAS
+// succeeds but readerLoop is never launched (because Start() observed an
+// already-Closed state and returned), Close() must not block forever waiting on
+// readerDone.
+func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+
+	// Simulate "Start() paused after its CAS, before mu.Lock": started is
+	// already true, but no readerLoop has been launched.
+	conn.started.Store(true)
+
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() deadlocked waiting on readerDone for a readerLoop that never started")
+	}
+}
+
+// TestBaseConn_StartCloseConcurrentStress repeatedly exercises the Start()/Close()
+// race, covering the interleaving where Start() is descheduled between its CAS
+// and mu.Lock() while Close() completes shutdown.
+func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
+	for i := 0; i < 500; i++ {
+		tr := newFakeFrameTransport()
+		conn := NewBaseConn(tr, log.New())
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			conn.Start()
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			conn.Close()
+		}()
+		close(start)
+
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("iteration %d: Close() deadlocked with concurrent Start()", i)
+		}
+	}
+}
+
+// TestBaseConn_ResponseOpcodeMismatchClosesConnection verifies that a response
+// whose opcode does not match the request's expected response opcode is treated
+// as a protocol error: the connection closes and the pending RPC is completed
+// with an error rather than being mis-delivered as a successful response.
+func TestBaseConn_ResponseOpcodeMismatchClosesConnection(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+
+	// Register PING and ADD_XSHARD_TX_LIST serializers so the wrong response
+	// opcode is a *known* response opcode that deserializes cleanly but does
+	// not match PING's expected PONG.
+	conn.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing):                   OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+		byte(wire.ClusterOpAddXshardTxListRequest): OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+	})
+	conn.Start()
+	defer conn.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+
+	var request *wire.Frame
+	select {
+	case request = <-tr.writes:
+	case <-time.After(time.Second):
+		t.Fatal("fake transport did not receive request")
+	}
+
+	wrongPayload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{})
+	if err != nil {
+		t.Fatalf("serialize AddXshardTxListResponse: %v", err)
+	}
+	tr.frames <- &wire.Frame{
+		Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
+		RPCID:   request.RPCID,
+		Payload: wrongPayload,
+	}
+
+	select {
+	case <-conn.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection did not close after response opcode mismatch")
+	}
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("pending RPC completed successfully on response opcode mismatch")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending RPC was not completed after response opcode mismatch")
+	}
+
+	if pending := conn.pendingLen(); pending != 0 {
+		t.Fatalf("pending RPC remains after mismatch shutdown: %d", pending)
+	}
+}
+
 // ── BaseConn integration tests (TCP pair) ────────────────────────────────────
 
 // TestBaseConn_CloseWakesPendingRPC verifies that Close wakes all pending RPCs.

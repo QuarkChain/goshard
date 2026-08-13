@@ -55,8 +55,9 @@ const (
 
 // pendingRPC represents an in-flight RPC call waiting for its response.
 type pendingRPC struct {
-	result chan rpcResult // cap 1
-	stop   func() bool    // context.AfterFunc stop
+	result     chan rpcResult // cap 1
+	stop       func() bool    // context.AfterFunc stop
+	wantOpcode byte           // expected response opcode for this request
 }
 
 type rpcResult struct {
@@ -103,12 +104,13 @@ type BaseConn struct {
 	writeMu sync.Mutex
 
 	// ── Synchronization primitives ──
-	shutdownOnce sync.Once
-	activeChan   chan struct{} // closed after Start
-	closedChan   chan struct{} // closed during shutdown
-	errChan      chan error    // cap 1, non-user errors
-	readerDone   chan struct{} // closed when readerLoop exits
-	started      atomic.Bool
+	shutdownOnce  sync.Once
+	activeChan    chan struct{} // closed after Start
+	closedChan    chan struct{} // closed during shutdown
+	errChan       chan error    // cap 1, non-user errors
+	readerDone    chan struct{} // closed when readerLoop exits
+	started       atomic.Bool
+	readerStarted atomic.Bool // true once readerLoop has been launched
 
 	log log.Logger
 }
@@ -166,13 +168,19 @@ func (c *BaseConn) Start() {
 	close(c.activeChan)
 	c.mu.Unlock()
 
+	// Mark the reader as launched before spawning it. Close() waits on
+	// readerDone only when readerStarted is true, so the two are kept
+	// consistent: if Start() observes a Closed connection and returns without
+	// launching readerLoop, readerStarted stays false and Close() does not
+	// block forever on a readerDone that will never be closed.
+	c.readerStarted.Store(true)
 	go c.readerLoop()
 }
 
 // Close closes the connection and wakes all pending RPCs.
 func (c *BaseConn) Close() error {
 	c.initiateShutdown(nil)
-	if c.started.Load() {
+	if c.readerStarted.Load() {
 		<-c.readerDone
 	}
 	c.mu.Lock()
@@ -305,7 +313,28 @@ func (c *BaseConn) SendRPCMeta(
 	payload []byte,
 	meta wire.ClusterMetadata,
 ) (*wire.Frame, error) {
-	call := &pendingRPC{result: make(chan rpcResult, 1)}
+	// Resolve the expected response opcode for this request before registering
+	// the pending entry, so handleResponse can reject responses whose opcode
+	// does not match the request's response type. serializers is populated
+	// before Start and read-only afterwards.
+	//
+	// If the request opcode has no registered serializer, wantOpcode stays 0 and
+	// handleResponse skips the mismatch check. Such a request can never have its
+	// response delivered anyway: the matching response opcode is equally
+	// unregistered, so handleResponse would close the connection as an unknown
+	// response opcode before it could be matched to the pending entry.
+	c.configMu.RLock()
+	ser := c.serializers[opcode]
+	c.configMu.RUnlock()
+	var wantOpcode byte
+	if ser != nil {
+		wantOpcode = ser.ResponseOpCode
+	}
+
+	call := &pendingRPC{
+		result:     make(chan rpcResult, 1),
+		wantOpcode: wantOpcode,
+	}
 
 	// Phase 1: allocate rpc_id + register pending (writeMu → mu).
 	c.writeMu.Lock()
@@ -480,6 +509,18 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 	c.mu.Lock()
 	call, ok := c.pending[frame.RPCID]
 	if ok {
+		if call.wantOpcode != 0 && frame.Opcode != call.wantOpcode {
+			// The response opcode does not match what this request expects.
+			// This is a protocol error: leave the pending entry untouched so
+			// the in-flight request is completed by shutdown with an error,
+			// rather than being mis-delivered as a successful response.
+			c.mu.Unlock()
+			c.log.Error("rpc response opcode mismatch",
+				"rpcid", frame.RPCID, "got", frame.Opcode, "want", call.wantOpcode)
+			c.shutdown(fmt.Errorf("rpc response opcode mismatch for rpc %d: got 0x%x, want 0x%x",
+				frame.RPCID, frame.Opcode, call.wantOpcode))
+			return
+		}
 		delete(c.pending, frame.RPCID)
 		c.pendingCount.Add(-1)
 		c.mu.Unlock()

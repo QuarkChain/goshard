@@ -193,7 +193,12 @@ func TestXshardConn_XshardRPCStubClosesConnection(t *testing.T) {
 	<-server.WaitUntilClosed()
 }
 
-func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
+// TestXshardConn_SendPingWrongResponseOpcodeClosesConnection verifies that a
+// PING answered with a well-formed but wrong-opcode response (e.g. an
+// AddXshardTxListResponse carrying the PING's RPCID) is treated as a protocol
+// error at the framework layer: the pending RPC is not completed successfully
+// and the connection is closed.
+func TestXshardConn_SendPingWrongResponseOpcodeClosesConnection(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 	defer serverConn.Close()
@@ -207,10 +212,9 @@ func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
 			peerDone <- err
 			return
 		}
-		// Send a valid AddXshardTxListResponse payload with the wrong opcode.
-		// BaseConn validates response payloads against the opcode's registered
-		// serializer before delivering, so the payload must deserialize cleanly
-		// as AddXshardTxListResponse; SendPing then rejects the opcode.
+		// Reply with a valid AddXshardTxListResponse payload carrying the same
+		// RPCID but the wrong opcode. BaseConn deserializes it cleanly but then
+		// detects the request/response opcode mismatch and closes the connection.
 		payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{
 			ErrorCode: 0,
 		})
@@ -233,8 +237,8 @@ func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
 	if err := <-peerDone; err != nil {
 		t.Fatalf("raw peer failed: %v", err)
 	}
-	if client.IsClosed() {
-		t.Fatal("wrong PING response opcode unexpectedly closed connection")
+	if !client.IsClosed() {
+		t.Fatal("wrong PING response opcode should close the connection")
 	}
 }
 
