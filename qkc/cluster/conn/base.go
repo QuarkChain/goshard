@@ -153,6 +153,9 @@ func NewBaseConnFromConn(
 // Start transitions the connection to ACTIVE and starts the reader loop.
 // If the connection is already closed, Start is a no-op.
 func (c *BaseConn) Start() {
+	if !c.started.CompareAndSwap(false, true) {
+		return
+	}
 	c.mu.Lock()
 	if c.state == ConnectionStateClosed {
 		c.mu.Unlock()
@@ -160,7 +163,6 @@ func (c *BaseConn) Start() {
 	}
 	c.state = ConnectionStateActive
 	c.stateSnapshot.Store(int32(ConnectionStateActive))
-	c.started.Store(true)
 	close(c.activeChan)
 	c.mu.Unlock()
 
