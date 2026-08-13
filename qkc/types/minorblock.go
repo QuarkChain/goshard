@@ -183,9 +183,6 @@ type extminorblock struct {
 func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, receipts []*Receipt, trackingdata []byte) *MinorBlock {
 	b := &MinorBlock{header: CopyMinorBlockHeader(header), meta: CopyMinorBlockMeta(meta), td: new(big.Int)}
 
-	if len(txs) != len(receipts) {
-		panic("txs count don't match receipts count.")
-	}
 	b.meta.TxHash = CalculateMerkleRoot(Transactions(txs))
 	if len(txs) > 0 {
 		b.transactions = make(Transactions, len(txs))
@@ -365,7 +362,7 @@ func (b *MinorBlock) Size() common.StorageSize {
 func (b *MinorBlock) WithSeal(header *MinorBlockHeader) *MinorBlock {
 	return &MinorBlock{
 		header:       CopyMinorBlockHeader(header),
-		meta:         b.meta,
+		meta:         CopyMinorBlockMeta(b.meta),
 		transactions: b.transactions,
 		trackingdata: b.trackingdata,
 	}
