@@ -25,7 +25,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
@@ -196,40 +195,55 @@ func TestBalanceChangeTracksQKCPresence(t *testing.T) {
 	obj := state.getOrNewStateObject(addr)
 
 	obj.SetBalance(new(uint256.Int))
-	if obj.data.MntBalances != nil {
+	if obj.data.IsBalanceUpdated() {
 		t.Fatal("unchanged zero balance created a QKC presence marker")
 	}
 	assertAccountTokenBalance(t, &obj.data, nil)
 
 	snapshot := state.Snapshot()
 	obj.SetBalance(uint256.NewInt(1000))
-	if obj.data.MntBalances == nil {
+	if !obj.data.IsBalanceUpdated() {
 		t.Fatal("balance change did not create a QKC presence marker")
 	}
 	obj.SetBalance(new(uint256.Int))
-	if obj.data.MntBalances == nil {
+	if !obj.data.IsBalanceUpdated() {
 		t.Fatal("draining QKC balance removed its presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
+	nestedSnapshot := state.Snapshot()
+	obj.SetBalance(uint256.NewInt(10))
+	state.RevertToSnapshot(nestedSnapshot)
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("reverting a later balance change removed earlier update history")
 	}
 	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
 
 	state.RevertToSnapshot(snapshot)
 	obj = state.getStateObject(addr)
-	if obj.data.MntBalances != nil {
-		t.Fatal("snapshot revert did not restore the nil QKC presence marker")
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("snapshot revert removed the QKC presence marker")
 	}
-	assertAccountTokenBalance(t, &obj.data, nil)
+	if !obj.Balance().IsZero() {
+		t.Fatal("snapshot revert did not restore the zero QKC balance")
+	}
+	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
 }
 
 func TestBalanceChangeRevertKeepsExistingQKCPresence(t *testing.T) {
 	state, _ := New(types.EmptyRootHash, NewDatabaseForTesting())
 	addr := common.BytesToAddress([]byte("qkc-existing"))
 	obj := state.getOrNewStateObject(addr)
-	obj.data.MntBalances = qkccommon.NewEmptyTokenBalances()
+	obj.SetBalance(uint256.NewInt(100))
+	obj.SetBalance(new(uint256.Int))
+	state.Finalise(false)
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("finalising state removed an existing QKC balance update")
+	}
 
 	snapshot := state.Snapshot()
 	obj.SetBalance(uint256.NewInt(1000))
 	state.RevertToSnapshot(snapshot)
-	if state.getStateObject(addr).data.MntBalances == nil {
+	if !state.getStateObject(addr).data.IsBalanceUpdated() {
 		t.Fatal("snapshot revert removed an existing QKC presence marker")
 	}
 }

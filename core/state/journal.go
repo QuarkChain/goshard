@@ -367,6 +367,8 @@ func (ch touchChange) copy() journalEntry {
 }
 
 func (ch balanceChange) revert(s *StateDB) {
+	// pyquarkchain restores the previous value by writing it back into the
+	// balance map. Even when the previous value is zero, the token entry remains.
 	s.getStateObject(ch.account).setBalance(ch.prev)
 }
 

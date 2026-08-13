@@ -117,8 +117,7 @@ func slimAccountToStateAccount(account *types.SlimAccount) (*types.StateAccount,
 		Root:         common.BytesToHash(account.Root),
 		FullShardKey: account.FullShardKey,
 	}
-	// Decode the QKC MNT balances carried in the slim account (nil stays nil).
-	if account.MntBal != nil {
+	if len(account.MntBal) > 0 {
 		mnt, err := qkccommon.NewTokenBalances(account.MntBal)
 		if err != nil {
 			return nil, err

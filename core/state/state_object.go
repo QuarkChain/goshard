@@ -511,13 +511,11 @@ func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
 		log.Error("SetBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
 		return prev
 	}
-	s.db.journal.balanceChange(s.address, s.data.Balance)
-	// A changed QKC balance creates a token entry in pyquarkchain. Preserve
-	// that presence so a later zero balance encodes as an empty token list.
-	if !s.data.Balance.Eq(amount) && s.data.MntBalances == nil {
-		s.db.journal.mntBalanceChange(s.address, nil)
-		s.data.MntBalances = qkccommon.NewEmptyTokenBalances()
+	if s.data.Balance.Eq(amount) {
+		return prev
 	}
+	s.db.journal.balanceChange(s.address, s.data.Balance)
+	s.data.MarkBalanceUpdated()
 	s.setBalance(amount)
 	return prev
 }
