@@ -26,10 +26,10 @@ type qkcAccountRLP struct {
 }
 
 // mergeQKCTokenBalances combines the QKC native balance (tokenID=35760) and MNT
-// balances into a single TokenBalances for wire encoding. Returns nil if both empty,
-// which causes EncodeRLP to write 0x80 (RLP nil/empty) matching goquarkchain behavior.
+// balances into a single TokenBalances for wire encoding. A nil MNT set keeps a
+// zero QKC balance absent; a non-nil MNT set preserves QKC presence at zero.
 func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances) *qkccommon.TokenBalances {
-	if (balance == nil || balance.IsZero()) && (mnt == nil || mnt.Len() == 0) {
+	if (balance == nil || balance.IsZero()) && mnt == nil {
 		return nil
 	}
 	merged := qkccommon.NewEmptyTokenBalances()
@@ -38,9 +38,7 @@ func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances) *
 			merged.SetValue(bal, id)
 		}
 	}
-	if balance != nil && !balance.IsZero() {
-		merged.SetValue(balance, qkccommon.DefaultTokenID)
-	}
+	merged.SetValue(balance, qkccommon.DefaultTokenID)
 	return merged
 }
 
@@ -85,19 +83,21 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 		return errors.New("unsupported non-empty QuarkChain account optional field")
 	}
 	acct.Balance = new(uint256.Int)
+	acct.MntBalances = nil
 	if len(qkc.TokenBal) > 0 {
 		tb, err := qkccommon.NewTokenBalances(qkc.TokenBal)
 		if err != nil {
 			return err
 		}
 		balMap := tb.GetBalanceMap()
-		if qkcBal, ok := balMap[qkccommon.DefaultTokenID]; ok {
+		qkcBal, hasQKC := balMap[qkccommon.DefaultTokenID]
+		if hasQKC {
 			acct.Balance.Set(qkcBal)
 			delete(balMap, qkccommon.DefaultTokenID)
 		}
-		// Keep the decoded non-QKC balances. Empty lists are canonicalized to
-		// empty bytes when re-encoded, matching pyquarkchain.
-		acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
+		if hasQKC || len(balMap) != 0 {
+			acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
+		}
 	}
 	return nil
 }
