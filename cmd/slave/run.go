@@ -9,8 +9,8 @@ import (
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc"
 	"github.com/ethereum/go-ethereum/qkc/config"
-	"github.com/ethereum/go-ethereum/qkc/genesis"
 	"github.com/ethereum/go-ethereum/qkc/shard"
 	"github.com/ethereum/go-ethereum/qkc/slave"
 	"github.com/urfave/cli/v2"
@@ -60,11 +60,11 @@ func bootSlave(cfg *config.ClusterConfig, nodeID string) (*slave.SlaveBackend, e
 	if err != nil {
 		return nil, err
 	}
-	root, err := genesis.RootBlock(cfg.Quarkchain)
+	root, err := qkc.CreateRootBlock(cfg.Quarkchain)
 	if err != nil {
 		return nil, err
 	}
-	// TODO(real shard chain): inject the qkc/core ChainService here once QKC
-	// block genesis and state materialization are ready; Options{} uses the stub.
+	// TODO: inject the real chain service (the geth-core shard chain) here once it
+	// exists; Options{} uses the stub.
 	return slave.New(slaveCtx, root, shard.Options{})
 }

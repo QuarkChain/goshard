@@ -34,8 +34,8 @@ func initDataDir(t *testing.T, fixturePath, dbRoot string) {
 	}
 }
 
-// TODO(real shard chain): retain this binary-level contract with a real QKC
-// block 0, and add a case where chain rules change without changing block 0.
+// TODO(#1): add a case where the rule set changes without changing block 0, once
+// the real chain executes above genesis.
 // TestRunGenesisMismatchExitsLoudly initializes a datadir from the mainnet
 // config, then reruns the slave against the same datadir with the devnet
 // config: the run must exit 1 and say which genesis is stored, which one the
@@ -66,8 +66,10 @@ func TestRunGenesisMismatchExitsLoudly(t *testing.T) {
 	}
 }
 
-// TODO(#1): initialize the real QKC shard chain and assert its canonical minor
-// genesis/head once inspectShardDB stops reading the temporary GenesisRecord.
+// TestInspectDataDir pins the report of a datadir initialized from mainnet
+// against qkc/testdata/minor_genesis_golden.json: what inspect prints for chain
+// 0's shard is pyquarkchain's own create_minor_block() output, not a value
+// derived a second way.
 func TestInspectDataDir(t *testing.T) {
 	dbRoot := t.TempDir()
 	initDataDir(t, fixtures[0].path, dbRoot)
@@ -80,15 +82,47 @@ func TestInspectDataDir(t *testing.T) {
 	for _, want := range []string{
 		"shard 0x00000001 (",
 		"shard 0x00040001 (",
-		"record version:        1",
-		"chain genesis:         0x",
-		"root genesis:          0x4036783e441eb5057bf2be96bf1fd4585ac49824de15c0d92a4c14a97886ca51",
+		"genesis block:         0x04493a3c06261af970ca4fc33caa585fbcef11cdb73bb1e3be2a9f6b828a7a0f",
+		"height:                0",
+		"state root:            0x699737e3597ea304b7d2e2f4ecbf8ab6348688287c59cec8599cf7a4f7c82153",
+		"coinbase:              0x000000000000000000000000000000000000000000000001",
+		"coinbase amount:       token 35760 = 3250000000000000000",
+		"evm_gas_limit:         12000000",
+		"evm_xshard_gas_limit:  6000000",
+		"hash_prev_root_block:  0x4036783e441eb5057bf2be96bf1fd4585ac49824de15c0d92a4c14a97886ca51",
 		"xshard cursor:         root=0 minor=0 deposit=0",
 		"head block:            none recorded",
 		"2 shard(s) inspected, 0 failed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("inspect output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestInspectReportsMisplacedChaindb renames an initialized shard's chaindb to
+// another shard's directory name. The stored block names its own shard through
+// its branch, so inspect must report the directory as misplaced rather than
+// present the block as that shard's genesis.
+func TestInspectReportsMisplacedChaindb(t *testing.T) {
+	dbRoot := t.TempDir()
+	initDataDir(t, fixtures[0].path, dbRoot)
+	if err := os.Rename(filepath.Join(dbRoot, "shard-0x00040001"), filepath.Join(dbRoot, "shard-0x00080001")); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	err := inspectDataDir(&buf, dbRoot)
+	if err == nil || !strings.Contains(err.Error(), "misplaced chaindb") {
+		t.Fatalf("inspectDataDir err = %v, want misplaced chaindb", err)
+	}
+	for _, want := range []string{
+		"stored genesis belongs to shard 0x00040001",
+		"the directory name says 0x00080001",
+		"2 shard(s) inspected, 1 failed",
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("inspect output missing %q:\n%s", want, buf.String())
 		}
 	}
 }

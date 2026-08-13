@@ -23,51 +23,40 @@ interrupted — a drop-in for how pyquarkchain's `cluster.py` starts a slave:
 ./build/bin/slave --cluster_config ./qkc/config/singularity/devnet.json --node_id S0
 ```
 
+```
+INFO [..] slave booting               node_id=S0
+INFO [..] genesis committed           shard=0x00000001 genesis=661b12..792667
+INFO [..] shard started               shard=0x00000001 genesis=661b12..792667 head=0
+INFO [..] genesis committed           shard=0x00040001 genesis=c80ea9..5496d2
+INFO [..] shard started               shard=0x00040001 genesis=c80ea9..5496d2 head=0
+INFO [..] slave running               node_id=S0 shards=2
+```
+
 Each owned shard gets an isolated chaindb under
-`{DB_PATH_ROOT}/shard-0x{full_shard_id}/` (relative to the working directory) and
-logs `shard started` with its genesis hash and head height. An empty
-`DB_PATH_ROOT` is pyquarkchain's mem-db mode (`use_mem_db`): every shard runs on
-an ephemeral in-memory database and nothing is written to disk. `^C` (or SIGTERM)
-shuts every shard down cleanly and exits 0; a second signal force-quits. The
-handler is installed before any resource opens, so a signal that lands mid-boot
-is honored as soon as boot settles. Rerunning against the same datadir validates
-the stored genesis record against the config (`existing genesis validated`)
-and refuses to start if the config changed since initialization.
+`{DB_PATH_ROOT}/shard-0x{full_shard_id}/` (relative to the working directory),
+stands on its QuarkChain minor genesis block, and reports that block's hash and
+its head height. An empty `DB_PATH_ROOT` is pyquarkchain's mem-db mode
+(`use_mem_db`): every shard runs on an ephemeral in-memory database and nothing
+is written to disk.
+
+`^C` (or SIGTERM) shuts every shard down cleanly and exits 0; a second signal
+force-quits. The handler is installed before any resource opens, so a signal that
+lands mid-boot is honored as soon as boot settles.
+
+Rerunning against the same datadir revalidates each shard's stored genesis block
+against the config and logs `existing genesis validated` instead of
+`genesis committed`. A datadir initialized from a different config is refused
+rather than reused, and the process exits non-zero:
+
+```
+slave S0: shard 0x00000001: stored genesis 0x661b12…792667 does not match config
+genesis 0x04493a…8a7a0f (db ./qkc-data/devnet/shard-0x00000001) — cluster config
+changed since initialization
+```
 
 Only geth's logging and file-based profiling debug flags are exposed. The debug
 flags that would open a socket — the `--pprof` HTTP server and `--pyroscope.*`
 push — are deliberately not registered, keeping the process free of network I/O.
-
-## Inspecting a datadir
-
-`slave inspect` is read-only and needs no config: it scans `--datadir` for shard
-chaindb directories (`shard-0x{full_shard_id}/`), opens each in read-only mode,
-and prints the stored genesis record and chain head. A shard that
-cannot be opened or read is reported without aborting the others, and the exit
-status is non-zero if any shard failed. A running slave holds its chaindb locks
-(each shard then reports `resource temporarily unavailable`), so inspect a
-stopped node. The report goes to stdout; log lines go to stderr.
-
-```
-./build/bin/slave inspect --datadir ./qkc-data/devnet
-```
-
-```
-shard 0x00000001 (qkc-data/devnet/shard-0x00000001):
-  record version:        1
-  chain genesis:         0xea741742184975635c2eb1ba468e7b7f58156025517eee3d7583f4ca0ad2dbca
-  root genesis:          0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
-  hash_prev_root_block:  0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
-  xshard cursor:         root=0 minor=0 deposit=0
-  head block:            none recorded (stub chain persists no head)
-shard 0x00040001 (qkc-data/devnet/shard-0x00040001):
-  ...
-2 shard(s) inspected, 0 failed
-```
-
-A chaindb whose bootstrap was interrupted before the genesis record committed
-prints `genesis record: none (bootstrap never completed; next boot
-re-initializes)` — the next `slave` run re-runs the fresh initialization path.
 
 ## Subcommands
 
@@ -126,6 +115,44 @@ The running devnet config works the same way:
 
 prints `hash: 0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d`.
 
+### `slave inspect`
+
+Read-only and config-free: scan `--datadir` for shard chaindb directories
+(`shard-0x{full_shard_id}/`), open each in read-only mode, and print the stored
+minor genesis block and chain head. A shard that cannot be opened or read is
+reported without aborting the others, and the exit status is non-zero if any
+shard failed. A running slave holds its chaindb locks (each shard then reports
+`resource temporarily unavailable`), so inspect a stopped node. The report goes
+to stdout; log lines go to stderr.
+
+```
+./build/bin/slave inspect --datadir ./qkc-data/devnet
+```
+
+```
+shard 0x00000001 (qkc-data/devnet/shard-0x00000001):
+  genesis block:         0x661b12d25851f510519f8b157b2b76c95ea8ba4faf2a78f047c12c0bec792667
+  height:                0
+  state root:            0x76b7e413ee8a10d27ad5158ce91b8b8e61d6af8805b965a4ce11b93db0286ed1
+  coinbase:              0x000000000000000000000000000000000000000000000001
+  coinbase amount:       token 35760 = 3250000000000000000
+  evm_gas_limit:         12000000
+  evm_xshard_gas_limit:  6000000
+  hash_prev_root_block:  0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
+  xshard cursor:         root=0 minor=0 deposit=0
+  head block:            none recorded (stub chain persists no head)
+shard 0x00040001 (qkc-data/devnet/shard-0x00040001):
+  ...
+2 shard(s) inspected, 0 failed
+```
+
+The stored block names its own shard through its branch, so a chaindb sitting in
+another shard's directory is reported as a misplaced chaindb instead of being
+presented as that shard's genesis. A chaindb whose bootstrap was interrupted
+before the block committed prints `genesis block: none (bootstrap never
+completed; next boot re-initializes)` — the next `slave` run re-runs the fresh
+initialization path.
+
 ## Fixtures and pyquarkchain cross-validation
 
 Both real (singularity) cluster configs are checked in under
@@ -138,30 +165,41 @@ header there with the command in that README's
 [Pinned root-genesis values](../../qkc/config/singularity/README.md#pinned-root-genesis-values)
 section and compare its `hash` output with the `hash:` line printed here.
 
-The shard-level `chain genesis` printed by `slave inspect` is the config
-descriptor's fingerprint, not a pyquarkchain minor-block hash; it becomes the
-real shard genesis block hash when the QKC block format (#1) lands.
+The shard-level genesis hash printed by `slave inspect` is the QuarkChain minor
+genesis block hash, byte-identical to pyquarkchain's
+`GenesisManager.create_minor_block().header.get_hash()` — the genesis block and
+its allocated state are derived by [`qkc.CreateMinorBlock`](../../qkc/genesis.go)
+and can be cross-validated the same way as the root genesis (see that README's
+[Pinned minor-genesis values](../../qkc/config/singularity/README.md#pinned-minor-genesis-values)).
 
 ## Follow-up integration checklist
 
-The slave currently provides the process, per-shard database ownership, and
-lifecycle around a stub chain. The following replacement points are deliberate:
+The slave provides the process, per-shard database ownership, and the lifecycle
+around a stub chain. The following replacement points are deliberate:
 
-- **Real shard chain:** when the `qkc/core` shard chain, QKC block format (#1),
-  and genesis state materialization are ready, inject its `ChainService` from
-  `cmd/slave` instead of relying on `StubChainService`. Adapt `GenesisHash`,
-  `Head`, and `Stop`; `Stop` must wait for every chain-owned goroutine before the
-  shard database closes.
-- **Genesis persistence and inspection:** at the same integration point, delete
-  the temporary `GenesisRecord`, descriptor `Fingerprint`, and record
-  reconciliation path rather than migrating them. Re-bootstrap the genesis-only
-  databases, make the real chain reject both genesis and chain-rule changes, and
-  update `slave inspect` to read the canonical QKC minor genesis/head through
-  `qkc/core/rawdb`, including the branch, previous root block, and x-shard cursor.
-- **Integration tests:** switch the boot/reopen, inspect, mismatch, and goleak
-  coverage to the real chain. Keep the goleak allowlist empty for slave-owned
-  goroutines; fix their `Stop` path instead of ignoring them.
-- **Master-driven creation:** when the cluster protocol (#5) lands, replace eager
-  shard creation with the pyquarkchain-compatible `PING(root_tip)` trigger while
-  preserving partial-boot rollback, idempotent blocking shutdown, and the
-  `DBDirName` datadir convention.
+- **Real shard chain:** when the geth-core shard chain
+  ([#1](https://github.com/QuarkChain/goshard/issues/1)) exists, inject its
+  `ChainService` from `cmd/slave` instead of the stub. The seam already takes the
+  arguments `NewBlockChain` needs; `Stop` must drain every chain-owned goroutine
+  before the shard database closes, and the chain must refuse to open on a
+  missing head state.
+- **Genesis storage:** the same task retires the single `QKC-genesis-block` key —
+  it is scaffolding, the block under it is not. Block 0 moves into the chain's own
+  block storage (canonical-hash mapping and head pointers), and the key is dropped
+  rather than migrated: the databases hold genesis-level data only, so a clean
+  re-bootstrap is the whole migration. `slave inspect` then reads block 0 and the
+  real head through those accessors.
+- **Compatibility check placement:** geth checks rule-set compatibility against
+  the persisted head header *before* constructing the chain, and answers an
+  incompatibility by rewinding rather than refusing to start. Both become reachable
+  once the chain persists a head; move `ReconcileChainConfig` ahead of construction
+  then.
+- **Integration tests:** move the boot/reopen, inspect, mismatch, and goleak
+  coverage onto the real chain, and add a case where the rule set changes without
+  changing block 0. Keep the goleak allowlist empty for slave-owned goroutines and
+  fix their `Stop` path instead of ignoring them.
+- **Master-driven creation:** when the cluster protocol
+  ([#5](https://github.com/QuarkChain/goshard/issues/5)) lands, replace eager shard
+  creation with the pyquarkchain-compatible `PING(root_tip)` trigger while keeping
+  partial-boot rollback, idempotent blocking shutdown, and the `DBDirName` datadir
+  convention.

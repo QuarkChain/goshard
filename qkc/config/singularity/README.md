@@ -21,7 +21,7 @@ pyquarkchain's
 
 ## Pinned root-genesis values
 
-The root genesis header derived from each config (`qkc/genesis.RootBlock`) must hash
+The root genesis header derived from each config (`qkc.CreateRootBlock`) must hash
 byte-identically to pyquarkchain's
 `GenesisManager.create_root_block().header.get_hash()`. Regenerate with (swap the
 path for devnet):
@@ -50,4 +50,43 @@ devnet   hash 5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
          seal 055a7b410a50c098c52c123983e3596c5914ba227bf9e2c0c93309ff8f650d41
 ```
 
-Consumed by `qkc/config`, `qkc/genesis`, `qkc/types`, and `cmd/slave` tests.
+## Pinned minor-genesis values
+
+`qkc.CreateMinorBlock` must reproduce pyquarkchain's
+`GenesisManager.create_minor_block()` exactly — including the genesis state root,
+which is what proves the QuarkChain account encoding is byte-compatible. The
+pinned output for chain 0's shard (`full_shard_id 0x00000001`) of each network
+lives in
+[`qkc/testdata/minor_genesis_golden.json`](../../testdata/minor_genesis_golden.json)
+and is asserted down to the block hash.
+
+Regenerate with (swap the path for devnet):
+
+```
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed:
+PYTHONPATH=. python -c "
+import json, sys
+from quarkchain.cluster.cluster_config import ClusterConfig
+from quarkchain.env import Env
+from quarkchain.evm.state import State as EvmState
+from quarkchain.genesis import GenesisManager
+
+full_shard_id = 0x00000001
+cluster = ClusterConfig.from_dict(json.load(open('mainnet/singularity/cluster_config_template.json')))
+env = Env(); env.cluster_config = cluster
+qkc = cluster.QUARKCHAIN
+manager = GenesisManager(qkc)
+root = manager.create_root_block()
+state = EvmState(env=env.evm_env, db=env.db, qkc_config=qkc)
+state.shard_config = qkc.shards[full_shard_id]
+block, coinbase = manager.create_minor_block(root, full_shard_id, state)
+print('state_root ', block.meta.hash_evm_state_root.hex())
+print('meta_hash  ', block.header.hash_meta.hex())
+print('header_hash', block.header.get_hash().hex())
+print('coinbase   ', block.header.coinbase_address.serialize().hex(), coinbase.balance_map)
+print('gas_limit  ', block.header.evm_gas_limit, block.meta.evm_xshard_gas_limit)
+"
+```
+
+Consumed by `qkc`, `qkc/config`, `qkc/types`, and `cmd/slave` tests.
