@@ -321,13 +321,18 @@ func TestBaseConn_CloseReturnsTransportError(t *testing.T) {
 	}
 }
 
-func TestBaseConn_CanceledQueuedRPCIsNotWritten(t *testing.T) {
+// TestBaseConn_CanceledRPCNotWritten verifies that a blocked SendRPC whose
+// context expires while waiting for writeMu does not write a frame. In the
+// pure-mutex model there is no writer queue; the blocked SendRPC checks
+// ctx.Err() after acquiring writeMu and returns without allocating an rpcID.
+func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeStarted = make(chan struct{})
 	tr.releaseWrite = make(chan struct{})
 	conn := NewBaseConn(tr, log.New())
 	conn.Start()
 
+	// RPC with background context — will hold writeMu and block in WriteFrame.
 	firstResult := make(chan error, 1)
 	go func() {
 		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
@@ -344,15 +349,37 @@ func TestBaseConn_CanceledQueuedRPCIsNotWritten(t *testing.T) {
 		t.Fatal("first write was not recorded")
 	}
 
+	// Second RPC with a short timeout — blocks on writeMu.Lock() because
+	// the first RPC still holds it. The context expires while waiting.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected queued RPC timeout, got %v", err)
-	}
+	secondResult := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+		secondResult <- err
+	}()
+
+	// Wait for the second RPC's context to expire.
+	time.Sleep(30 * time.Millisecond)
+
+	// Release the slow write — the blocked SendRPC acquires writeMu,
+	// checks ctx.Err(), and returns timeout without allocating an rpcID
+	// or writing a frame.
 	close(tr.releaseWrite)
+
+	select {
+	case err := <-secondResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked RPC did not return after writer unblocked")
+	}
+
+	// Verify no extra frame was written.
 	select {
 	case frame := <-tr.writes:
-		t.Fatalf("canceled queued RPC was written: %#v", frame)
+		t.Fatalf("canceled RPC was written: %#v", frame)
 	case <-time.After(20 * time.Millisecond):
 	}
 
@@ -379,7 +406,7 @@ func TestConcurrentCloseAndSendRPC(t *testing.T) {
 			defer wg.Done()
 			<-start
 			_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-			if err != nil && err != ErrConnectionClosed && !errors.Is(err, io.EOF) {
+			if err != nil && err != ErrConnectionClosed && err != ErrNotActive {
 				t.Errorf("unexpected SendRPC error: %v", err)
 			}
 		}()
@@ -408,12 +435,11 @@ func TestConcurrentCloseAndSendRPC(t *testing.T) {
 }
 
 // TestBaseConn_SubmitWhileShutdown verifies that concurrent SubmitFrame and
-// SendRPC during Close neither deadlock, race, nor panic. This is a
-// regression test for the ownerLoop submitEvent lock-order inversion: when
-// the event queue was a bounded channel, a full queue made submitters hold
-// submitMu while blocked, so finishOwner could never acquire the lock to
-// close done. With the mailbox model, submitters never block and shutdown
-// always completes.
+// SendRPC during Close neither deadlock, race, nor panic. Close acquires mu
+// to mark the connection Closed (so submitters see a non-Active state and
+// return), then takes the writeMu barrier to drain in-flight writes before
+// closing the transport. Submitters blocked on writeMu are released once the
+// barrier completes, and any blocked writer is interrupted via the transport.
 func TestBaseConn_SubmitWhileShutdown(t *testing.T) {
 	base := newFakeFrameTransport()
 	base.writes = make(chan *wire.Frame, 4096)
@@ -469,12 +495,10 @@ func TestBaseConn_SubmitWhileShutdown(t *testing.T) {
 	}
 }
 
-// TestEventMailbox_LateHandlerCompletedAfterClose verifies the shutdown
-// discard path for a handler goroutine that finishes after the mailbox is
-// closed. The delayed handlerCompletedEvent must be dropped (Submit returns
-// false) without panicking, shutdown must still complete, and no goroutine
-// may leak. The drop-on-close behavior is intentional and is not changed.
-func TestEventMailbox_LateHandlerCompletedAfterClose(t *testing.T) {
+// TestBaseConn_LateHandlerCompletedAfterClose verifies that a handler
+// goroutine that finishes after Close drops its response without panicking
+// and without leaking goroutines.
+func TestBaseConn_LateHandlerCompletedAfterClose(t *testing.T) {
 	base := newFakeFrameTransport()
 	base.releaseWrite = make(chan struct{})
 	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
@@ -498,8 +522,8 @@ func TestEventMailbox_LateHandlerCompletedAfterClose(t *testing.T) {
 	conn.Start()
 	<-conn.WaitUntilActive()
 
-	// Feed a request frame: readerLoop -> ownerLoop -> dispatch goroutine,
-	// which parks inside the handler.
+	// Feed a request frame: readerLoop calls dispatch goroutine, which
+	// parks inside the handler.
 	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{FullShardIDList: []uint32{1}})
 	if err != nil {
 		t.Fatalf("serialize ping: %v", err)
@@ -523,25 +547,12 @@ func TestEventMailbox_LateHandlerCompletedAfterClose(t *testing.T) {
 		t.Fatal("Close blocked with in-flight handler")
 	}
 
-	// The mailbox must be closed and drained by finishOwner.
-	select {
-	case <-conn.shutdownDone:
-	default:
-		t.Fatal("shutdownDone not closed after Close returned")
-	}
 	if conn.State() != ConnectionStateClosed {
 		t.Fatalf("expected closed state, got %v", conn.State())
 	}
-	if conn.events.Submit(handlerCompletedEvent{frame: &wire.Frame{}}) {
-		t.Fatal("Submit returned true after mailbox close")
-	}
-	if _, ok := conn.events.Next(); ok {
-		t.Fatal("Next reported an open mailbox after close")
-	}
 
-	// Release the handler: dispatch submits its handlerCompletedEvent after
-	// the mailbox is closed. The event is dropped, no panic occurs, and the
-	// dispatch goroutine exits.
+	// Release the handler: dispatch checks state (Closed) and drops the
+	// response without writing. No panic, goroutine exits cleanly.
 	close(releaseHandler)
 	waitForGoroutines(t, before)
 }
@@ -610,15 +621,50 @@ func TestBaseConn_CancelPreservesContextError(t *testing.T) {
 	}
 }
 
-func TestBaseConn_ExpiredLateResponseClosesConnection(t *testing.T) {
-	previousGracePeriod := lateResponseGracePeriod
-	lateResponseGracePeriod = time.Millisecond
-	defer func() { lateResponseGracePeriod = previousGracePeriod }()
+func TestBaseConn_SendRPCWithAlreadyCancelledContext(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before calling SendRPC
+	_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+	if err == nil {
+		t.Fatal("expected error for already-cancelled context, got nil")
+	}
+}
+
+func TestBaseConn_WriteFailurePublishesError(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writeErr = errors.New("write failed")
+	conn := NewBaseConn(tr, log.New())
+	conn.Start()
+
+	_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+	if err != ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
+	}
+	select {
+	case cerr := <-conn.Error():
+		if cerr == nil {
+			t.Fatal("expected non-nil error on Error() channel after write failure")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Error() channel did not receive write failure")
+	}
+	<-conn.WaitUntilClosed()
+}
+
+func TestBaseConn_LateResponseIsSilentlyIgnored(t *testing.T) {
+	// Matches Python: timed-out RPC ids stay in rpc_future_map forever;
+	// late responses are silently dropped regardless of delay.
 
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
 	registerPingSerializer(t, conn)
 	conn.Start()
+	defer conn.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
@@ -639,12 +685,62 @@ func TestBaseConn_ExpiredLateResponseClosesConnection(t *testing.T) {
 		t.Fatal("SendRPC did not return after cancellation")
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	// Send a late response — connection should NOT close.
 	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: validPongPayload(t)}
 	select {
 	case <-conn.WaitUntilClosed():
-	case <-time.After(time.Second):
-		t.Fatal("expired late response did not close the connection")
+		t.Fatal("late response closed the connection — should have been silently ignored")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: connection stays open.
+	}
+}
+
+func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	conn.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+	})
+	conn.RegisterTypedHandlers(map[byte]TypedHandler{
+		byte(wire.ClusterOpPing): func(req any) (any, error) {
+			panic("handler panic test")
+		},
+	})
+	conn.Start()
+
+	payload, _ := serialize.SerializeToBytes(&wire.PingRequest{FullShardIDList: []uint32{1}})
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: payload}
+	select {
+	case <-conn.WaitUntilClosed():
+		if !conn.IsClosed() {
+			t.Fatal("expected connection to close after handler panic")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection did not close after handler panic")
+	}
+}
+
+func TestBaseConn_UnknownRPCIDResponseShutsDownConnection(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	registerPingSerializer(t, conn)
+	conn.Start()
+	defer conn.Close()
+
+	// Send a response with an rpc_id that was never allocated — neither
+	// in pending nor in timedOut. This should close the connection.
+	tr.frames <- &wire.Frame{
+		Opcode:  byte(wire.ClusterOpPong),
+		RPCID:   999,
+		Payload: validPongPayload(t),
+	}
+	select {
+	case <-conn.WaitUntilClosed():
+		if !conn.IsClosed() {
+			t.Fatal("expected connection to close after unknown rpc_id response")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection did not close after unknown rpc_id response")
 	}
 }
 
@@ -783,44 +879,6 @@ func TestBaseConn_WriteFailureWakesPendingRPC(t *testing.T) {
 	}
 }
 
-func TestBaseConn_HandlerCompletionAfterCloseIsDropped(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	handlerStarted := make(chan struct{})
-	releaseHandler := make(chan struct{})
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
-	conn.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			close(handlerStarted)
-			<-releaseHandler
-			return &wire.PongResponse{}, nil
-		},
-	})
-	conn.Start()
-
-	payload, err := serialize.SerializeToBytes(&wire.PingRequest{})
-	if err != nil {
-		t.Fatalf("serialize ping: %v", err)
-	}
-	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: payload}
-	select {
-	case <-handlerStarted:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not start")
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatalf("close connection: %v", err)
-	}
-	close(releaseHandler)
-	select {
-	case frame := <-tr.writes:
-		t.Fatalf("handler wrote response after close: %#v", frame)
-	case <-time.After(20 * time.Millisecond):
-	}
-}
-
 func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writes = make(chan *wire.Frame, 64)
@@ -906,6 +964,20 @@ func TestBaseConn_DoubleClose(t *testing.T) {
 	}
 	if got := tr.closes(); got != 1 {
 		t.Fatalf("transport closed %d times, want 1", got)
+	}
+}
+
+func TestBaseConn_StartOnClosedConnectionIsNoOp(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(tr, log.New())
+	conn.Close()
+
+	// Start on an already-closed connection must be a no-op: no state
+	// transition, no readerLoop launch.
+	conn.Start()
+
+	if conn.State() != ConnectionStateClosed {
+		t.Fatal("expected closed state after Start on closed connection")
 	}
 }
 

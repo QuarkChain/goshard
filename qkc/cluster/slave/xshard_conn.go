@@ -133,7 +133,7 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 	}
 
 	// Signal ping received AFTER check passes (matches Python's ping_received_event.set())
-	if !x.BaseConn.Closed() {
+	if !x.BaseConn.IsClosed() {
 		x.pingOnce.Do(func() { close(x.pingReceived) })
 	}
 
@@ -200,7 +200,7 @@ func (x *XshardConn) RemoteFullShardIDList() []uint32 {
 func (x *XshardConn) WaitUntilPingReceived() bool {
 	select {
 	case <-x.pingReceived:
-		return !x.BaseConn.Closed()
+		return !x.BaseConn.IsClosed()
 	case <-x.BaseConn.WaitUntilClosed():
 		return false
 	}

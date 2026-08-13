@@ -196,7 +196,7 @@ func (p *XshardPool) SendXshardTx(ctx context.Context, fullShardID uint32, paylo
 	// Filter active connections
 	var activeConns []*XshardConn
 	for _, conn := range conns {
-		if conn.IsActive() && !conn.Closed() {
+		if conn.IsActive() && !conn.IsClosed() {
 			activeConns = append(activeConns, conn)
 		}
 	}
