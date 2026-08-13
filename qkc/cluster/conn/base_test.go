@@ -990,8 +990,8 @@ func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
 
-	// Close a connection whose Start() was never called: readerStarted is
-	// false and readerLoop was never launched.
+	// Close a connection whose Start() was never called: readerDone is nil
+	// and readerLoop was never launched.
 	closeDone := make(chan struct{})
 	go func() {
 		conn.Close()
@@ -1006,8 +1006,13 @@ func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
 }
 
 // TestBaseConn_StartCloseConcurrentStress repeatedly exercises the Start()/Close()
-// race, covering the interleaving where Start() is descheduled between its
-// mu.Unlock() and readerStarted.Store() while Close() completes shutdown.
+// race. Start() allocates readerDone under mu before spawning readerLoop, so
+// Close() waits on readerDone exactly when readerLoop has been scheduled and
+// skips the wait when Start() never committed (readerDone stays nil). This
+// covers, among others, the interleaving where Start() commits state=Active and
+// is descheduled before go readerLoop() while Close() completes shutdown in
+// between — readerLoop still runs, exits on the closed transport, and closes
+// readerDone, so Close() does not deadlock.
 func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		tr := newFakeFrameTransport()

@@ -216,12 +216,13 @@ func (x *XshardConn) SendPing(ctx context.Context) (id []byte, shardList []uint3
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
 		// TODO: Port RootBlock wire type.
-		// Slave-to-slave PING does not consume root tip currently.
-		// Python still serializes an empty RootBlockHeader for this field,
-		// but RootBlock wire representation is not migrated yet.
-		//
-		// Keep nil until the RootBlock type and encoding are implemented.
-		// Non-nil RootTip received from Python peers is not supported yet.
+		// RootTip is intentionally nil for the current migration scope.
+		// Python's slave-to-slave PING serializes a non-nil empty RootBlock,
+		// whereas this Go migration has not yet ported the RootBlock wire type.
+		// This means the current Go PING is not byte-for-byte compatible with
+		// Python for this field, but the slave-to-slave handshake does not consume
+		// RootTip. Do not introduce a fake RootBlock type here; port the real
+		// RootBlock wire representation when RootBlock migration is implemented.
 		RootTip: nil,
 	})
 	if err != nil {

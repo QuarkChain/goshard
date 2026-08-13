@@ -96,20 +96,21 @@ type BaseConn struct {
 	peerRPCID int64
 	closeErr  error
 
-	// ── Atomic snapshots (lock-free reads) ──
+	// ── Atomic snapshot of state ──
+	// Mirrors state under mu for lock-free reads. This keeps readers off mu
+	// and avoids a configMu -> mu lock ordering in the Register* methods
+	// (which hold configMu).
 	stateSnapshot atomic.Int32
-	pendingCount  atomic.Int64
 
 	// ── Frame send serialization (writeMu) ──
 	writeMu sync.Mutex
 
 	// ── Synchronization primitives ──
-	shutdownOnce  sync.Once
-	activeChan    chan struct{} // closed after Start
-	closedChan    chan struct{} // closed during shutdown
-	errChan       chan error    // cap 1, non-user errors
-	readerDone    chan struct{} // closed when readerLoop exits
-	readerStarted atomic.Bool   // true once readerLoop has been launched
+	shutdownOnce sync.Once
+	activeChan   chan struct{} // closed once active, or on shutdown before activation
+	closedChan   chan struct{} // closed during shutdown
+	errChan      chan error    // cap 1, non-user errors
+	readerDone   chan struct{} // nil until readerLoop is launched; closed when readerLoop exits
 
 	log log.Logger
 }
@@ -124,7 +125,6 @@ func NewBaseConn(tr FrameTransport, logger log.Logger) *BaseConn {
 		activeChan:     make(chan struct{}),
 		closedChan:     make(chan struct{}),
 		errChan:        make(chan error, 1),
-		readerDone:     make(chan struct{}),
 		typedHandlers:  make(map[byte]TypedHandler),
 		serializers:    make(map[byte]*OpSerializer),
 		pending:        make(map[uint64]*pendingRPC),
@@ -168,22 +168,25 @@ func (c *BaseConn) Start() {
 	c.stateSnapshot.Store(int32(ConnectionStateActive))
 	close(c.activeChan)
 
-	// Mark the reader as launched before spawning it. Close() waits on
-	// readerDone only when readerStarted is true, so the two are kept
-	// consistent: if Start() returns early because the connection is not
-	// Connecting, readerStarted stays false and Close() does not block
-	// forever on a readerDone that will never be closed.
-	c.readerStarted.Store(true)
+	// Allocate the reader's done channel before spawning it. readerDone being
+	// non-nil marks that readerLoop has been scheduled; it is closed exactly
+	// once when readerLoop exits. If Start() returns early (connection not
+	// Connecting), nil until readerLoop is launched; closed when readerLoop exits
+	done := make(chan struct{})
+	c.readerDone = done
 	c.mu.Unlock()
 
-	go c.readerLoop()
+	go c.readerLoop(done)
 }
 
 // Close closes the connection and wakes all pending RPCs.
 func (c *BaseConn) Close() error {
 	c.initiateShutdown(nil)
-	if c.readerStarted.Load() {
-		<-c.readerDone
+	c.mu.Lock()
+	done := c.readerDone
+	c.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 	c.mu.Lock()
 	err := c.closeErr
@@ -361,7 +364,6 @@ func (c *BaseConn) SendRPCMeta(
 	c.nextRPCID++
 	rpcID := c.nextRPCID
 	c.pending[rpcID] = call
-	c.pendingCount.Add(1)
 
 	// AfterFunc is registered after pending assignment. mu is held
 	// throughout, so if ctx is already done, the cancelRPC goroutine
@@ -445,7 +447,9 @@ func (c *BaseConn) IsClosed() bool {
 
 // pendingLen returns the number of in-flight RPCs. Used by tests.
 func (c *BaseConn) pendingLen() int {
-	return int(c.pendingCount.Load())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pending)
 }
 
 func rpcTimeoutError(err error) error {
@@ -455,9 +459,10 @@ func rpcTimeoutError(err error) error {
 // ── readerLoop ────────────────────────────────────────────────────────────────
 
 // readerLoop is the single persistent goroutine. It reads frames from the
-// transport and dispatches them. Read errors trigger shutdown.
-func (c *BaseConn) readerLoop() {
-	defer close(c.readerDone)
+// transport and dispatches them. Read errors trigger shutdown. done is closed
+// exactly once when readerLoop exits.
+func (c *BaseConn) readerLoop(done chan struct{}) {
+	defer close(done)
 	for {
 		frame, err := c.FrameTransport.ReadFrame()
 		if err != nil {
@@ -524,7 +529,6 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 			return
 		}
 		delete(c.pending, frame.RPCID)
-		c.pendingCount.Add(-1)
 		c.mu.Unlock()
 		if call.stop != nil {
 			call.stop()
@@ -656,7 +660,6 @@ func (c *BaseConn) cancelRPC(rpcID uint64, cause error) {
 		return // already completed by response or close
 	}
 	delete(c.pending, rpcID)
-	c.pendingCount.Add(-1)
 
 	// Set timedOut atomically with the pending deletion so that a late
 	// response arriving concurrently always sees a consistent view:
@@ -701,7 +704,6 @@ func (c *BaseConn) initiateShutdown(cause error) {
 
 			for id, call := range c.pending {
 				delete(c.pending, id)
-				c.pendingCount.Add(-1)
 				if call.stop != nil {
 					call.stop()
 				}
