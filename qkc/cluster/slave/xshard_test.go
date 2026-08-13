@@ -5,6 +5,8 @@ package slave
 import (
 	"context"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,7 +337,7 @@ func TestXshardConn_RecordPingOnlyOnce(t *testing.T) {
 }
 
 func TestXshardPool_AddGet(t *testing.T) {
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 
 	// Use stub connections that are never started.
@@ -379,12 +381,12 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 
 	server.Start()
 	client.Start()
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
+	if err := pool.verifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
 		t.Fatalf("verify and add: %v", err)
 	}
 
@@ -420,12 +422,12 @@ func TestXshardPool_SendXshardTxToClosedConnectionFails(t *testing.T) {
 
 	server.Start()
 	client.Start()
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
+	if err := pool.verifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
 		t.Fatalf("verify and add: %v", err)
 	}
 
@@ -454,7 +456,7 @@ func TestXshardPool_WatchAndIndexAllowsMultipleInboundConnections(t *testing.T) 
 	client2.Start()
 	server2.Start()
 
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 	pool.TrackInbound(server1)
 	pool.TrackInbound(server2)
@@ -502,14 +504,14 @@ func TestXshardPool_OutboundAndInboundCoexist(t *testing.T) {
 	client2.Start()
 	server2.Start()
 
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	// Add outbound connection (S1 → S2).
-	if err := pool.VerifyAndAddToShards(ctx, client1, []byte("remote-slave"), []uint32{0x00010001}); err != nil {
+	if err := pool.verifyAndAddToShards(ctx, client1, []byte("remote-slave"), []uint32{0x00010001}); err != nil {
 		t.Fatalf("outbound verify and add: %v", err)
 	}
 
@@ -550,7 +552,7 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 	client2.Start()
 	server2.Start()
 
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -571,7 +573,7 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 
 	// Step 2: outbound connection (S1 → S2) should be silently skipped.
 	// Python's connect_to_slave returns "" (success) when slave is already in slave_ids.
-	if err := pool.VerifyAndAddToShards(ctx, client1, []byte("remote-slave"), []uint32{0x00010001}); err != nil {
+	if err := pool.verifyAndAddToShards(ctx, client1, []byte("remote-slave"), []uint32{0x00010001}); err != nil {
 		t.Fatalf("outbound should be silently skipped, got error: %v", err)
 	}
 
@@ -586,7 +588,7 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 }
 
 func TestXshardPool_TrackInboundClose(t *testing.T) {
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 
 	_, xc, cleanup := newTestConnPair(t)
 	defer cleanup()
@@ -604,18 +606,55 @@ func TestXshardPool_TrackInboundClose(t *testing.T) {
 }
 
 func TestXshardPool_SendXshardTxNoConnection(t *testing.T) {
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 
 	ctx := context.Background()
-	_, err := pool.SendXshardTx(ctx, 0x00010001, []byte("tx"))
-	if err == nil {
-		t.Fatal("expected error when no connection exists")
+	// Empty target set is a silent no-op (Python's broadcast_xshard_tx_list
+	// succeeds on an empty future list — slave.py:1124-1134).
+	resp, err := pool.SendXshardTx(ctx, 0x00010001, []byte("tx"))
+	if err != nil {
+		t.Fatalf("expected silent success on empty target, got error: %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response, got %v", resp)
+	}
+}
+
+// TestXshardPool_SelfConnectionSkipped verifies that verifyAndAddToShards skips
+// a connection whose expected ID equals the pool's own ID (Python's
+// connect_to_slave returns "" without dialing when slave_info.id ==
+// slave_server.id — slave.py:857). The self connection is closed and never
+// registered.
+func TestXshardPool_SelfConnectionSkipped(t *testing.T) {
+	client, server, cleanup := newTestConnPair(t)
+	defer cleanup()
+	server.Start()
+	client.Start()
+
+	pool := NewXshardPool([]byte("client-slave"), log.New())
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	// expectedID == selfID ("client-slave") → silently skipped.
+	if err := pool.verifyAndAddToShards(ctx, client, []byte("client-slave"), []uint32{0x00030004}); err != nil {
+		t.Fatalf("self connection should be silently skipped, got error: %v", err)
+	}
+	if !client.IsClosed() {
+		t.Fatal("self connection should be closed")
+	}
+	if pool.HasSlaveID([]byte("client-slave")) {
+		t.Fatal("self ID should not be registered")
+	}
+	if pool.OutboundSize() != 0 {
+		t.Fatalf("expected 0 outbound connections, got %d", pool.OutboundSize())
 	}
 }
 
 func TestXshardPool_ClosedPoolRejectsAdd(t *testing.T) {
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	pool.Close()
 
 	_, xc, cleanup := newTestConnPair(t)
@@ -689,7 +728,7 @@ func TestParseAddXshardTxListResponse_WrongOpcode(t *testing.T) {
 // TestNewXshardPool_NilLogger verifies that NewXshardPool(nil) does not panic
 // and subsequent log calls are safe.
 func TestNewXshardPool_NilLogger(t *testing.T) {
-	pool := NewXshardPool(nil)
+	pool := NewXshardPool(nil, nil)
 	if pool == nil {
 		t.Fatal("NewXshardPool(nil) returned nil")
 	}
@@ -697,9 +736,10 @@ func TestNewXshardPool_NilLogger(t *testing.T) {
 	pool.Close()
 }
 
-// TestXshardConn_RejectEmptyPingID verifies that a PING with an empty slave ID
-// is rejected and the connection is closed.
-func TestXshardConn_RejectEmptyPingID(t *testing.T) {
+// TestXshardConn_AcceptEmptyPingID verifies that a PING with an empty slave ID
+// is accepted (Python parity): handle_ping only rejects an empty shard list,
+// not an empty ID (slave.py:759-769). The connection stays alive.
+func TestXshardConn_AcceptEmptyPingID(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
 
@@ -718,14 +758,17 @@ func TestXshardConn_RejectEmptyPingID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	// Send PING from client to server; server's handlePing rejects empty ID.
+	// Server's handlePing accepts the empty ID; client receives a PONG.
 	_, err = client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
-	if err != conn.ErrConnectionClosed {
-		t.Fatalf("expected ErrConnectionClosed, got %v", err)
+	if err != nil {
+		t.Fatalf("expected PING with empty ID to be accepted, got %v", err)
 	}
-	// Verify server recorded no identity.
+	// Server records an empty remote ID and stays alive.
 	if len(server.RemoteID()) != 0 {
 		t.Fatalf("expected empty remote ID, got %s", server.RemoteID())
+	}
+	if server.IsClosed() {
+		t.Fatal("server connection should remain open after empty-ID PING")
 	}
 }
 
@@ -739,7 +782,7 @@ func TestXshardPool_WatchAndIndexIdempotent(t *testing.T) {
 	client.Start()
 	server.Start()
 
-	pool := NewXshardPool(log.New())
+	pool := NewXshardPool(nil, log.New())
 	defer pool.Close()
 	pool.TrackInbound(server)
 
@@ -762,5 +805,205 @@ func TestXshardPool_WatchAndIndexIdempotent(t *testing.T) {
 	conns := pool.Get(0x00010001)
 	if len(conns) != 1 {
 		t.Fatalf("expected 1 connection, got %d (duplicate route entry)", len(conns))
+	}
+}
+
+// ── remote slave helper ───────────────────────────────────────────────────────
+
+// remoteSlave simulates a remote slave that answers PING with PONG. It counts
+// accepted connections so tests can assert whether a dial happened.
+type remoteSlave struct {
+	ln       net.Listener
+	addr     string
+	accepted int32 // atomic
+
+	mu    sync.Mutex
+	conns []*XshardConn
+	wg    sync.WaitGroup
+}
+
+func startRemoteSlave(t *testing.T, remoteID []byte, remoteShards []uint32) *remoteSlave {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	rs := &remoteSlave{ln: ln, addr: ln.Addr().String()}
+	rs.wg.Add(1)
+	go rs.acceptLoop(remoteID, remoteShards)
+	return rs
+}
+
+func (rs *remoteSlave) acceptLoop(remoteID []byte, remoteShards []uint32) {
+	defer rs.wg.Done()
+	for {
+		c, err := rs.ln.Accept()
+		if err != nil {
+			return
+		}
+		atomic.AddInt32(&rs.accepted, 1)
+		conn := NewXshardConnFromConn(c, 0, remoteID, remoteShards, log.New())
+		conn.Start()
+		rs.mu.Lock()
+		rs.conns = append(rs.conns, conn)
+		rs.mu.Unlock()
+	}
+}
+
+func (rs *remoteSlave) acceptedCount() int {
+	return int(atomic.LoadInt32(&rs.accepted))
+}
+
+func (rs *remoteSlave) close() {
+	rs.ln.Close()
+	rs.wg.Wait()
+	rs.mu.Lock()
+	for _, c := range rs.conns {
+		c.Close()
+	}
+	rs.mu.Unlock()
+}
+
+// ── DialToSlave pre-dial dedup tests ─────────────────────────────────────────
+
+// TestXshardPool_DialToSlaveSkipsExistingRemote verifies the pre-dial dedup:
+// dialing a remote that is already tracked does not open a new TCP connection.
+func TestXshardPool_DialToSlaveSkipsExistingRemote(t *testing.T) {
+	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
+	defer rs.close()
+
+	pool := NewXshardPool(nil, log.New())
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// First dial establishes the connection.
+	if err := pool.DialToSlave(ctx, rs.addr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001}, log.New()); err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	if rs.acceptedCount() != 1 {
+		t.Fatalf("expected 1 accepted connection, got %d", rs.acceptedCount())
+	}
+
+	// Second dial to the same remote is skipped before dialing.
+	if err := pool.DialToSlave(ctx, rs.addr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001}, log.New()); err != nil {
+		t.Fatalf("second dial should be skipped: %v", err)
+	}
+	if rs.acceptedCount() != 1 {
+		t.Fatalf("expected no new connection, got %d accepted", rs.acceptedCount())
+	}
+}
+
+// TestXshardPool_DialToSlaveSkipsSelf verifies the pre-dial self guard: dialing
+// this slave's own ID does not open a TCP connection.
+func TestXshardPool_DialToSlaveSkipsSelf(t *testing.T) {
+	rs := startRemoteSlave(t, []byte("local-slave"), []uint32{0x00030004})
+	defer rs.close()
+
+	pool := NewXshardPool([]byte("local-slave"), log.New())
+	defer pool.Close()
+
+	ctx := context.Background()
+	if err := pool.DialToSlave(ctx, rs.addr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("local-slave"), []uint32{0x00030004}, log.New()); err != nil {
+		t.Fatalf("self dial should be skipped: %v", err)
+	}
+	if rs.acceptedCount() != 0 {
+		t.Fatalf("expected no connection for self, got %d", rs.acceptedCount())
+	}
+}
+
+// TestXshardPool_DialToSlaveConcurrentDedup verifies the final dedup safety net:
+// two goroutines dialing the same remote concurrently result in a single
+// registered outbound connection.
+func TestXshardPool_DialToSlaveConcurrentDedup(t *testing.T) {
+	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
+	defer rs.close()
+
+	pool := NewXshardPool(nil, log.New())
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	const n = 2
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = pool.DialToSlave(ctx, rs.addr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001}, log.New())
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+	}
+
+	// Final dedup ensures only one outbound connection is registered.
+	if got := pool.OutboundSize(); got != 1 {
+		t.Fatalf("expected 1 outbound connection, got %d", got)
+	}
+	if !pool.HasSlaveID([]byte("remote-slave")) {
+		t.Fatal("remote-slave should be tracked")
+	}
+}
+
+// TestXshardPool_DialToSlaveRetryAfterFailure verifies that a failed dial does
+// not register the remote, so a later retry can still connect.
+func TestXshardPool_DialToSlaveRetryAfterFailure(t *testing.T) {
+	pool := NewXshardPool(nil, log.New())
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// First dial to a dead address fails.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := ln.Addr().String()
+	ln.Close()
+
+	if err := pool.DialToSlave(ctx, deadAddr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001}, log.New()); err == nil {
+		t.Fatal("expected dial failure to dead address")
+	}
+	if pool.HasSlaveID([]byte("remote-slave")) {
+		t.Fatal("failed dial should not register the remote")
+	}
+
+	// Retry to a live remote succeeds.
+	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
+	defer rs.close()
+	if err := pool.DialToSlave(ctx, rs.addr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001}, log.New()); err != nil {
+		t.Fatalf("retry dial: %v", err)
+	}
+	if !pool.HasSlaveID([]byte("remote-slave")) {
+		t.Fatal("retry should register the remote")
+	}
+}
+
+// TestXshardPool_DialToSlaveCompletesHandshake verifies the normal outbound
+// flow: dial, PING/PONG verification, and indexing all complete.
+func TestXshardPool_DialToSlaveCompletesHandshake(t *testing.T) {
+	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
+	defer rs.close()
+
+	pool := NewXshardPool(nil, log.New())
+	defer pool.Close()
+
+	ctx := context.Background()
+	if err := pool.DialToSlave(ctx, rs.addr, 0, []byte("local-slave"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001}, log.New()); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if pool.OutboundSize() != 1 {
+		t.Fatalf("expected 1 outbound connection, got %d", pool.OutboundSize())
+	}
+	if !pool.HasSlaveID([]byte("remote-slave")) {
+		t.Fatal("remote-slave should be tracked")
+	}
+	if conns := pool.Get(0x00010001); len(conns) != 1 {
+		t.Fatalf("expected 1 connection for shard 0x00010001, got %d", len(conns))
 	}
 }
