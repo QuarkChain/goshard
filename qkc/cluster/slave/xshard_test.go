@@ -193,12 +193,12 @@ func TestXshardConn_XshardRPCStubClosesConnection(t *testing.T) {
 	<-server.WaitUntilClosed()
 }
 
-// TestXshardConn_SendPingWrongResponseOpcodeClosesConnection verifies that a
-// PING answered with a well-formed but wrong-opcode response (e.g. an
-// AddXshardTxListResponse carrying the PING's RPCID) is treated as a protocol
-// error at the framework layer: the pending RPC is not completed successfully
-// and the connection is closed.
-func TestXshardConn_SendPingWrongResponseOpcodeClosesConnection(t *testing.T) {
+// TestXshardConn_SendPingRejectsWrongResponseOpcode verifies that a PING
+// answered with a well-formed but wrong-opcode response is rejected by the
+// application-level opcode check in SendPing, but the connection is not closed.
+// Python matches responses by rpc_id only and does not close the connection on
+// opcode mismatch (see AbstractConnection.handle_metadata_and_raw_data).
+func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 	defer serverConn.Close()
@@ -213,8 +213,8 @@ func TestXshardConn_SendPingWrongResponseOpcodeClosesConnection(t *testing.T) {
 			return
 		}
 		// Reply with a valid AddXshardTxListResponse payload carrying the same
-		// RPCID but the wrong opcode. BaseConn deserializes it cleanly but then
-		// detects the request/response opcode mismatch and closes the connection.
+		// RPCID but the wrong opcode. BaseConn delivers the response to the
+		// caller by rpc_id; SendPing's application-level opcode check rejects it.
 		payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{
 			ErrorCode: 0,
 		})
@@ -237,8 +237,8 @@ func TestXshardConn_SendPingWrongResponseOpcodeClosesConnection(t *testing.T) {
 	if err := <-peerDone; err != nil {
 		t.Fatalf("raw peer failed: %v", err)
 	}
-	if !client.IsClosed() {
-		t.Fatal("wrong PING response opcode should close the connection")
+	if client.IsClosed() {
+		t.Fatal("wrong PING response opcode should not close the connection")
 	}
 }
 
@@ -334,7 +334,7 @@ func TestXshardConn_RecordPingOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestXshardPool_AddGetRemove(t *testing.T) {
+func TestXshardPool_AddGet(t *testing.T) {
 	pool := NewXshardPool(log.New())
 	defer pool.Close()
 
@@ -344,9 +344,9 @@ func TestXshardPool_AddGetRemove(t *testing.T) {
 	_, conn2, cleanup2 := newTestConnPair(t)
 	defer cleanup2()
 
-	pool.Add(0x00010001, conn1)
-	pool.Add(0x00010001, conn2)
-	pool.Add(0x00020001, conn1)
+	pool.add(0x00010001, conn1)
+	pool.add(0x00010001, conn2)
+	pool.add(0x00020001, conn1)
 
 	if got := pool.OutboundSize(); got != 2 {
 		t.Fatalf("expected pool outbound size 2 (unique conns), got %d", got)
@@ -357,86 +357,17 @@ func TestXshardPool_AddGetRemove(t *testing.T) {
 		t.Fatalf("expected 2 conns for shard 0x00010001, got %d", len(conns))
 	}
 
-	pool.Remove(0x00010001, conn1)
-	if got := pool.OutboundSize(); got != 1 {
-		t.Fatalf("expected pool outbound size 1 after remove, got %d", got)
-	}
-	conns = pool.Get(0x00010001)
-	if len(conns) != 1 || conns[0] != conn2 {
-		t.Fatalf("expected only conn2 for shard 0x00010001")
-	}
-
 	targets := pool.Targets()
-	if len(targets) != 1 {
-		t.Fatalf("expected 1 target, got %d", len(targets))
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(targets))
 	}
 }
 
-func TestXshardPool_RemoveRemovesAllRoutes(t *testing.T) {
-	client, server, cleanup := newTestConnPairWithIdentity(
-		t,
-		[]byte("client-slave"),
-		[]uint32{0x00010001},
-		[]byte("server-slave"),
-		[]uint32{0x00030004, 0x00030005},
-	)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-	pool := NewXshardPool(log.New())
-	defer pool.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
-		t.Fatalf("verify and add: %v", err)
-	}
-
-	pool.Remove(0x00030004, client)
-	for _, shardID := range []uint32{0x00030004, 0x00030005} {
-		if conns := pool.Get(shardID); len(conns) != 0 {
-			t.Fatalf("route 0x%x still contains %d connections", shardID, len(conns))
-		}
-	}
-	if pool.HasSlaveID([]byte("server-slave")) {
-		t.Fatal("slave ID remains after removing all routes")
-	}
-}
-
-func TestXshardPool_RemoveTargetRemovesAllRoutes(t *testing.T) {
-	client, server, cleanup := newTestConnPairWithIdentity(
-		t,
-		[]byte("client-slave"),
-		[]uint32{0x00010001},
-		[]byte("server-slave"),
-		[]uint32{0x00030004, 0x00030005},
-	)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-	pool := NewXshardPool(log.New())
-	defer pool.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
-		t.Fatalf("verify and add: %v", err)
-	}
-
-	pool.RemoveTarget(0x00030004)
-	for _, shardID := range []uint32{0x00030004, 0x00030005} {
-		if conns := pool.Get(shardID); len(conns) != 0 {
-			t.Fatalf("route 0x%x still contains %d connections", shardID, len(conns))
-		}
-	}
-	if pool.HasSlaveID([]byte("server-slave")) {
-		t.Fatal("slave ID remains after removing target")
-	}
-}
-
-func TestXshardPool_ClosedConnectionEvictedFromAllRoutes(t *testing.T) {
+// TestXshardPool_ClosedConnectionStaysIndexed verifies the Python parity
+// behavior: SlaveConnectionManager never evicts a connection when it closes,
+// so a CLOSED connection remains in the routing index and the slave ID
+// registry.
+func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 	client, server, cleanup := newTestConnPairWithIdentity(
 		t,
 		[]byte("client-slave"),
@@ -458,15 +389,53 @@ func TestXshardPool_ClosedConnectionEvictedFromAllRoutes(t *testing.T) {
 	}
 
 	client.Close()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if len(pool.Targets()) == 0 && !pool.HasSlaveID([]byte("server-slave")) {
-			return
+
+	// The closed connection must NOT be evicted from the routing index.
+	for _, shardID := range []uint32{0x00030004, 0x00030005} {
+		if conns := pool.Get(shardID); len(conns) != 1 || conns[0] != client {
+			t.Fatalf("route 0x%x no longer contains the closed connection: %v", shardID, conns)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("closed connection was not evicted: targets=%v has_slave_id=%v",
-		pool.Targets(), pool.HasSlaveID([]byte("server-slave")))
+	// The slave ID registry is never pruned.
+	if !pool.HasSlaveID([]byte("server-slave")) {
+		t.Fatal("slave ID was removed after connection close")
+	}
+	if len(pool.Targets()) != 2 {
+		t.Fatalf("expected both shard targets to remain, got %v", pool.Targets())
+	}
+}
+
+// TestXshardPool_SendXshardTxToClosedConnectionFails verifies that broadcast
+// attempts a CLOSED connection (Python never filters it out) and fails, instead
+// of silently skipping it.
+func TestXshardPool_SendXshardTxToClosedConnectionFails(t *testing.T) {
+	client, server, cleanup := newTestConnPairWithIdentity(
+		t,
+		[]byte("client-slave"),
+		[]uint32{0x00010001},
+		[]byte("server-slave"),
+		[]uint32{0x00030004, 0x00030005},
+	)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+	pool := NewXshardPool(log.New())
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.VerifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
+		t.Fatalf("verify and add: %v", err)
+	}
+
+	client.Close()
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if _, err := pool.SendXshardTx(ctx2, 0x00030004, []byte("tx")); err == nil {
+		t.Fatal("expected SendXshardTx to fail on a CLOSED connection (Python parity)")
+	}
 }
 
 func TestXshardPool_WatchAndIndexAllowsMultipleInboundConnections(t *testing.T) {
@@ -512,56 +481,6 @@ func TestXshardPool_WatchAndIndexAllowsMultipleInboundConnections(t *testing.T) 
 	}
 	if !pool.HasSlaveID([]byte("same-slave")) {
 		t.Fatal("slaveID not tracked")
-	}
-}
-
-func TestXshardPool_MultipleConnectionsCleanupPreservesSlaveID(t *testing.T) {
-	// Removing one connection should not clean up slaveID if another connection
-	// for the same remote slave still exists.
-	client1, server1, cleanup1 := newTestConnPairWithIdentity(
-		t, []byte("same-slave"), []uint32{0x00010001}, []byte("server-1"), []uint32{0x00030004},
-	)
-	defer cleanup1()
-	client2, server2, cleanup2 := newTestConnPairWithIdentity(
-		t, []byte("same-slave"), []uint32{0x00010001}, []byte("server-2"), []uint32{0x00030004},
-	)
-	defer cleanup2()
-	client1.Start()
-	server1.Start()
-	client2.Start()
-	server2.Start()
-
-	pool := NewXshardPool(log.New())
-	defer pool.Close()
-	pool.TrackInbound(server1)
-	pool.TrackInbound(server2)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if _, _, err := client1.SendPing(ctx); err != nil {
-		t.Fatalf("first ping: %v", err)
-	}
-	if _, _, err := client2.SendPing(ctx); err != nil {
-		t.Fatalf("second ping: %v", err)
-	}
-	if !pool.WatchAndIndex(server1) {
-		t.Fatal("first inbound was not indexed")
-	}
-	if !pool.WatchAndIndex(server2) {
-		t.Fatal("second inbound was not indexed")
-	}
-
-	// Remove server1 from the shard route.
-	pool.Remove(0x00010001, server1)
-
-	// server2 should still be indexed.
-	conns := pool.Get(0x00010001)
-	if len(conns) != 1 || conns[0] != server2 {
-		t.Fatalf("expected only server2 remaining, got %v", conns)
-	}
-	// slaveID should still be tracked because server2 is still alive.
-	if !pool.HasSlaveID([]byte("same-slave")) {
-		t.Fatal("slaveID was cleaned up while another connection still exists")
 	}
 }
 
@@ -666,73 +585,6 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 	}
 }
 
-func TestXshardPool_DelayedWatcherDoesNotDeleteReusedSlaveID(t *testing.T) {
-	connA, connB, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	const remoteID = "same-slave"
-	connA.SetRemoteIdentity([]byte(remoteID), []uint32{0x00030004})
-	connB.SetRemoteIdentity([]byte(remoteID), []uint32{0x00030005})
-	pool := NewXshardPool(log.New())
-	defer pool.Close()
-
-	pool.mu.Lock()
-	pool.conns[0x00030004] = []*XshardConn{connA}
-	pool.slaveIDs[remoteID] = true
-	pool.watchConnectionLocked(connA)
-
-	// Simulate RemoveTarget completing before the old connection's watcher runs.
-	pool.removeConnectionLocked(connA)
-	pool.conns[0x00030005] = []*XshardConn{connB}
-	pool.slaveIDs[remoteID] = true
-	pool.watchConnectionLocked(connB)
-	connA.Close()
-	pool.mu.Unlock()
-
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		pool.mu.RLock()
-		_, watcherPending := pool.watched[connA]
-		slaveIDTracked := pool.slaveIDs[remoteID]
-		connBIndexed := len(pool.conns[0x00030005]) == 1 && pool.conns[0x00030005][0] == connB
-		pool.mu.RUnlock()
-		if !watcherPending {
-			if !slaveIDTracked {
-				t.Fatal("delayed connA watcher deleted connB's slave ID")
-			}
-			if !connBIndexed {
-				t.Fatal("connB route was removed unexpectedly")
-			}
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("connA watcher did not finish")
-}
-
-func TestXshardPool_RemoveTargetClosesConnections(t *testing.T) {
-	pool := NewXshardPool(log.New())
-	defer pool.Close()
-
-	_, xc, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	xc.Start()
-	pool.Add(0x00010001, xc)
-	pool.RemoveTarget(0x00010001)
-
-	if pool.OutboundSize() != 0 {
-		t.Fatalf("expected pool outbound size 0, got %d", pool.OutboundSize())
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err := xc.SendRPC(ctx, byte(wire.ClusterOpPing), []byte("ping"))
-	if err != conn.ErrConnectionClosed {
-		t.Fatalf("expected ErrConnectionClosed, got %v", err)
-	}
-}
-
 func TestXshardPool_TrackInboundClose(t *testing.T) {
 	pool := NewXshardPool(log.New())
 
@@ -770,7 +622,7 @@ func TestXshardPool_ClosedPoolRejectsAdd(t *testing.T) {
 	defer cleanup()
 
 	xc.Start()
-	pool.Add(0x00010001, xc)
+	pool.add(0x00010001, xc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

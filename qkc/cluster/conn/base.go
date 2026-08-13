@@ -55,9 +55,8 @@ const (
 
 // pendingRPC represents an in-flight RPC call waiting for its response.
 type pendingRPC struct {
-	result     chan rpcResult // cap 1
-	stop       func() bool    // context.AfterFunc stop
-	wantOpcode byte           // expected response opcode for this request
+	result chan rpcResult // cap 1
+	stop   func() bool    // context.AfterFunc stop
 }
 
 type rpcResult struct {
@@ -318,27 +317,8 @@ func (c *BaseConn) SendRPCMeta(
 	payload []byte,
 	meta wire.ClusterMetadata,
 ) (*wire.Frame, error) {
-	// Resolve the expected response opcode for this request before registering
-	// the pending entry, so handleResponse can reject responses whose opcode
-	// does not match the request's response type. serializers is populated
-	// before Start and read-only afterwards.
-	//
-	// If the request opcode has no registered serializer, wantOpcode stays 0 and
-	// handleResponse skips the mismatch check. Such a request can never have its
-	// response delivered anyway: the matching response opcode is equally
-	// unregistered, so handleResponse would close the connection as an unknown
-	// response opcode before it could be matched to the pending entry.
-	c.configMu.RLock()
-	ser := c.serializers[opcode]
-	c.configMu.RUnlock()
-	var wantOpcode byte
-	if ser != nil {
-		wantOpcode = ser.ResponseOpCode
-	}
-
 	call := &pendingRPC{
-		result:     make(chan rpcResult, 1),
-		wantOpcode: wantOpcode,
+		result: make(chan rpcResult, 1),
 	}
 
 	// Phase 1: allocate rpc_id + register pending (writeMu → mu).
@@ -516,18 +496,18 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 	c.mu.Lock()
 	call, ok := c.pending[frame.RPCID]
 	if ok {
-		if call.wantOpcode != 0 && frame.Opcode != call.wantOpcode {
-			// The response opcode does not match what this request expects.
-			// This is a protocol error: leave the pending entry untouched so
-			// the in-flight request is completed by shutdown with an error,
-			// rather than being mis-delivered as a successful response.
-			c.mu.Unlock()
-			c.log.Error("rpc response opcode mismatch",
-				"rpcid", frame.RPCID, "got", frame.Opcode, "want", call.wantOpcode)
-			c.shutdown(fmt.Errorf("rpc response opcode mismatch for rpc %d: got 0x%x, want 0x%x",
-				frame.RPCID, frame.Opcode, call.wantOpcode))
-			return
-		}
+		// Python compatibility:
+		//
+		// RPC responses are matched solely by rpc_id.
+		//
+		// Python's RPCConnection does not verify that the response opcode
+		// matches the original request's expected response opcode.
+		// If rpc_id matches a pending RPC, the response is delivered to
+		// the waiting caller and the connection remains active.
+		//
+		// Although validating the response opcode would be more defensive,
+		// doing so would diverge from Python behavior and break migration
+		// compatibility.
 		delete(c.pending, frame.RPCID)
 		c.mu.Unlock()
 		if call.stop != nil {

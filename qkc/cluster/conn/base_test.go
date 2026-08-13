@@ -1046,11 +1046,11 @@ func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
 	}
 }
 
-// TestBaseConn_ResponseOpcodeMismatchClosesConnection verifies that a response
-// whose opcode does not match the request's expected response opcode is treated
-// as a protocol error: the connection closes and the pending RPC is completed
-// with an error rather than being mis-delivered as a successful response.
-func TestBaseConn_ResponseOpcodeMismatchClosesConnection(t *testing.T) {
+// TestBaseConn_ResponseOpcodeMismatchDeliversResponse verifies that a response
+// whose opcode does not match the request's expected response opcode is still
+// delivered to the caller. Python matches responses by rpc_id only and does not
+// validate the response opcode (see AbstractConnection.handle_metadata_and_raw_data).
+func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
 
@@ -1064,10 +1064,10 @@ func TestBaseConn_ResponseOpcodeMismatchClosesConnection(t *testing.T) {
 	conn.Start()
 	defer conn.Close()
 
-	result := make(chan error, 1)
+	result := make(chan rpcResult, 1)
 	go func() {
-		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		result <- err
+		frame, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- rpcResult{frame: frame, err: err}
 	}()
 
 	var request *wire.Frame
@@ -1088,22 +1088,27 @@ func TestBaseConn_ResponseOpcodeMismatchClosesConnection(t *testing.T) {
 	}
 
 	select {
-	case <-conn.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("connection did not close after response opcode mismatch")
-	}
-
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("pending RPC completed successfully on response opcode mismatch")
+	case res := <-result:
+		if res.err != nil {
+			t.Fatalf("SendRPC failed: %v", res.err)
+		}
+		if res.frame == nil {
+			t.Fatal("SendRPC returned nil frame")
+		}
+		if res.frame.Opcode != byte(wire.ClusterOpAddXshardTxListResponse) {
+			t.Fatalf("expected opcode 0x%x, got 0x%x",
+				byte(wire.ClusterOpAddXshardTxListResponse), res.frame.Opcode)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("pending RPC was not completed after response opcode mismatch")
+		t.Fatal("SendRPC did not complete after response delivery")
+	}
+
+	if conn.IsClosed() {
+		t.Fatal("connection should not close on response opcode mismatch")
 	}
 
 	if pending := conn.pendingLen(); pending != 0 {
-		t.Fatalf("pending RPC remains after mismatch shutdown: %d", pending)
+		t.Fatalf("pending RPC remains after response delivery: %d", pending)
 	}
 }
 
