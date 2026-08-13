@@ -109,8 +109,7 @@ type BaseConn struct {
 	closedChan    chan struct{} // closed during shutdown
 	errChan       chan error    // cap 1, non-user errors
 	readerDone    chan struct{} // closed when readerLoop exits
-	started       atomic.Bool
-	readerStarted atomic.Bool // true once readerLoop has been launched
+	readerStarted atomic.Bool   // true once readerLoop has been launched
 
 	log log.Logger
 }
@@ -154,26 +153,29 @@ func NewBaseConnFromConn(
 
 // Start transitions the connection to ACTIVE and starts the reader loop.
 // If the connection is already closed, Start is a no-op.
+//
+// Idempotence is guaranteed by the state machine alone: state starts as
+// Connecting and the only transition out of it (to Active) happens here under
+// mu. Since no path returns state to Connecting, Start's side effects run at
+// most once.
 func (c *BaseConn) Start() {
-	if !c.started.CompareAndSwap(false, true) {
-		return
-	}
 	c.mu.Lock()
-	if c.state == ConnectionStateClosed {
+	if c.state != ConnectionStateConnecting {
 		c.mu.Unlock()
 		return
 	}
 	c.state = ConnectionStateActive
 	c.stateSnapshot.Store(int32(ConnectionStateActive))
 	close(c.activeChan)
-	c.mu.Unlock()
 
 	// Mark the reader as launched before spawning it. Close() waits on
 	// readerDone only when readerStarted is true, so the two are kept
-	// consistent: if Start() observes a Closed connection and returns without
-	// launching readerLoop, readerStarted stays false and Close() does not
-	// block forever on a readerDone that will never be closed.
+	// consistent: if Start() returns early because the connection is not
+	// Connecting, readerStarted stays false and Close() does not block
+	// forever on a readerDone that will never be closed.
 	c.readerStarted.Store(true)
+	c.mu.Unlock()
+
 	go c.readerLoop()
 }
 

@@ -982,18 +982,16 @@ func TestBaseConn_StartOnClosedConnectionIsNoOp(t *testing.T) {
 }
 
 // TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted is a deterministic
-// regression test for the Start()/Close() lifecycle deadlock. If Start()'s CAS
-// succeeds but readerLoop is never launched (because Start() observed an
-// already-Closed state and returned), Close() must not block forever waiting on
+// regression test for the Start()/Close() lifecycle deadlock. If Start() is
+// never called (or returns early because the connection is already closed),
+// readerLoop is never launched, and Close() must not block forever waiting on
 // readerDone.
 func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := NewBaseConn(tr, log.New())
 
-	// Simulate "Start() paused after its CAS, before mu.Lock": started is
-	// already true, but no readerLoop has been launched.
-	conn.started.Store(true)
-
+	// Close a connection whose Start() was never called: readerStarted is
+	// false and readerLoop was never launched.
 	closeDone := make(chan struct{})
 	go func() {
 		conn.Close()
@@ -1008,8 +1006,8 @@ func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
 }
 
 // TestBaseConn_StartCloseConcurrentStress repeatedly exercises the Start()/Close()
-// race, covering the interleaving where Start() is descheduled between its CAS
-// and mu.Lock() while Close() completes shutdown.
+// race, covering the interleaving where Start() is descheduled between its
+// mu.Unlock() and readerStarted.Store() while Close() completes shutdown.
 func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		tr := newFakeFrameTransport()
