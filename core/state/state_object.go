@@ -88,8 +88,14 @@ type stateObject struct {
 }
 
 // empty returns whether the account is considered empty.
+//
+// The QKC fork also requires the account to hold no MNT (non-QKC) token
+// balances (IsBlankMnt). This mirrors pyquarkchain's _Account.is_blank, whose
+// token_balances.is_blank() spans every token; checking only the QKC balance
+// would prune nonce0/QKC0/MNT-nonzero/no-code accounts that pyquarkchain keeps,
+// diverging the state root. See state_object_qkc.go.
 func (s *stateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.Balance.IsZero() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
+	return s.data.Nonce == 0 && s.data.Balance.IsZero() && s.IsBlankMnt() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
 }
 
 // newObject creates a state object.
@@ -98,7 +104,7 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 	if acct == nil {
 		acct = types.NewEmptyStateAccount()
 	}
-	return &stateObject{
+	obj := &stateObject{
 		db:                 db,
 		address:            address,
 		origin:             origin,
@@ -108,6 +114,16 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 		pendingStorage:     make(Storage),
 		uncommittedStorage: make(Storage),
 	}
+	// data is a shallow value copy of *acct, so data.MntBalances aliases the
+	// same map as origin.MntBalances. SetMntBalance mutates that map in place
+	// (TokenBalances.SetValue), so without this copy an MNT mutation would also
+	// rewrite s.origin, and commit() would record the post-mutation balance as
+	// the "origin" — corrupting the pathdb rollback baseline. Deep-copy so data
+	// and origin own independent maps. Mirrors the deepCopy() guard below.
+	if origin != nil && origin.MntBalances != nil {
+		obj.data.MntBalances = origin.MntBalances.Copy()
+	}
+	return obj
 }
 
 func (s *stateObject) addrHash() common.Hash {
@@ -514,6 +530,14 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 		dirtyCode:          s.dirtyCode,
 		selfDestructed:     s.selfDestructed,
 		newContract:        s.newContract,
+	}
+	// data above is a shallow value copy of StateAccount; MntBalances is a
+	// pointer whose underlying map is mutated in place by SetMntBalance, so it
+	// must be deep-copied. Otherwise the copy and the original alias the same
+	// balances map and an MNT mutation on one StateDB silently corrupts the
+	// other (e.g. after StateDB.Copy()), diverging the state root.
+	if s.data.MntBalances != nil {
+		obj.data.MntBalances = s.data.MntBalances.Copy()
 	}
 
 	switch s.trie.(type) {
