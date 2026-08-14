@@ -33,13 +33,15 @@ import (
 // StateAccount is the Ethereum consensus representation of accounts.
 // These objects are stored in the main account trie.
 type StateAccount struct {
-	Nonce              uint64
-	Balance            *uint256.Int
-	Root               common.Hash // merkle root of the storage trie
-	CodeHash           []byte
-	MntBalances        *qkccommon.TokenBalances // Non-QKC balances.
-	FullShardKey       uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
-	balanceUpdateCount uint64                   // Number of non-reverted QKC balance updates.
+	Nonce        uint64
+	Balance      *uint256.Int
+	Root         common.Hash // merkle root of the storage trie
+	CodeHash     []byte
+	MntBalances  *qkccommon.TokenBalances // Non-QKC balances.
+	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
+	// balanceUpdateCount keeps a changed zero QKC balance encoded as 00c0. Using
+	// a counter ensures that reverting one update does not clear earlier updates.
+	balanceUpdateCount uint64
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -107,8 +109,8 @@ func (acct *StateAccount) FinaliseBalanceUpdates() {
 // MntBal holds TokenBalances.SerializeToBytes() output rather than the
 // *TokenBalances value directly: TokenBalances stores its balances in an
 // unexported map, so it is not RLP-struct-encodable and must go through the
-// same []byte serialization the trie account uses. An empty serialized list in
-// MntBal preserves QKC token presence in the snapshot representation.
+// same []byte serialization the trie account uses. MntBal also carries an
+// explicit zero-QKC update through the internal snapshot representation.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
@@ -137,12 +139,9 @@ func SlimAccountRLP(account StateAccount) []byte {
 		if err != nil {
 			panic(err)
 		}
-		if len(mntBal) == 0 {
-			slim.MntBal = []byte{0x00, 0xc0}
-		} else {
-			slim.MntBal = mntBal
-		}
-	} else if account.IsBalanceUpdated() {
+		slim.MntBal = mntBal
+	}
+	if len(slim.MntBal) == 0 && account.IsBalanceUpdated() {
 		slim.MntBal = []byte{0x00, 0xc0}
 	}
 	data, err := rlp.EncodeToBytes(slim)
@@ -166,7 +165,13 @@ func FullAccount(data []byte) (*StateAccount, error) {
 		if err != nil {
 			return nil, err
 		}
-		account.MntBalances = tb
+		if tb.Len() == 0 {
+			// SlimAccount uses 00c0 to preserve a zero-balance update. Restore the
+			// update marker instead of creating an empty MNT balance set.
+			account.AddBalanceUpdate()
+		} else {
+			account.MntBalances = tb
+		}
 	}
 
 	// Interpret the storage root and code hash in slim format.

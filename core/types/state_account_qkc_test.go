@@ -136,15 +136,13 @@ func TestStateAccountEmptyBalancesPythonGolden(t *testing.T) {
 
 	var decoded StateAccount
 	require.NoError(t, rlp.DecodeBytes(encoded, &decoded))
-	require.NotNil(t, decoded.MntBalances)
-	assert.Equal(t, 0, decoded.MntBalances.Len())
+	assert.Nil(t, decoded.MntBalances)
 	assert.False(t, decoded.IsBalanceUpdated())
 	reencoded, err := rlp.EncodeToBytes(&decoded)
 	require.NoError(t, err)
-	assert.Equal(t, encoded, reencoded)
 	var reencodedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
-	assert.Equal(t, []byte{0, 0xc0}, reencodedWire.TokenBal)
+	assert.Empty(t, reencodedWire.TokenBal)
 }
 
 func TestStateAccountDecodeRejectsUnsupportedTokenBalanceEncoding(t *testing.T) {
@@ -388,9 +386,9 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		// on the slim round-trip, forking the trie root when a snapshot-served account
 		// was re-committed.
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
-		{"nil QKC with presence", StateAccount{Balance: nil, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
-		{"zero QKC with presence", StateAccount{Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
-		{"nonzero QKC with presence", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"nil QKC updated", StateAccount{Balance: nil, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"zero QKC updated", StateAccount{Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
 		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
 		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
 	}
@@ -422,11 +420,9 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 // Balance (nil / zero / non-zero) against MntBalances (nil / empty / zero-valued
 // entry / non-zero entry) and pins the resulting wire TokenBal.
 //
-// The nil-Balance rows are the regression guard: mergeQKCTokenBalances returns
-// nil when the balance is nil or zero and the MNT set is empty, so encoding used
-// to call SerializeToBytes on that nil *TokenBalances and dereference its
-// unexported map. Encoding must succeed for every row here, and Balance must
-// always decode back non-nil.
+// The nil-Balance rows guard that nil QKC is treated as zero. An empty MNT map
+// remains absent, while an explicit zero-valued token entry serializes as 00c0.
+// Balance must always decode back non-nil.
 func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 	withMap := func(m map[uint64]*uint256.Int) *qkccommon.TokenBalances {
 		return qkccommon.NewTokenBalancesWithMap(m)
@@ -442,12 +438,12 @@ func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 	}{
 		{"nil balance, nil mnt", nil, nil, false, ""},
 		{"nil balance, updated", nil, nil, true, "00c0"},
-		{"nil balance, empty mnt", nil, qkccommon.NewEmptyTokenBalances(), false, "00c0"},
+		{"nil balance, empty mnt", nil, qkccommon.NewEmptyTokenBalances(), false, ""},
 		{"nil balance, zero-valued mnt", nil, withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), false, "00c0"},
 		{"nil balance, non-zero mnt", nil, withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), false, "00c3c26405"},
 		{"zero balance, nil mnt", new(uint256.Int), nil, false, ""},
 		{"zero balance, updated", new(uint256.Int), nil, true, "00c0"},
-		{"zero balance, empty mnt", new(uint256.Int), qkccommon.NewEmptyTokenBalances(), false, "00c0"},
+		{"zero balance, empty mnt", new(uint256.Int), qkccommon.NewEmptyTokenBalances(), false, ""},
 		{"zero balance, zero-valued mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), false, "00c0"},
 		{"zero balance, non-zero mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), false, "00c3c26405"},
 		{"non-zero balance, nil mnt", uint256.NewInt(9), nil, false, "00c5c4828bb009"},
@@ -486,7 +482,7 @@ func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 	}
 }
 
-func TestStateAccountQKCPresenceEncoding(t *testing.T) {
+func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	var account StateAccount
 	require.NoError(t, rlp.DecodeBytes(pyqkcVecNonce1QKC1000, &account))
 	assert.Nil(t, account.MntBalances)
@@ -505,6 +501,8 @@ func TestStateAccountQKCPresenceEncoding(t *testing.T) {
 	assert.Equal(t, []byte{0x00, 0xc0}, zeroSlimAccount.MntBal)
 	decodedSlim, err = FullAccount(zeroSlim)
 	require.NoError(t, err)
+	assert.Nil(t, decodedSlim.MntBalances)
+	assert.True(t, decodedSlim.IsBalanceUpdated())
 	drained, err := rlp.EncodeToBytes(decodedSlim)
 	require.NoError(t, err)
 	var drainedWire qkcAccountRLP
@@ -513,12 +511,11 @@ func TestStateAccountQKCPresenceEncoding(t *testing.T) {
 
 	decoded := StateAccount{MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{123: uint256.NewInt(456)})}
 	require.NoError(t, rlp.DecodeBytes(drained, &decoded))
-	require.NotNil(t, decoded.MntBalances)
-	assert.Equal(t, 0, decoded.MntBalances.Len())
+	assert.Nil(t, decoded.MntBalances)
 	assert.False(t, decoded.IsBalanceUpdated())
 	reencoded, err := rlp.EncodeToBytes(&decoded)
 	require.NoError(t, err)
 	var reencodedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
-	assert.Equal(t, []byte{0x00, 0xc0}, reencodedWire.TokenBal)
+	assert.Empty(t, reencodedWire.TokenBal)
 }

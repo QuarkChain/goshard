@@ -25,21 +25,18 @@ type qkcAccountRLP struct {
 	Optional     []byte
 }
 
-// mergeQKCTokenBalances combines the QKC native balance (tokenID=35760) and MNT
-// balances into a single TokenBalances for wire encoding.
-func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances, balanceUpdated bool) *qkccommon.TokenBalances {
-	qkcIsZero := balance == nil || balance.IsZero()
-	if qkcIsZero && !balanceUpdated && mnt == nil {
-		return nil
-	}
+// tokenBalancesForEncoding combines the split QKC and MNT balances into the
+// unified token table used by the wire format.
+func (acct *StateAccount) tokenBalancesForEncoding() *qkccommon.TokenBalances {
 	merged := qkccommon.NewEmptyTokenBalances()
-	if mnt != nil {
-		for id, bal := range mnt.GetBalanceMap() {
+	qkcIsZero := acct.Balance == nil || acct.Balance.IsZero()
+	if !qkcIsZero || acct.IsBalanceUpdated() {
+		merged.SetValue(acct.Balance, qkccommon.DefaultTokenID)
+	}
+	if acct.MntBalances != nil && acct.MntBalances.Len() > 0 {
+		for id, bal := range acct.MntBalances.GetBalanceMap() {
 			merged.SetValue(bal, id)
 		}
-	}
-	if !qkcIsZero || balanceUpdated || mnt != nil {
-		merged.SetValue(balance, qkccommon.DefaultTokenID)
 	}
 	return merged
 }
@@ -47,13 +44,9 @@ func mergeQKCTokenBalances(balance *uint256.Int, mnt *qkccommon.TokenBalances, b
 // EncodeRLP implements rlp.Encoder for StateAccount using QuarkChain's
 // 6-element format. Root is always written as 32 bytes (no nil optimization).
 func (acct *StateAccount) EncodeRLP(w io.Writer) error {
-	var tokenBal []byte
-	if balances := mergeQKCTokenBalances(acct.Balance, acct.MntBalances, acct.IsBalanceUpdated()); balances != nil {
-		var err error
-		tokenBal, err = balances.SerializeToBytes()
-		if err != nil {
-			return err
-		}
+	tokenBal, err := acct.tokenBalancesForEncoding().SerializeToBytes()
+	if err != nil {
+		return err
 	}
 	qkc := &qkcAccountRLP{
 		Nonce:        acct.Nonce,
@@ -98,9 +91,7 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 			acct.Balance.Set(qkcBal)
 			delete(balMap, qkccommon.DefaultTokenID)
 		}
-		// Keep an empty serialized token list as a non-nil MNT set so it
-		// re-encodes as 00c0 without carrying balanceUpdateCount through RLP.
-		if !hasQKC || len(balMap) != 0 {
+		if len(balMap) != 0 {
 			acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
 		}
 	}
