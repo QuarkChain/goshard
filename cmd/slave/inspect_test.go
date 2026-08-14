@@ -97,6 +97,10 @@ func TestInspectDataDir(t *testing.T) {
 		"evm_xshard_gas_limit:  6000000",
 		"hash_prev_root_block:  0x4036783e441eb5057bf2be96bf1fd4585ac49824de15c0d92a4c14a97886ca51",
 		"xshard cursor:         root=0 minor=0 deposit=0",
+		// The rule set is stored apart from the block: BASE_ETH_CHAIN_ID + chain 0 + 1,
+		// and the Petersburg-only schedule every QKC shard fork sits at block 0 of.
+		"chain id:              100001",
+		"fork schedule:         byzantium=0 constantinople=0 eip150=0 eip155=0 eip158=0 homestead=0 petersburg=0",
 		"head block:            none recorded",
 		"2 shard(s) inspected, 0 failed",
 	} {
@@ -123,6 +127,49 @@ func rewriteGenesisBlock(t *testing.T, dbPath string, mutate func(*types.MinorBl
 	mutate(block)
 	if err := shard.WriteGenesisBlock(kv, block); err != nil {
 		t.Fatalf("write genesis block: %v", err)
+	}
+}
+
+// dropChainConfig deletes the rule set an initialized shard chaindb stores under its
+// genesis hash, standing in for a datadir initialized before the rule set was written.
+func dropChainConfig(t *testing.T, dbPath string) {
+	t.Helper()
+	kv, err := pebble.New(dbPath, 16, 16, "qkc/test/", false)
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer kv.Close()
+	block, err := shard.ReadGenesisBlock(kv)
+	if err != nil || block == nil {
+		t.Fatalf("read genesis block: %v (block %v)", err, block)
+	}
+	if err := kv.Delete(append(bytes.Clone(configPrefix), block.Hash().Bytes()...)); err != nil {
+		t.Fatalf("delete chain config: %v", err)
+	}
+}
+
+// TestInspectReportsMissingRuleSet covers the one anomaly the boot path treats as
+// recoverable: a genesis that was stored before its rule set was. The slave answers it
+// by warning and writing one, so inspect reports it rather than failing — but it does
+// report it, instead of leaving the shard looking complete.
+func TestInspectReportsMissingRuleSet(t *testing.T) {
+	dbRoot := t.TempDir()
+	initDataDir(t, fixtures[0].path, dbRoot)
+	dropChainConfig(t, filepath.Join(dbRoot, "shard-0x00000001"))
+
+	var buf bytes.Buffer
+	if err := inspectDataDir(&buf, dbRoot); err != nil {
+		t.Fatalf("inspectDataDir: %v\noutput:\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"rule set:              none stored",
+		"chain id:              100005", // shard 0x00040001, untouched, still reports its rule set
+		"2 shard(s) inspected, 0 failed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("inspect output missing %q:\n%s", want, out)
+		}
 	}
 }
 

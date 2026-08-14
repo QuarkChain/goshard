@@ -140,6 +140,8 @@ shard 0x00000001 (qkc-data/devnet/shard-0x00000001):
   evm_xshard_gas_limit:  6000000
   hash_prev_root_block:  0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
   xshard cursor:         root=0 minor=0 deposit=0
+  chain id:              110001
+  fork schedule:         byzantium=0 constantinople=0 eip150=0 eip155=0 eip158=0 homestead=0 petersburg=0
   head block:            none recorded (stub chain persists no head)
 shard 0x00040001 (qkc-data/devnet/shard-0x00040001):
   ...
@@ -165,6 +167,13 @@ having its fields presented as that shard's genesis:
   the next `slave` run re-runs the fresh path. A head pointer with no genesis under
   it is not a state this lifecycle produces, and is reported rather than described
   as safely re-initializable.
+
+The EVM rule set is stored apart from the genesis block, keyed by its hash, and is the
+other half of what a reopen is checked against — so it is reported too: the shard's
+chain id (`BASE_ETH_CHAIN_ID + CHAIN_ID + 1`) and its fork schedule, which for every
+QuarkChain shard sits entirely at block 0. A datadir initialized before the rule set was
+written prints `rule set: none stored`; that one is recoverable, and the next `slave`
+run warns and writes it rather than refusing to boot.
 
 A report that cannot be written fails the command instead of being summarized as a
 success.

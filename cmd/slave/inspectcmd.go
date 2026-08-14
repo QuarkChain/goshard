@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
+	"github.com/ethereum/go-ethereum/params"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/qkc/shard"
@@ -166,11 +169,21 @@ func inspectShardDB(out io.Writer, path string, id uint32) error {
 		}
 	}
 
+	// The rule set is keyed by the genesis hash, so there is one to look for only once
+	// the block it hangs off has been read and vouched for.
+	var rules storedRules
+	if block != nil {
+		if rules, err = readChainConfig(kv, block.Hash()); err != nil {
+			return fmt.Errorf("read chain config (db %s): %w", path, err)
+		}
+	}
+
 	fmt.Fprintf(out, "shard 0x%08x (%s):\n", id, path)
 	if block == nil {
 		fmt.Fprintln(out, "  genesis block:         none (bootstrap never completed; next boot re-initializes)")
 	} else {
 		printGenesisBlock(out, block)
+		printChainConfig(out, rules)
 	}
 	if head != (common.Hash{}) {
 		fmt.Fprintf(out, "  head block:            %s\n", head)
@@ -212,6 +225,95 @@ func checkGenesisSelfConsistent(block *types.MinorBlock) error {
 			len(block.Transactions), len(block.TrackingData))
 	}
 	return nil
+}
+
+// storedRules is the EVM rule set found under a shard's genesis hash: the parsed
+// config, and the encoding it was parsed from. Both are kept because the schedule is
+// rendered from the encoding rather than from a fixed list of fork fields.
+type storedRules struct {
+	config *params.ChainConfig
+	raw    []byte
+}
+
+// configPrefix mirrors geth's unexported rawdb.configPrefix (core/rawdb/schema.go).
+//
+// rawdb.ReadChainConfig answers a failed read and a malformed encoding alike with a
+// nil config, which inspect would print as "none stored" — the same false claim about
+// a database it could not read that ReadHeadBlockHash would make about the head.
+var configPrefix = []byte("ethereum-config-")
+
+// readChainConfig returns the rule set stored under genesisHash, or a zero
+// storedRules if none is stored.
+func readChainConfig(db ethdb.KeyValueReader, genesisHash common.Hash) (storedRules, error) {
+	key := append(bytes.Clone(configPrefix), genesisHash.Bytes()...)
+	has, err := db.Has(key)
+	if err != nil || !has {
+		return storedRules{}, err
+	}
+	data, err := db.Get(key)
+	if err != nil {
+		return storedRules{}, err
+	}
+	config := new(params.ChainConfig)
+	if err := json.Unmarshal(data, config); err != nil {
+		return storedRules{}, fmt.Errorf("decode chain config: %w", err)
+	}
+	return storedRules{config: config, raw: data}, nil
+}
+
+// printChainConfig reports the rule set a reopen is checked against. It is stored
+// apart from the genesis block, so it can be missing on a datadir initialized before
+// it was written — recoverable, and the boot path answers it by warning and writing
+// one, but worth saying out loud here rather than leaving to a log line.
+func printChainConfig(out io.Writer, rules storedRules) {
+	if rules.config == nil {
+		fmt.Fprintln(out, "  rule set:              none stored (recoverable; the next boot warns and writes it)")
+		return
+	}
+	fmt.Fprintf(out, "  chain id:              %s\n", rules.config.ChainID)
+	fmt.Fprintf(out, "  fork schedule:         %s\n", formatForkSchedule(rules.raw))
+}
+
+// formatForkSchedule renders the fork activations out of the stored encoding rather
+// than a fixed field list, so a rule set carrying a fork this build does not know
+// about is still shown instead of silently dropped. Ordering is by activation, which
+// is how a schedule is read; every QKC shard fork sits at block 0.
+func formatForkSchedule(raw []byte) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "unreadable"
+	}
+	type fork struct {
+		name string
+		at   uint64
+	}
+	var forks []fork
+	for name, value := range fields {
+		if name == "chainId" {
+			continue
+		}
+		var at uint64
+		// Anything that is not a plain number is not a scheduled fork: an engine
+		// section, a boolean switch, a total difficulty.
+		if err := json.Unmarshal(value, &at); err != nil {
+			continue
+		}
+		forks = append(forks, fork{strings.TrimSuffix(name, "Block"), at})
+	}
+	if len(forks) == 0 {
+		return "none scheduled"
+	}
+	sort.Slice(forks, func(i, j int) bool {
+		if forks[i].at != forks[j].at {
+			return forks[i].at < forks[j].at
+		}
+		return forks[i].name < forks[j].name
+	})
+	parts := make([]string, 0, len(forks))
+	for _, f := range forks {
+		parts = append(parts, fmt.Sprintf("%s=%d", f.name, f.at))
+	}
+	return strings.Join(parts, " ")
 }
 
 // headBlockKey mirrors geth's unexported rawdb.headBlockKey (core/rawdb/schema.go).
