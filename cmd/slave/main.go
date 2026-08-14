@@ -85,6 +85,7 @@ func newApp() *cli.App {
 	app.Commands = []*cli.Command{
 		configCommand,
 		genesisCommand,
+		inspectCommand,
 	}
 	return app
 }
