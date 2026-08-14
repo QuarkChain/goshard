@@ -218,12 +218,20 @@ func TestBalanceChangeTracksQKCPresence(t *testing.T) {
 	}
 	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
 
+	// Unwinding every balance change the account ever had still leaves the entry
+	// behind: pyquarkchain's undo writes the previous value back into the map
+	// (quarkchain/evm/state.py:166) rather than deleting the key, so the account
+	// it reconstructs holds zero rather than holding nothing. Dropping the marker
+	// here would serialize as empty bytes and hash to a different leaf.
 	state.RevertToSnapshot(snapshot)
 	obj = state.getStateObject(addr)
-	if obj.data.IsBalanceUpdated() {
-		t.Fatal("snapshot revert did not restore the nil QKC presence marker")
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("snapshot revert dropped the QKC presence marker")
 	}
-	assertAccountTokenBalance(t, &obj.data, nil)
+	if !obj.Balance().IsZero() {
+		t.Fatal("snapshot revert did not restore the balance")
+	}
+	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
 }
 
 func TestBalanceChangeRevertKeepsExistingQKCPresence(t *testing.T) {

@@ -386,8 +386,8 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		// on the slim round-trip, forking the trie root when a snapshot-served account
 		// was re-committed.
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
-		{"nil QKC updated", StateAccount{Balance: nil, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
-		{"zero QKC updated", StateAccount{Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		// An update over a zero balance is not in this table: it survives neither
+		// round trip, by design (TestQKCUpdateIsNotCarriedByEitherReader).
 		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
 		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
 		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
@@ -488,26 +488,23 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	assert.Nil(t, account.MntBalances)
 	assert.False(t, account.IsBalanceUpdated())
 
-	slim := SlimAccountRLP(account)
-	decodedSlim, err := FullAccount(slim)
-	require.NoError(t, err)
-	assert.Nil(t, decodedSlim.MntBalances)
-	assert.False(t, decodedSlim.IsBalanceUpdated())
-	decodedSlim.AddBalanceUpdate()
-	decodedSlim.Balance.Clear()
-	zeroSlim := SlimAccountRLP(*decodedSlim)
-	var zeroSlimAccount SlimAccount
-	require.NoError(t, rlp.DecodeBytes(zeroSlim, &zeroSlimAccount))
-	assert.Equal(t, []byte{0x00, 0xc0}, zeroSlimAccount.MntBal)
-	decodedSlim, err = FullAccount(zeroSlim)
-	require.NoError(t, err)
-	assert.Nil(t, decodedSlim.MntBalances)
-	assert.True(t, decodedSlim.IsBalanceUpdated())
-	drained, err := rlp.EncodeToBytes(decodedSlim)
+	drainedAcct := account.Copy()
+	drainedAcct.AddBalanceUpdate()
+	drainedAcct.Balance.Clear()
+	drained, err := rlp.EncodeToBytes(drainedAcct)
 	require.NoError(t, err)
 	var drainedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(drained, &drainedWire))
 	assert.Equal(t, []byte{0x00, 0xc0}, drainedWire.TokenBal)
+
+	neverHeld := account.Copy()
+	neverHeld.Balance.Clear()
+	neverHeldEnc, err := rlp.EncodeToBytes(neverHeld)
+	require.NoError(t, err)
+	var neverHeldWire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(neverHeldEnc, &neverHeldWire))
+	assert.Empty(t, neverHeldWire.TokenBal)
+	assert.NotEqual(t, drained, neverHeldEnc, "the two forms must not collapse to one leaf")
 
 	decoded := StateAccount{MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{123: uint256.NewInt(456)})}
 	require.NoError(t, rlp.DecodeBytes(drained, &decoded))
@@ -518,4 +515,39 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	var reencodedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
 	assert.Empty(t, reencodedWire.TokenBal)
+}
+
+// TestQKCUpdateIsNotCarriedByEitherReader pins where the update marker stops.
+// It is a fact about the block in progress, not a stored one: pyquarkchain
+// rebuilds its balance map from the pair list (quarkchain/evm/state.py:104),
+// which has no room for a zero, so neither a trie leaf nor a snapshot entry
+// brings it back. The two readers have to agree — a snapshot that kept it would
+// hand back an account the trie cannot produce, and the next block to touch that
+// account would commit a root no reference client computed.
+func TestQKCUpdateIsNotCarriedByEitherReader(t *testing.T) {
+	var account StateAccount
+	require.NoError(t, rlp.DecodeBytes(pyqkcVecNonce1QKC1000, &account))
+	account.AddBalanceUpdate()
+	account.Balance.Clear()
+
+	drained, err := rlp.EncodeToBytes(&account)
+	require.NoError(t, err)
+	var viaTrie StateAccount
+	require.NoError(t, rlp.DecodeBytes(drained, &viaTrie))
+	assert.Nil(t, viaTrie.MntBalances)
+	assert.False(t, viaTrie.IsBalanceUpdated())
+
+	viaSlim, err := FullAccount(SlimAccountRLP(account))
+	require.NoError(t, err)
+	assert.Nil(t, viaSlim.MntBalances)
+	assert.False(t, viaSlim.IsBalanceUpdated())
+
+	fromTrie, err := rlp.EncodeToBytes(&viaTrie)
+	require.NoError(t, err)
+	fromSlim, err := rlp.EncodeToBytes(viaSlim)
+	require.NoError(t, err)
+	assert.Equal(t, fromTrie, fromSlim, "the trie and snapshot readers must agree")
+	var wire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(fromTrie, &wire))
+	assert.Empty(t, wire.TokenBal, "the entry is gone once it has been through storage")
 }

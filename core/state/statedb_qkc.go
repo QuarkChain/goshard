@@ -33,7 +33,7 @@ func (s *StateDB) SetMntBalance(addr common.Address, amount *uint256.Int, tokenI
 	if obj == nil || !obj.canSetMntBalance(amount, tokenID) {
 		return
 	}
-	s.journal.mntBalanceChange(addr, obj.data.MntBalances)
+	s.journal.mntBalanceChange(addr, tokenID, obj.GetMntBalance(tokenID))
 	obj.setMntBalance(amount, tokenID)
 }
 
