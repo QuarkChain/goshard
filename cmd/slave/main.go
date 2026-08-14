@@ -81,6 +81,7 @@ func newApp() *cli.App {
 		debug.Exit()
 		return nil
 	}
+	app.Action = runSlave
 	app.Commands = []*cli.Command{
 		configCommand,
 		genesisCommand,
