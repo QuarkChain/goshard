@@ -24,7 +24,7 @@ type xshardConn struct {
 	localID              []byte // this slave's identity, sent in PONG
 	localFullShardIDList []uint32
 
-	stateMu             sync.Mutex // guards peerID / peerFullShardIDList
+	stateMu             sync.RWMutex // guards peerID / peerFullShardIDList
 	peerID              []byte
 	peerFullShardIDList []uint32
 	pingReceived        chan struct{}
@@ -72,10 +72,10 @@ func (x *xshardConn) handlePing(req any) (any, error) {
 		x.peerID = append([]byte(nil), ping.ID...)
 		x.peerFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
 	}
-	storedShardList := x.peerFullShardIDList
+	emptyShardList := len(x.peerFullShardIDList) == 0
 	x.stateMu.Unlock()
 
-	if len(storedShardList) == 0 {
+	if emptyShardList {
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
 
@@ -118,15 +118,15 @@ func (x *xshardConn) setRemoteIdentity(id []byte, shardList []uint32) {
 
 // remoteID returns the peer's slave ID.
 func (x *xshardConn) remoteID() []byte {
-	x.stateMu.Lock()
-	defer x.stateMu.Unlock()
+	x.stateMu.RLock()
+	defer x.stateMu.RUnlock()
 	return append([]byte(nil), x.peerID...)
 }
 
 // remoteFullShardIDList returns the peer's full shard ID list.
 func (x *xshardConn) remoteFullShardIDList() []uint32 {
-	x.stateMu.Lock()
-	defer x.stateMu.Unlock()
+	x.stateMu.RLock()
+	defer x.stateMu.RUnlock()
 	return append([]uint32(nil), x.peerFullShardIDList...)
 }
 

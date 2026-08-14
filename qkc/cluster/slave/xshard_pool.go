@@ -7,11 +7,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
 const defaultDialTimeout = 10 * time.Second
@@ -19,11 +21,16 @@ const defaultDialTimeout = 10 * time.Second
 // XshardPool manages slave-to-slave xshard connections, indexed by full shard
 // ID. It owns dial, handshake, identity bookkeeping, indexing, and cleanup;
 // connections never escape the pool. Closed connections are never evicted.
+//
+// The pool is add-only (matching Python's SlaveConnectionManager): conns and
+// slaveIDs only grow, and a closed or disconnected peer is never removed. The
+// only path that clears them is Close. As a result a peer is dialed at most
+// once, but also cannot be re-dialed after it drops.
 type XshardPool struct {
 	mu                   sync.RWMutex
 	conns                map[uint32][]*xshardConn
 	inbound              []*xshardConn
-	slaveIDs             map[string]bool // Known peer identities (never removed).
+	slaveIDs             map[string]bool // Known peer identities; add-only, used for outbound dedup.
 	selfID               []byte          // This slave's identity.
 	localFullShardIDList []uint32
 	maxPayloadSize       uint32 // 0 disables the payload limit.
@@ -49,13 +56,15 @@ func NewXshardPool(selfID []byte, localFullShardIDList []uint32, maxPayloadSize 
 	}
 }
 
-// DialToSlave establishes an outbound xshard connection.
-func (p *XshardPool) DialToSlave(ctx context.Context, addr string, expectedID []byte, expectedShardList []uint32) error {
-	if p.knownRemote(expectedID) {
-		p.log.Info("outbound xshard connection skipped: remote already known", "remote_id", string(expectedID))
+// DialToSlave establishes an outbound xshard connection to the given slave.
+// It matches Python's SlaveConnectionManager.connect_to_slave(slave_info).
+func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) error {
+	if p.knownRemote(slaveInfo.ID) {
+		p.log.Info("outbound xshard connection skipped: remote already known", "remote_id", string(slaveInfo.ID))
 		return nil
 	}
 
+	addr := net.JoinHostPort(string(slaveInfo.Host), strconv.Itoa(int(slaveInfo.Port)))
 	nc, err := net.DialTimeout("tcp", addr, defaultDialTimeout)
 	if err != nil {
 		return fmt.Errorf("dial xshard slave %s: %w", addr, err)
@@ -63,7 +72,7 @@ func (p *XshardPool) DialToSlave(ctx context.Context, addr string, expectedID []
 	conn := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, p.log)
 	conn.Start()
 
-	return p.verifyAndAddToShards(ctx, conn, expectedID, expectedShardList)
+	return p.verifyAndAddToShards(ctx, conn, slaveInfo.ID, slaveInfo.FullShardIDList)
 }
 
 // HandleInbound takes ownership of an accepted xshard connection.
@@ -130,7 +139,11 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 }
 
 // SendXshardTx broadcasts an xshard transaction to all connections for a shard.
-func (p *XshardPool) SendXshardTx(ctx context.Context, fullShardID uint32, payload []byte) error {
+func (p *XshardPool) SendXshardTx(ctx context.Context, fullShardID uint32, req *wire.AddXshardTxListRequest) error {
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		return fmt.Errorf("serialize AddXshardTxListRequest: %w", err)
+	}
 	return p.broadcast(fullShardID,
 		func(c *xshardConn) (*wire.Frame, error) { return c.sendXshardTxList(ctx, payload) },
 		func(f *wire.Frame) error { _, err := parseAddXshardTxListResponse(f); return err },
@@ -138,7 +151,11 @@ func (p *XshardPool) SendXshardTx(ctx context.Context, fullShardID uint32, paylo
 }
 
 // SendBatchXshardTx broadcasts a batch xshard transaction to all connections for a shard.
-func (p *XshardPool) SendBatchXshardTx(ctx context.Context, fullShardID uint32, payload []byte) error {
+func (p *XshardPool) SendBatchXshardTx(ctx context.Context, fullShardID uint32, req *wire.BatchAddXshardTxListRequest) error {
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		return fmt.Errorf("serialize BatchAddXshardTxListRequest: %w", err)
+	}
 	return p.broadcast(fullShardID,
 		func(c *xshardConn) (*wire.Frame, error) { return c.sendBatchXshardTxList(ctx, payload) },
 		func(f *wire.Frame) error { _, err := parseBatchAddXshardTxListResponse(f); return err },
