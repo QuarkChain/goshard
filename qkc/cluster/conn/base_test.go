@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1442,5 +1443,147 @@ func TestDispatch_ValidResponseBehaviorUnchanged(t *testing.T) {
 	}
 	if server.IsClosed() {
 		t.Fatal("server should remain open after valid response")
+	}
+}
+
+// ── Configuration lifecycle tests ────────────────────────────────────────────
+
+// assertPanics runs fn and fails the test if it does not panic with a message
+// containing want.
+func assertPanics(t *testing.T, want string, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic containing %q, got no panic", want)
+		}
+		msg, _ := r.(string)
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected panic containing %q, got %q", want, msg)
+		}
+	}()
+	fn()
+}
+
+// TestBaseConn_RegisterAfterStartPanics verifies that every Register*/Set*
+// method rejects mutation once the connection is Active, establishing the
+// invariant that Active => configuration immutable.
+func TestBaseConn_RegisterAfterStartPanics(t *testing.T) {
+	methods := []struct {
+		name string
+		call func(*BaseConn)
+	}{
+		{"RegisterTypedHandlers", func(c *BaseConn) {
+			c.RegisterTypedHandlers(map[byte]TypedHandler{
+				byte(wire.ClusterOpPing): func(any) (any, error) { return nil, nil },
+			})
+		}},
+		{"RegisterOpSerializers", func(c *BaseConn) {
+			c.RegisterOpSerializers(map[byte]*OpSerializer{
+				byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+			})
+		}},
+		{"RegisterNonRPCOps", func(c *BaseConn) { c.RegisterNonRPCOps([]byte{1}) }},
+		{"SetForwarder", func(c *BaseConn) {
+			c.SetForwarder(func(*wire.Frame) bool { return false })
+		}},
+		{"SetValidateRPCID", func(c *BaseConn) {
+			c.SetValidateRPCID(func(uint64, uint64) bool { return true })
+		}},
+	}
+
+	for _, m := range methods {
+		t.Run(m.name, func(t *testing.T) {
+			conn := NewBaseConn(newFakeFrameTransport(), log.New())
+			conn.Start()
+			defer conn.Close()
+			assertPanics(t, "before Start", func() { m.call(conn) })
+		})
+	}
+}
+
+// TestBaseConn_StartFreezesConfiguration directly exercises the concern that a
+// caller doing RegisterOpSerializers → Start → RegisterTypedHandlers would end
+// up with an Active connection whose configuration is incomplete. The second
+// registration must be rejected (panic), never silently allowed.
+func TestBaseConn_StartFreezesConfiguration(t *testing.T) {
+	conn := NewBaseConn(newFakeFrameTransport(), log.New())
+	conn.RegisterOpSerializers(map[byte]*OpSerializer{
+		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+	})
+	conn.Start()
+	defer conn.Close()
+
+	assertPanics(t, "before Start", func() {
+		conn.RegisterTypedHandlers(map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(any) (any, error) { return nil, nil },
+		})
+	})
+}
+
+// TestBaseConn_ConcurrentRegisterStartStress races Register*/Set* against
+// Start. Both are serialized by mu: either the registration commits before the
+// Connecting→Active transition (so the config is complete when Active), or the
+// registration observes Active and panics. There is no interleaving that yields
+// a silently half-configured Active connection, and no data race.
+func TestBaseConn_ConcurrentRegisterStartStress(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		conn := NewBaseConn(newFakeFrameTransport(), log.New())
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			<-start
+			defer func() { _ = recover() }() // panic is a valid outcome
+			conn.RegisterOpSerializers(map[byte]*OpSerializer{
+				byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			conn.Start()
+		}()
+
+		close(start)
+		wg.Wait()
+		conn.Close()
+	}
+}
+
+// TestBaseConn_ConcurrentStateReaders exercises the RLock path of
+// State/IsActive/IsClosed under concurrent reads while Close performs the
+// state write. The race detector verifies no unsynchronized access to state.
+func TestBaseConn_ConcurrentStateReaders(t *testing.T) {
+	conn := NewBaseConn(newFakeFrameTransport(), log.New())
+	conn.Start()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = conn.State()
+					_ = conn.IsActive()
+					_ = conn.IsClosed()
+				}
+			}
+		}()
+	}
+
+	conn.Close()
+	close(stop)
+	wg.Wait()
+
+	if !conn.IsClosed() {
+		t.Fatal("expected connection to be closed")
 	}
 }
