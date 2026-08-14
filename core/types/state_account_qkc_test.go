@@ -136,13 +136,15 @@ func TestStateAccountEmptyBalancesPythonGolden(t *testing.T) {
 
 	var decoded StateAccount
 	require.NoError(t, rlp.DecodeBytes(encoded, &decoded))
-	assert.Nil(t, decoded.MntBalances)
+	require.NotNil(t, decoded.MntBalances)
+	assert.Equal(t, 0, decoded.MntBalances.Len())
+	assert.False(t, decoded.IsBalanceUpdated())
 	reencoded, err := rlp.EncodeToBytes(&decoded)
 	require.NoError(t, err)
-	assert.NotEqual(t, encoded, reencoded)
+	assert.Equal(t, encoded, reencoded)
 	var reencodedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
-	assert.Empty(t, reencodedWire.TokenBal)
+	assert.Equal(t, []byte{0, 0xc0}, reencodedWire.TokenBal)
 }
 
 func TestStateAccountDecodeRejectsUnsupportedTokenBalanceEncoding(t *testing.T) {
@@ -386,9 +388,9 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		// on the slim round-trip, forking the trie root when a snapshot-served account
 		// was re-committed.
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
-		{"nil QKC with presence", StateAccount{Balance: nil, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewEmptyTokenBalances()}},
-		{"zero QKC with presence", StateAccount{Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewEmptyTokenBalances()}},
-		{"nonzero QKC with presence", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewEmptyTokenBalances()}},
+		{"nil QKC with presence", StateAccount{Balance: nil, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"zero QKC with presence", StateAccount{Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"nonzero QKC with presence", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
 		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
 		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
 	}
@@ -430,35 +432,39 @@ func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 		return qkccommon.NewTokenBalancesWithMap(m)
 	}
 	cases := []struct {
-		name string
-		bal  *uint256.Int
-		mnt  *qkccommon.TokenBalances
+		name    string
+		bal     *uint256.Int
+		mnt     *qkccommon.TokenBalances
+		updated bool
 		// wantTokenBal is the expected hex of the wire TokenBal field. QKC
 		// (tokenID 35760 = 0x8bb0) sorts after tokenID 100 in the pair list.
 		wantTokenBal string
 	}{
-		{"nil balance, nil mnt", nil, nil, ""},
-		{"nil balance, empty mnt", nil, qkccommon.NewEmptyTokenBalances(), "00c0"},
-		{"nil balance, zero-valued mnt", nil, withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), "00c0"},
-		{"nil balance, non-zero mnt", nil, withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), "00c3c26405"},
-		{"zero balance, nil mnt", new(uint256.Int), nil, ""},
-		{"zero balance, empty mnt", new(uint256.Int), qkccommon.NewEmptyTokenBalances(), "00c0"},
-		{"zero balance, zero-valued mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), "00c0"},
-		{"zero balance, non-zero mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), "00c3c26405"},
-		{"non-zero balance, nil mnt", uint256.NewInt(9), nil, "00c5c4828bb009"},
-		{"non-zero balance, empty mnt", uint256.NewInt(9), qkccommon.NewEmptyTokenBalances(), "00c5c4828bb009"},
-		{"non-zero balance, zero-valued mnt", uint256.NewInt(9), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), "00c5c4828bb009"},
-		{"non-zero balance, non-zero mnt", uint256.NewInt(9), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), "00c8c26405c4828bb009"},
+		{"nil balance, nil mnt", nil, nil, false, ""},
+		{"nil balance, updated", nil, nil, true, "00c0"},
+		{"nil balance, empty mnt", nil, qkccommon.NewEmptyTokenBalances(), false, "00c0"},
+		{"nil balance, zero-valued mnt", nil, withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), false, "00c0"},
+		{"nil balance, non-zero mnt", nil, withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), false, "00c3c26405"},
+		{"zero balance, nil mnt", new(uint256.Int), nil, false, ""},
+		{"zero balance, updated", new(uint256.Int), nil, true, "00c0"},
+		{"zero balance, empty mnt", new(uint256.Int), qkccommon.NewEmptyTokenBalances(), false, "00c0"},
+		{"zero balance, zero-valued mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), false, "00c0"},
+		{"zero balance, non-zero mnt", new(uint256.Int), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), false, "00c3c26405"},
+		{"non-zero balance, nil mnt", uint256.NewInt(9), nil, false, "00c5c4828bb009"},
+		{"non-zero balance, empty mnt", uint256.NewInt(9), qkccommon.NewEmptyTokenBalances(), false, "00c5c4828bb009"},
+		{"non-zero balance, zero-valued mnt", uint256.NewInt(9), withMap(map[uint64]*uint256.Int{100: new(uint256.Int)}), false, "00c5c4828bb009"},
+		{"non-zero balance, non-zero mnt", uint256.NewInt(9), withMap(map[uint64]*uint256.Int{100: uint256.NewInt(5)}), false, "00c8c26405c4828bb009"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			account := StateAccount{
-				Nonce:        1,
-				Balance:      tc.bal,
-				Root:         EmptyRootHash,
-				CodeHash:     EmptyCodeHash.Bytes(),
-				MntBalances:  tc.mnt,
-				FullShardKey: 7,
+				Nonce:              1,
+				Balance:            tc.bal,
+				Root:               EmptyRootHash,
+				CodeHash:           EmptyCodeHash.Bytes(),
+				MntBalances:        tc.mnt,
+				FullShardKey:       7,
+				balanceUpdateCount: map[bool]uint64{true: 1}[tc.updated],
 			}
 			encoded, err := rlp.EncodeToBytes(&account)
 			require.NoError(t, err)
@@ -483,14 +489,22 @@ func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 func TestStateAccountQKCPresenceEncoding(t *testing.T) {
 	var account StateAccount
 	require.NoError(t, rlp.DecodeBytes(pyqkcVecNonce1QKC1000, &account))
-	require.NotNil(t, account.MntBalances)
-	assert.Equal(t, 0, account.MntBalances.Len())
+	assert.Nil(t, account.MntBalances)
+	assert.False(t, account.IsBalanceUpdated())
 
 	slim := SlimAccountRLP(account)
 	decodedSlim, err := FullAccount(slim)
 	require.NoError(t, err)
-	require.NotNil(t, decodedSlim.MntBalances)
+	assert.Nil(t, decodedSlim.MntBalances)
+	assert.False(t, decodedSlim.IsBalanceUpdated())
+	decodedSlim.AddBalanceUpdate()
 	decodedSlim.Balance.Clear()
+	zeroSlim := SlimAccountRLP(*decodedSlim)
+	var zeroSlimAccount SlimAccount
+	require.NoError(t, rlp.DecodeBytes(zeroSlim, &zeroSlimAccount))
+	assert.Equal(t, []byte{0x00, 0xc0}, zeroSlimAccount.MntBal)
+	decodedSlim, err = FullAccount(zeroSlim)
+	require.NoError(t, err)
 	drained, err := rlp.EncodeToBytes(decodedSlim)
 	require.NoError(t, err)
 	var drainedWire qkcAccountRLP
@@ -499,10 +513,12 @@ func TestStateAccountQKCPresenceEncoding(t *testing.T) {
 
 	decoded := StateAccount{MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{123: uint256.NewInt(456)})}
 	require.NoError(t, rlp.DecodeBytes(drained, &decoded))
-	assert.Nil(t, decoded.MntBalances)
+	require.NotNil(t, decoded.MntBalances)
+	assert.Equal(t, 0, decoded.MntBalances.Len())
+	assert.False(t, decoded.IsBalanceUpdated())
 	reencoded, err := rlp.EncodeToBytes(&decoded)
 	require.NoError(t, err)
 	var reencodedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
-	assert.Empty(t, reencodedWire.TokenBal)
+	assert.Equal(t, []byte{0x00, 0xc0}, reencodedWire.TokenBal)
 }

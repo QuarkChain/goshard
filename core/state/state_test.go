@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 )
@@ -186,6 +187,81 @@ func TestSnapshot(t *testing.T) {
 func TestSnapshotEmpty(t *testing.T) {
 	s := newStateEnv()
 	s.state.RevertToSnapshot(s.state.Snapshot())
+}
+
+func TestBalanceChangeTracksQKCPresence(t *testing.T) {
+	state, _ := New(types.EmptyRootHash, NewDatabaseForTesting())
+	addr := common.BytesToAddress([]byte("qkc-presence"))
+	obj := state.getOrNewStateObject(addr)
+
+	obj.SetBalance(new(uint256.Int))
+	if obj.data.IsBalanceUpdated() {
+		t.Fatal("unchanged zero balance created a QKC presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, nil)
+
+	snapshot := state.Snapshot()
+	obj.SetBalance(uint256.NewInt(1000))
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("balance change did not create a QKC presence marker")
+	}
+	obj.SetBalance(new(uint256.Int))
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("draining QKC balance removed its presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
+	nestedSnapshot := state.Snapshot()
+	obj.SetBalance(uint256.NewInt(10))
+	state.RevertToSnapshot(nestedSnapshot)
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("reverting a later balance change removed earlier update history")
+	}
+	assertAccountTokenBalance(t, &obj.data, []byte{0x00, 0xc0})
+
+	state.RevertToSnapshot(snapshot)
+	obj = state.getStateObject(addr)
+	if obj.data.IsBalanceUpdated() {
+		t.Fatal("snapshot revert did not restore the nil QKC presence marker")
+	}
+	assertAccountTokenBalance(t, &obj.data, nil)
+}
+
+func TestBalanceChangeRevertKeepsExistingQKCPresence(t *testing.T) {
+	state, _ := New(types.EmptyRootHash, NewDatabaseForTesting())
+	addr := common.BytesToAddress([]byte("qkc-existing"))
+	obj := state.getOrNewStateObject(addr)
+	obj.SetBalance(uint256.NewInt(100))
+	obj.SetBalance(new(uint256.Int))
+	state.Finalise(false)
+	if !obj.data.IsBalanceUpdated() {
+		t.Fatal("finalising state removed an existing QKC balance update")
+	}
+
+	snapshot := state.Snapshot()
+	obj.SetBalance(uint256.NewInt(1000))
+	state.RevertToSnapshot(snapshot)
+	if !state.getStateObject(addr).data.IsBalanceUpdated() {
+		t.Fatal("snapshot revert removed an existing QKC presence marker")
+	}
+}
+
+func assertAccountTokenBalance(t *testing.T, account *types.StateAccount, want []byte) {
+	t.Helper()
+	encoded, err := rlp.EncodeToBytes(account)
+	if err != nil {
+		t.Fatalf("failed to encode account: %v", err)
+	}
+	var fields []rlp.RawValue
+	if err := rlp.DecodeBytes(encoded, &fields); err != nil {
+		t.Fatalf("failed to decode account fields: %v", err)
+	}
+	var tokenBalance []byte
+	if err := rlp.DecodeBytes(fields[1], &tokenBalance); err != nil {
+		t.Fatalf("failed to decode token balance: %v", err)
+	}
+	if !bytes.Equal(tokenBalance, want) {
+		t.Fatalf("unexpected token balance encoding: have %x, want %x", tokenBalance, want)
+	}
 }
 
 func TestCreateObjectRevert(t *testing.T) {

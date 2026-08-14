@@ -23,25 +23,48 @@ import (
 )
 
 func (s *stateObject) SetMntBalance(amount *uint256.Int, tokenID uint64) {
+	if !s.canSetMntBalance(amount, tokenID) {
+		return
+	}
+	s.setMntBalance(amount, tokenID)
+}
+
+func (s *stateObject) canSetMntBalance(amount *uint256.Int, tokenID uint64) bool {
 	if tokenID == qkccommon.DefaultTokenID {
 		log.Error("SetMntBalance called with QKC tokenID; use SetBalance", "addr", s.address)
-		return
+		return false
 	}
-	if amount != nil && !amount.IsZero() && s.GetMntBalance(tokenID).IsZero() && s.mntBalanceCount() >= qkccommon.TokenTrieThreshold {
-		log.Error("SetMntBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
-		return
+	if amount != nil && !amount.IsZero() && s.GetMntBalance(tokenID).IsZero() {
+		cnt := s.nonZeroMntBalanceCount()
+		if !s.Balance().IsZero() {
+			cnt++
+		}
+		if cnt >= qkccommon.TokenTrieThreshold {
+			log.Error("SetMntBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
+			return false
+		}
 	}
+	return true
+}
+
+func (s *stateObject) nonZeroMntBalanceCount() int {
+	if s.data.MntBalances == nil {
+		return 0
+	}
+	cnt := 0
+	for _, balance := range s.data.MntBalances.GetBalanceMap() {
+		if !balance.IsZero() {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+func (s *stateObject) setMntBalance(amount *uint256.Int, tokenID uint64) {
 	if s.data.MntBalances == nil {
 		s.data.MntBalances = qkccommon.NewEmptyTokenBalances()
 	}
 	s.data.MntBalances.SetValue(amount, tokenID)
-}
-
-func (s *stateObject) mntBalanceCount() int {
-	if s.data.MntBalances == nil {
-		return 0
-	}
-	return s.data.MntBalances.Len()
 }
 
 func (s *stateObject) AddMntBalance(amount *uint256.Int, tokenID uint64) {

@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 	"github.com/ethereum/go-ethereum/trie/transitiontrie"
@@ -268,6 +269,7 @@ func (s *stateObject) setState(key common.Hash, value common.Hash, origin common
 // finalise moves all dirty storage slots into the pending area to be hashed or
 // committed later. It is invoked at the end of every transaction.
 func (s *stateObject) finalise() {
+	s.data.FinaliseBalanceUpdates()
 	slotsToPrefetch := make([]common.Hash, 0, len(s.dirtyStorage))
 	for key, value := range s.dirtyStorage {
 		if origin, exist := s.uncommittedStorage[key]; exist && origin == value {
@@ -506,7 +508,15 @@ func (s *stateObject) AddBalance(amount *uint256.Int) uint256.Int {
 // SetBalance sets the balance for the object, and returns the previous balance.
 func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
 	prev := *s.data.Balance
+	if s.data.Balance.IsZero() && amount != nil && !amount.IsZero() && s.nonZeroMntBalanceCount() >= qkccommon.TokenTrieThreshold {
+		log.Error("SetBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
+		return prev
+	}
+	if s.data.Balance.Eq(amount) {
+		return prev
+	}
 	s.db.journal.balanceChange(s.address, s.data.Balance)
+	s.data.AddBalanceUpdate()
 	s.setBalance(amount)
 	return prev
 }

@@ -33,12 +33,13 @@ import (
 // StateAccount is the Ethereum consensus representation of accounts.
 // These objects are stored in the main account trie.
 type StateAccount struct {
-	Nonce        uint64
-	Balance      *uint256.Int
-	Root         common.Hash // merkle root of the storage trie
-	CodeHash     []byte
-	MntBalances  *qkccommon.TokenBalances // Non-QKC balances; non-nil also preserves token-entry presence.
-	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
+	Nonce              uint64
+	Balance            *uint256.Int
+	Root               common.Hash // merkle root of the storage trie
+	CodeHash           []byte
+	MntBalances        *qkccommon.TokenBalances // Non-QKC balances.
+	FullShardKey       uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
+	balanceUpdateCount uint64                   // Number of non-reverted QKC balance updates.
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -61,12 +62,39 @@ func (acct *StateAccount) Copy() *StateAccount {
 		mnt = acct.MntBalances.Copy()
 	}
 	return &StateAccount{
-		Nonce:        acct.Nonce,
-		Balance:      balance,
-		Root:         acct.Root,
-		CodeHash:     common.CopyBytes(acct.CodeHash),
-		MntBalances:  mnt,
-		FullShardKey: acct.FullShardKey,
+		Nonce:              acct.Nonce,
+		Balance:            balance,
+		Root:               acct.Root,
+		CodeHash:           common.CopyBytes(acct.CodeHash),
+		MntBalances:        mnt,
+		FullShardKey:       acct.FullShardKey,
+		balanceUpdateCount: acct.balanceUpdateCount,
+	}
+}
+
+// IsBalanceUpdated reports whether the QKC balance has been explicitly updated.
+func (acct *StateAccount) IsBalanceUpdated() bool {
+	return acct.balanceUpdateCount > 0
+}
+
+// AddBalanceUpdate records a QKC balance update.
+func (acct *StateAccount) AddBalanceUpdate() {
+	acct.balanceUpdateCount++
+}
+
+// RevertBalanceUpdate removes a reverted QKC balance update.
+func (acct *StateAccount) RevertBalanceUpdate() {
+	if acct.balanceUpdateCount == 0 {
+		panic("reverting untracked QKC balance update")
+	}
+	acct.balanceUpdateCount--
+}
+
+// FinaliseBalanceUpdates keeps committed update presence without retaining
+// the number of updates from journals that can no longer be reverted.
+func (acct *StateAccount) FinaliseBalanceUpdates() {
+	if acct.balanceUpdateCount > 0 {
+		acct.balanceUpdateCount = 1
 	}
 }
 
@@ -74,15 +102,13 @@ func (acct *StateAccount) Copy() *StateAccount {
 // with a byte slice. This format can be used to represent full-consensus format
 // or slim format which replaces the empty root and code hash as nil byte slice.
 // FullShardKey and MntBal are rlp:"optional" so accounts without QKC-specific
-// fields still decode cleanly from pre-MNT snapshots (trailing optional fields
-// decode to 0 / nil when absent). MntBal is last because it is less common, so
-// accounts with only FullShardKey don't need an empty MntBal placeholder.
+// fields still decode cleanly from older snapshots.
 //
 // MntBal holds TokenBalances.SerializeToBytes() output rather than the
 // *TokenBalances value directly: TokenBalances stores its balances in an
 // unexported map, so it is not RLP-struct-encodable and must go through the
-// same []byte serialization the trie account uses. Nil and non-nil empty
-// MntBalances remain distinct so QKC token presence survives slim encoding.
+// same []byte serialization the trie account uses. An empty serialized list in
+// MntBal preserves QKC token presence in the snapshot representation.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
@@ -90,7 +116,7 @@ type SlimAccount struct {
 	CodeHash []byte // Nil if hash equals to types.EmptyCodeHash
 	// QKC-specific fields; both optional so old snapshots remain readable.
 	FullShardKey uint32 `rlp:"optional"` // QuarkChain shard key
-	MntBal       []byte `rlp:"optional"` // SerializeToBytes output; nil = MntBalances nil
+	MntBal       []byte `rlp:"optional"` // Non-QKC TokenBalances.SerializeToBytes output
 }
 
 // SlimAccountRLP encodes the state account in 'slim RLP' format.
@@ -106,17 +132,18 @@ func SlimAccountRLP(account StateAccount) []byte {
 	if !bytes.Equal(account.CodeHash, EmptyCodeHash[:]) {
 		slim.CodeHash = account.CodeHash
 	}
-	// Preserve a non-nil empty MntBalances as a token-presence marker.
 	if account.MntBalances != nil {
-		if !account.MntBalances.IsBlank() {
-			mntBal, err := account.MntBalances.SerializeToBytes()
-			if err != nil {
-				panic(err)
-			}
-			slim.MntBal = mntBal
-		} else {
-			slim.MntBal = []byte{0x00, 0xc0} // Serialized empty token list.
+		mntBal, err := account.MntBalances.SerializeToBytes()
+		if err != nil {
+			panic(err)
 		}
+		if len(mntBal) == 0 {
+			slim.MntBal = []byte{0x00, 0xc0}
+		} else {
+			slim.MntBal = mntBal
+		}
+	} else if account.IsBalanceUpdated() {
+		slim.MntBal = []byte{0x00, 0xc0}
 	}
 	data, err := rlp.EncodeToBytes(slim)
 	if err != nil {
@@ -134,9 +161,7 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	}
 	var account StateAccount
 	account.Nonce, account.Balance, account.FullShardKey = slim.Nonce, slim.Balance, slim.FullShardKey
-
-	// A non-nil MntBal decodes back to TokenBalances; nil leaves MntBalances nil.
-	if slim.MntBal != nil {
+	if len(slim.MntBal) > 0 {
 		tb, err := qkccommon.NewTokenBalances(slim.MntBal)
 		if err != nil {
 			return nil, err

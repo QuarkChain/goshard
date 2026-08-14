@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/types"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
@@ -50,15 +51,38 @@ func TestMntBalanceBasic(t *testing.T) {
 	assert.Equal(t, uint256.NewInt(300), s.GetMntBalance(addr, tokenID))
 }
 
+func TestSubMntBalanceRejectsUnderflow(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x1235")
+
+	s.SubMntBalance(addr, uint256.NewInt(1), 100)
+
+	assert.False(t, s.Exist(addr), "underflow must not create an account")
+	assert.True(t, s.GetMntBalance(addr, 100).IsZero())
+}
+
+func TestAddMntBalanceRejectsOverflow(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x1236")
+	max := new(uint256.Int).Not(new(uint256.Int))
+	s.SetMntBalance(addr, max, 100)
+	dirtyCount := s.journal.dirties[addr]
+
+	s.AddMntBalance(addr, uint256.NewInt(1), 100)
+
+	assert.Equal(t, max, s.GetMntBalance(addr, 100))
+	assert.Equal(t, dirtyCount, s.journal.dirties[addr], "overflow must not add a dirty journal entry")
+}
+
 func TestMntRejectsQKCTokenID(t *testing.T) {
 	s := newMntTestStateDB(t)
 	addr := common.HexToAddress("0x5678")
-	s.CreateAccount(addr)
 
 	// SetMntBalance with QKC tokenID (35760) must be a no-op
 	s.SetMntBalance(addr, uint256.NewInt(999), qkccommon.DefaultTokenID)
 	assert.True(t, s.GetMntBalance(addr, qkccommon.DefaultTokenID).IsZero())
 	assert.True(t, s.GetBalance(addr).IsZero()) // QKC balance unchanged
+	assert.False(t, s.Exist(addr), "rejected update must not create an account")
 }
 
 func TestMntRejectsTokenAboveListLimit(t *testing.T) {
@@ -69,9 +93,77 @@ func TestMntRejectsTokenAboveListLimit(t *testing.T) {
 	for tokenID := uint64(1); tokenID <= qkccommon.TokenTrieThreshold; tokenID++ {
 		s.SetMntBalance(addr, uint256.NewInt(tokenID), tokenID)
 	}
+	dirtyCount := s.journal.dirties[addr]
 	s.SetMntBalance(addr, uint256.NewInt(17), qkccommon.TokenTrieThreshold+1)
 
 	assert.True(t, s.GetMntBalance(addr, qkccommon.TokenTrieThreshold+1).IsZero())
+	assert.Equal(t, dirtyCount, s.journal.dirties[addr], "rejected update must not add a dirty journal entry")
+	_, err := s.Commit(0, false, false)
+	require.NoError(t, err)
+}
+
+func TestMntTokenLimitIncludesQKC(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x5680")
+	s.CreateAccount(addr)
+	s.SetBalance(addr, uint256.NewInt(1), tracing.BalanceChangeUnspecified)
+
+	for tokenID := uint64(1); tokenID < qkccommon.TokenTrieThreshold; tokenID++ {
+		s.SetMntBalance(addr, uint256.NewInt(tokenID), tokenID)
+	}
+	s.SetMntBalance(addr, uint256.NewInt(16), qkccommon.TokenTrieThreshold)
+
+	assert.True(t, s.GetMntBalance(addr, qkccommon.TokenTrieThreshold).IsZero())
+	_, err := s.Commit(0, false, false)
+	require.NoError(t, err)
+}
+
+func TestQKCBalanceRejectsTokenAboveListLimit(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x5683")
+	s.CreateAccount(addr)
+
+	for tokenID := uint64(1); tokenID <= qkccommon.TokenTrieThreshold; tokenID++ {
+		s.SetMntBalance(addr, uint256.NewInt(tokenID), tokenID)
+	}
+	dirtyCount := s.journal.dirties[addr]
+	s.SetBalance(addr, uint256.NewInt(1), tracing.BalanceChangeUnspecified)
+
+	assert.True(t, s.GetBalance(addr).IsZero())
+	assert.Equal(t, dirtyCount, s.journal.dirties[addr], "rejected update must not add a dirty journal entry")
+	_, err := s.Commit(0, false, false)
+	require.NoError(t, err)
+}
+
+func TestMntTokenLimitIgnoresZeroEntries(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x5681")
+	s.CreateAccount(addr)
+
+	for tokenID := uint64(1); tokenID <= qkccommon.TokenTrieThreshold; tokenID++ {
+		s.SetMntBalance(addr, uint256.NewInt(tokenID), tokenID)
+	}
+	s.SetMntBalance(addr, new(uint256.Int), 1)
+	s.SetMntBalance(addr, uint256.NewInt(17), qkccommon.TokenTrieThreshold+1)
+
+	assert.Equal(t, uint256.NewInt(17), s.GetMntBalance(addr, qkccommon.TokenTrieThreshold+1))
+	_, err := s.Commit(0, false, false)
+	require.NoError(t, err)
+}
+
+func TestMntTokenLimitAllowsExistingTokenUpdates(t *testing.T) {
+	s := newMntTestStateDB(t)
+	addr := common.HexToAddress("0x5682")
+	s.CreateAccount(addr)
+
+	for tokenID := uint64(1); tokenID <= qkccommon.TokenTrieThreshold; tokenID++ {
+		s.SetMntBalance(addr, uint256.NewInt(tokenID), tokenID)
+	}
+	s.SetMntBalance(addr, uint256.NewInt(1000), 1)
+	s.SetMntBalance(addr, new(uint256.Int), 2)
+
+	assert.Equal(t, uint256.NewInt(1000), s.GetMntBalance(addr, 1))
+	assert.True(t, s.GetMntBalance(addr, 2).IsZero())
 	_, err := s.Commit(0, false, false)
 	require.NoError(t, err)
 }
@@ -106,6 +198,27 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 
 	assert.Equal(t, uint256.NewInt(1e18), s2.GetBalance(addr), "QKC balance")
 	assert.Equal(t, uint256.NewInt(500), s2.GetMntBalance(addr, 100), "MNT balance")
+}
+
+func TestSlimAccountToStateAccountPreservesQKCFields(t *testing.T) {
+	mnt := qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+		100: uint256.NewInt(500),
+	})
+	mntBal, err := mnt.SerializeToBytes()
+	require.NoError(t, err)
+
+	acct, err := slimAccountToStateAccount(&types.SlimAccount{
+		Balance:      uint256.NewInt(1000),
+		FullShardKey: 0x12345678,
+		MntBal:       mntBal,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint256.NewInt(1000), acct.Balance)
+	assert.Equal(t, uint32(0x12345678), acct.FullShardKey)
+	require.NotNil(t, acct.MntBalances)
+	assert.Equal(t, uint256.NewInt(500), acct.MntBalances.GetTokenBalance(100))
+	assert.Equal(t, types.EmptyRootHash, acct.Root)
+	assert.Equal(t, types.EmptyCodeHash.Bytes(), acct.CodeHash)
 }
 
 // TestEmptyAccountWithMntNotPruned guards the EIP-158 divergence: an account

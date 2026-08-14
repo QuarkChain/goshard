@@ -106,6 +106,10 @@ func (r *flatReader) Account(addr common.Address) (*types.StateAccount, error) {
 	if account == nil {
 		return nil, nil
 	}
+	return slimAccountToStateAccount(account)
+}
+
+func slimAccountToStateAccount(account *types.SlimAccount) (*types.StateAccount, error) {
 	acct := &types.StateAccount{
 		Nonce:        account.Nonce,
 		Balance:      account.Balance,
@@ -113,8 +117,7 @@ func (r *flatReader) Account(addr common.Address) (*types.StateAccount, error) {
 		Root:         common.BytesToHash(account.Root),
 		FullShardKey: account.FullShardKey,
 	}
-	// Decode the QKC MNT balances carried in the slim account (nil stays nil).
-	if account.MntBal != nil {
+	if len(account.MntBal) > 0 {
 		mnt, err := qkccommon.NewTokenBalances(account.MntBal)
 		if err != nil {
 			return nil, err

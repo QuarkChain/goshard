@@ -26,36 +26,37 @@ import (
 // ===== StateDB MNT methods =====
 
 func (s *StateDB) SetMntBalance(addr common.Address, amount *uint256.Int, tokenID uint64) {
+	if tokenID == qkccommon.DefaultTokenID {
+		return
+	}
 	obj := s.getOrNewStateObject(addr)
-	if obj == nil {
+	if obj == nil || !obj.canSetMntBalance(amount, tokenID) {
 		return
 	}
 	s.journal.mntBalanceChange(addr, obj.data.MntBalances)
-	obj.SetMntBalance(amount, tokenID)
+	obj.setMntBalance(amount, tokenID)
 }
 
 func (s *StateDB) AddMntBalance(addr common.Address, amount *uint256.Int, tokenID uint64) {
 	if amount.IsZero() {
 		return
 	}
-	obj := s.getOrNewStateObject(addr)
-	if obj == nil {
+	updated, overflow := new(uint256.Int).AddOverflow(s.GetMntBalance(addr, tokenID), amount)
+	if overflow {
 		return
 	}
-	s.journal.mntBalanceChange(addr, obj.data.MntBalances)
-	obj.AddMntBalance(amount, tokenID)
+	s.SetMntBalance(addr, updated, tokenID)
 }
 
 func (s *StateDB) SubMntBalance(addr common.Address, amount *uint256.Int, tokenID uint64) {
 	if amount.IsZero() {
 		return
 	}
-	obj := s.getOrNewStateObject(addr)
-	if obj == nil {
+	updated, underflow := new(uint256.Int).SubOverflow(s.GetMntBalance(addr, tokenID), amount)
+	if underflow {
 		return
 	}
-	s.journal.mntBalanceChange(addr, obj.data.MntBalances)
-	obj.SubMntBalance(amount, tokenID)
+	s.SetMntBalance(addr, updated, tokenID)
 }
 
 func (s *StateDB) GetMntBalance(addr common.Address, tokenID uint64) *uint256.Int {
