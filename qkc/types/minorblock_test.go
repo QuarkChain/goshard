@@ -386,9 +386,9 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	originalHash := block.Hash()
 	block.Size()
 
-	block.IHeader().SetNonce(1)
+	block.Header().SetNonce(1)
 	if block.Hash() != originalHash {
-		t.Fatal("IHeader exposed the block's internal header")
+		t.Fatal("Header exposed the block's internal header")
 	}
 	sealedHeader := block.Header()
 	sealed := block.WithSeal(sealedHeader)
@@ -398,6 +398,9 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	}
 
 	block.AddTx(goldenTxs()[0])
+	if block.hash.Load() != nil {
+		t.Fatal("AddTx did not clear the hash cache")
+	}
 	if block.size.Load() != nil {
 		t.Fatal("AddTx did not clear the size cache")
 	}
@@ -405,6 +408,18 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	block.Finalize(nil, common.Hash{}, nil, nil, nil, nil)
 	if block.size.Load() != nil {
 		t.Fatal("Finalize did not clear the size cache")
+	}
+
+	cursor := &XShardTxCursorInfo{RootBlockHeight: 1, MinorBlockIndex: 2, XShardDepositIndex: 3}
+	block.Finalize(nil, common.Hash{}, nil, nil, nil, cursor)
+	wantMetaHash := block.MetaHash()
+	wantHash := block.Hash()
+	cursor.RootBlockHeight = 9
+	if got := block.Meta().XShardTxCursorInfo.RootBlockHeight; got != 1 {
+		t.Fatalf("Finalize retained caller's cursor: got height %d, want 1", got)
+	}
+	if block.MetaHash() != wantMetaHash || block.Hash() != wantHash {
+		t.Fatal("caller cursor mutation changed finalized block hashes")
 	}
 }
 

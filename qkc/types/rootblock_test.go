@@ -149,9 +149,9 @@ func TestRootBlockMutationInvalidatesCaches(t *testing.T) {
 	originalHash := block.Hash()
 	block.Size()
 
-	block.IHeader().SetNonce(1)
+	block.Header().SetNonce(1)
 	if block.Hash() != originalHash {
-		t.Fatal("IHeader exposed the block's internal header")
+		t.Fatal("Header exposed the block's internal header")
 	}
 	sealedHeader := block.Header()
 	sealed := block.WithSeal(sealedHeader)

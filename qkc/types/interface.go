@@ -24,10 +24,6 @@ type IHeader interface {
 	GetDifficulty() *big.Int
 	GetNonce() uint64
 	GetExtra() []byte
-	SetCoinbase(account.Address)
-	SetExtra([]byte)
-	SetDifficulty(*big.Int)
-	SetNonce(uint64)
 	GetMixDigest() common.Hash
 }
 

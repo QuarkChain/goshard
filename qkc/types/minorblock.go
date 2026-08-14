@@ -445,7 +445,12 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 		xShardReceiveGasUsed = new(big.Int)
 	}
 
-	m.meta.XShardTxCursorInfo = xShardTxCursorInfo
+	if xShardTxCursorInfo == nil {
+		m.meta.XShardTxCursorInfo = nil
+	} else {
+		cursor := *xShardTxCursorInfo
+		m.meta.XShardTxCursorInfo = &cursor
+	}
 	m.meta.Root = rootHash
 	m.meta.GasUsed = &serialize.Uint256{Value: gasUsed}
 	m.meta.CrossShardGasUsed = &serialize.Uint256{Value: xShardReceiveGasUsed}
@@ -531,6 +536,7 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 // refreshes the cache.
 func (h *MinorBlock) AddTx(tx *Transaction) {
 	h.transactions = append(h.transactions, tx)
+	h.hash = atomic.Value{}
 	h.size = atomic.Value{}
 }
 
