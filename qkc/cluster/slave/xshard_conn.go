@@ -15,9 +15,8 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// xshardConn is a direct TCP connection to another slave for cross-shard
-// traffic, using 0-byte metadata (slave↔slave mode). Corresponds to Python's
-// SlaveConnection. It is package-private: callers only ever reach it through
+// xshardConn is a direct TCP connection to another slave, using 0-byte metadata
+// (slave↔slave mode). It is package-private: callers reach it only through
 // XshardPool, which owns construction, handshake, and lifecycle.
 type xshardConn struct {
 	*conn.BaseConn
@@ -32,14 +31,9 @@ type xshardConn struct {
 	pingOnce            sync.Once
 }
 
-// newXshardConn is the single low-level constructor for xshardConn. It only
-// wraps an already-established net.Conn: it initializes the BaseConn, the local
-// identity and state fields, and registers the serializers and handlers. It
-// does NOT dial, accept, ping, check duplicates, or register with a pool.
-//
-// net.Conn creation and ownership belong to the caller:
-//   - outbound: XshardPool.DialToSlave dials, then calls newXshardConn.
-//   - inbound:  XshardPool.HandleInbound wraps the accepted net.Conn.
+// newXshardConn wraps an established net.Conn as an xshardConn, registering the
+// serializers and handlers. It does not dial, accept, ping, or register with a
+// pool; net.Conn ownership belongs to the caller.
 func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *xshardConn {
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrameNoMeta(r, maxPayloadSize)
@@ -51,7 +45,6 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 		pingReceived:         make(chan struct{}),
 	}
 
-	// Register serializers for all slave-to-slave RPC opcodes.
 	xc.BaseConn.RegisterOpSerializers(map[byte]*conn.OpSerializer{
 		byte(wire.ClusterOpPing):                        conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 		byte(wire.ClusterOpAddXshardTxListRequest):      conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
@@ -69,12 +62,11 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 	return xc
 }
 
-// handlePing records peer identity and returns a PONG with this slave's identity.
+// handlePing records peer identity and replies with a PONG.
 func (x *xshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 
-	// First PING records identity (Python's "if not self.id"). An empty slave
-	// ID is accepted — Python only rejects an empty shard list.
+	// An empty ID is accepted; only an empty shard list is rejected.
 	x.stateMu.Lock()
 	if len(x.peerID) == 0 {
 		x.peerID = append([]byte(nil), ping.ID...)
@@ -116,7 +108,7 @@ func (x *xshardConn) handleBatchAddXshardTxList(req any) (any, error) {
 }
 
 // setRemoteIdentity records the peer identity for outbound connections, which
-// never receive a PING from the peer (Python sets it at creation).
+// never receive a PING.
 func (x *xshardConn) setRemoteIdentity(id []byte, shardList []uint32) {
 	x.stateMu.Lock()
 	defer x.stateMu.Unlock()
@@ -138,9 +130,9 @@ func (x *xshardConn) remoteFullShardIDList() []uint32 {
 	return append([]uint32(nil), x.peerFullShardIDList...)
 }
 
-// waitUntilPingReceived blocks until the first PING or connection close; it
-// returns false on close. Python blocks forever here — returning false is an
-// intentional divergence from Python's leak.
+// waitUntilPingReceived blocks until the first PING or connection close. It
+// returns false on close (an intentional divergence from Python, which blocks
+// forever).
 func (x *xshardConn) waitUntilPingReceived() bool {
 	select {
 	case <-x.pingReceived:
@@ -151,19 +143,12 @@ func (x *xshardConn) waitUntilPingReceived() bool {
 }
 
 // sendPing sends PING and returns the peer's id and shard list from PONG.
-// Corresponds to Python's SlaveConnection.send_ping.
 func (x *xshardConn) sendPing(ctx context.Context) (id []byte, shardList []uint32, err error) {
 	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
-		// TODO: Port RootBlock wire type. nil differs from Python's empty
-		// RootTip is intentionally nil for the current migration scope.
-		// Python's slave-to-slave PING serializes a non-nil empty RootBlock,
-		// whereas this Go migration has not yet ported the RootBlock wire type.
-		// This means the current Go PING is not byte-for-byte compatible with
-		// Python for this field, but the slave-to-slave handshake does not consume
-		// RootTip. Do not introduce a fake RootBlock type here; port the real
-		// RootBlock wire representation when RootBlock migration is implemented.
+		// RootTip stays nil until the RootBlock wire type is ported; the
+		// handshake does not consume it.
 		RootTip: nil,
 	})
 	if err != nil {
