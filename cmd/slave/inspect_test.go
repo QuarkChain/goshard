@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/internal/reexec"
 	"github.com/ethereum/go-ethereum/qkc/config"
+	"github.com/ethereum/go-ethereum/qkc/shard"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // initDataDir boots S0 from a fixture into dbRoot and stops it, leaving behind
@@ -99,6 +105,129 @@ func TestInspectDataDir(t *testing.T) {
 		}
 	}
 }
+
+// rewriteGenesisBlock reopens an initialized shard chaindb writable and replaces its
+// stored genesis block, standing in for a database that was corrupted underneath the
+// slave.
+func rewriteGenesisBlock(t *testing.T, dbPath string, mutate func(*types.MinorBlock)) {
+	t.Helper()
+	kv, err := pebble.New(dbPath, 16, 16, "qkc/test/", false)
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer kv.Close()
+	block, err := shard.ReadGenesisBlock(kv)
+	if err != nil || block == nil {
+		t.Fatalf("read genesis block: %v (block %v)", err, block)
+	}
+	mutate(block)
+	if err := shard.WriteGenesisBlock(kv, block); err != nil {
+		t.Fatalf("write genesis block: %v", err)
+	}
+}
+
+// TestInspectRejectsInconsistentGenesis is the reason inspect validates before it
+// prints. A minor block's hash is its header's hash alone, so a database whose meta
+// was replaced still holds the original, authentic-looking block hash — and inspect,
+// being config-free, has no config-derived encoding to compare against. Each mutation
+// here leaves the header untouched, so only recomputing what the header commits to
+// can catch it.
+func TestInspectRejectsInconsistentGenesis(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		want   string
+		mutate func(*types.MinorBlock)
+	}{
+		{
+			name:   "substituted state root",
+			want:   "stored genesis meta hashes to",
+			mutate: func(b *types.MinorBlock) { b.Meta.Root = common.HexToHash("0xdeadbeef") },
+		},
+		{
+			name:   "rewound xshard cursor",
+			want:   "stored genesis meta hashes to",
+			mutate: func(b *types.MinorBlock) { b.Meta.XShardTxCursor.MinorBlockIndex = 7 },
+		},
+		{
+			name:   "transactions in the genesis body",
+			want:   "the genesis body is empty",
+			mutate: func(b *types.MinorBlock) { b.TrackingData = []byte{0x01} },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbRoot := t.TempDir()
+			initDataDir(t, fixtures[0].path, dbRoot)
+			dbPath := filepath.Join(dbRoot, "shard-0x00000001")
+			rewriteGenesisBlock(t, dbPath, tc.mutate)
+
+			var buf bytes.Buffer
+			err := inspectDataDir(&buf, dbRoot)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("inspectDataDir err = %v, want %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "corrupt chaindb") {
+				t.Errorf("error does not name the cause: %v", err)
+			}
+			out := buf.String()
+			// No field of the mutated block may be presented as that shard's genesis:
+			// its report opens with the error line, not with the "shard 0x… (path):"
+			// header that introduces a field block. The healthy shard still prints.
+			if strings.Contains(out, "shard 0x00000001 ("+dbPath) {
+				t.Errorf("printed fields of a block that does not hold together:\n%s", out)
+			}
+			for _, want := range []string{
+				"shard 0x00000001: ",
+				"shard 0x00040001 (",
+				"2 shard(s) inspected, 1 failed",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("inspect output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestInspectRejectsHeadWithoutGenesis plants a head pointer in a chaindb that has no
+// genesis block. The slave writes the genesis block last, so a missing block means an
+// interrupted bootstrap — but only on a database holding nothing else. Reporting this
+// one as safely re-initializable would be wrong twice over: the state is unreachable
+// for this lifecycle, and the directory may not be a shard chaindb at all.
+func TestInspectRejectsHeadWithoutGenesis(t *testing.T) {
+	dbRoot := t.TempDir()
+	dbPath := filepath.Join(dbRoot, "shard-0x00000001")
+	kv, err := pebble.New(dbPath, 16, 16, "qkc/test/", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawdb.WriteHeadBlockHash(kv, common.HexToHash("0xabc"))
+	if err := kv.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	err = inspectDataDir(&buf, dbRoot)
+	if err == nil || !strings.Contains(err.Error(), "with no genesis block under it") {
+		t.Fatalf("inspectDataDir err = %v, want head-without-genesis failure", err)
+	}
+	if strings.Contains(buf.String(), "next boot re-initializes") {
+		t.Errorf("claimed a safe re-initialization for an impossible state:\n%s", buf.String())
+	}
+}
+
+// TestInspectReportsWriteFailure pins that a report which never reached the reader
+// fails the command instead of being summarized as a success.
+func TestInspectReportsWriteFailure(t *testing.T) {
+	dbRoot := t.TempDir()
+	initDataDir(t, fixtures[0].path, dbRoot)
+	if err := inspectDataDir(errWriter{}, dbRoot); !errors.Is(err, io.ErrClosedPipe) {
+		t.Errorf("inspectDataDir err = %v, want the write error", err)
+	}
+}
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 // TestInspectReportsMisplacedChaindb renames an initialized shard's chaindb to
 // another shard's directory name. The stored block names its own shard through

@@ -119,11 +119,11 @@ prints `hash: 0x5ad443efb7cf5246a3d1bbc1734bd02bf3a5d83bedeccfcfe707d0ebee03780d
 
 Read-only and config-free: scan `--datadir` for shard chaindb directories
 (`shard-0x{full_shard_id}/`), open each in read-only mode, and print the stored
-minor genesis block and chain head. A shard that cannot be opened or read is
-reported without aborting the others, and the exit status is non-zero if any
-shard failed. A running slave holds its chaindb locks (each shard then reports
-`resource temporarily unavailable`), so inspect a stopped node. The report goes
-to stdout; log lines go to stderr.
+minor genesis block and chain head. A shard that cannot be opened, read, or
+validated is reported without aborting the others, and the exit status is
+non-zero if any shard failed. A running slave holds its chaindb locks (each shard
+then reports `resource temporarily unavailable`), so inspect a stopped node. The
+report goes to stdout; log lines go to stderr.
 
 ```
 ./build/bin/slave inspect --datadir ./qkc-data/devnet
@@ -146,12 +146,28 @@ shard 0x00040001 (qkc-data/devnet/shard-0x00040001):
 2 shard(s) inspected, 0 failed
 ```
 
-The stored block names its own shard through its branch, so a chaindb sitting in
-another shard's directory is reported as a misplaced chaindb instead of being
-presented as that shard's genesis. A chaindb whose bootstrap was interrupted
-before the block committed prints `genesis block: none (bootstrap never
-completed; next boot re-initializes)` — the next `slave` run re-runs the fresh
-initialization path.
+Nothing is printed for a shard until everything the report would assert has been
+checked, so a database that fails is described by its error alone rather than
+having its fields presented as that shard's genesis:
+
+- **The block must hold together.** A minor block's hash is its header's hash
+  alone, and without the cluster config there is no derived encoding to compare
+  against, so the meta is rehashed and checked against the `hash_meta` the header
+  commits to. Otherwise a database whose meta was replaced would report the
+  original, authentic-looking block hash next to a substituted state root. Block 0
+  must also be block 0, with an empty body.
+- **The block must belong here.** The stored block names its own shard through its
+  branch; a chaindb sitting in another shard's directory is reported as a misplaced
+  chaindb.
+- **A missing block must be the only thing missing.** The genesis block is written
+  last, once the chain stands, so its absence is an interrupted bootstrap —
+  `genesis block: none (bootstrap never completed; next boot re-initializes)`, and
+  the next `slave` run re-runs the fresh path. A head pointer with no genesis under
+  it is not a state this lifecycle produces, and is reported rather than described
+  as safely re-initializable.
+
+A report that cannot be written fails the command instead of being summarized as a
+success.
 
 ## Fixtures and pyquarkchain cross-validation
 
