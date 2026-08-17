@@ -19,7 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// ── fake transport ────────────────────────────────────────────────────────────
+// -- fake transport -----------------------------------------------------------
 
 type fakeFrameTransport struct {
 	frames            chan *wire.Frame
@@ -138,6 +138,23 @@ func (t *staticReaderTransport) Close() error {
 
 func (t *staticReaderTransport) RemoteAddr() string { return "static" }
 
+// -- test helpers ------------------------------------------------------------
+
+// pingSer is a shared PING/PONG OpSerializer for test Config construction.
+var pingSer = OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
+
+// pingSerializers is a ready-to-use serializers map with only PING/PONG.
+var pingSerializers = map[byte]*OpSerializer{
+	byte(wire.ClusterOpPing): pingSer,
+}
+
+// pongHandler returns a minimal PONG handler for test server connections.
+func pongHandler() TypedHandler {
+	return func(req any) (any, error) {
+		return &wire.PongResponse{}, nil
+	}
+}
+
 // validPongPayload returns a serialized empty PongResponse for tests that need
 // to feed valid response frames through the fake transport.
 func validPongPayload(t *testing.T) []byte {
@@ -149,20 +166,36 @@ func validPongPayload(t *testing.T) []byte {
 	return payload
 }
 
-// registerPingSerializer registers a PING/PONG serializer on conn so that
-// BaseConn can deserialize inbound PONG responses.
-func registerPingSerializer(t *testing.T, conn *BaseConn) {
-	t.Helper()
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+// newConn creates a minimal BaseConn with no handlers or serializers.
+func newConn(tr FrameTransport) *BaseConn {
+	return NewBaseConn(Config{Transport: tr, Logger: log.New()})
+}
+
+// newPingConn creates a BaseConn with only PING/PONG serializer (client-side:
+// can send PING RPCs and receive PONG responses, but does not handle PING).
+func newPingConn(tr FrameTransport) *BaseConn {
+	return NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Logger:      log.New(),
 	})
 }
 
-// ── TCP test pair helper ──────────────────────────────────────────────────────
+// newPingServerConn creates a BaseConn with PING serializer + handler.
+func newPingServerConn(tr FrameTransport) *BaseConn {
+	return NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Logger: log.New(),
+	})
+}
 
 // newTestBaseConnPair creates a pair of BaseConns connected over a local TCP
-// socket, with PING/PONG serializer and a minimal PING handler registered on the
-// server side. The caller is responsible for calling cleanup.
+// socket, with PING/PONG serializer on both sides and a minimal PING handler on
+// the server side. The caller is responsible for calling cleanup.
 func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()) {
 	t.Helper()
 
@@ -189,27 +222,22 @@ func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()
 		t.Fatalf("accept: %v", acceptErr)
 	}
 
-	logger := log.New()
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrameNoMeta(r, 0)
 	}
-	client = NewBaseConnFromConn(clientConn, readFrame, wire.WriteFrameNoMeta, logger)
-	server = NewBaseConnFromConn(serverConn, readFrame, wire.WriteFrameNoMeta, logger)
 
-	// Register PING serializer on both sides so that the client can deserialize
-	// inbound PONG responses (BaseConn validates response payloads before
-	// rpc_id matching) and the server can deserialize PING requests.
-	pingSer := OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
-	client.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): pingSer,
+	client = NewBaseConn(Config{
+		Transport:   NewTCPTransport(clientConn, readFrame, wire.WriteFrameNoMeta),
+		Serializers: pingSerializers,
+		Logger:      log.New(),
 	})
-	server.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): pingSer,
-	})
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
+	server = NewBaseConn(Config{
+		Transport:   NewTCPTransport(serverConn, readFrame, wire.WriteFrameNoMeta),
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
 		},
+		Logger: log.New(),
 	})
 
 	cleanup = func() {
@@ -219,13 +247,55 @@ func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()
 	return
 }
 
-// ── BaseConn unit tests (fake transport) ─────────────────────────────────────
+// -- Config validation tests -------------------------------------------------
+
+func TestConfig_NilTransportPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil Transport")
+		}
+		msg, _ := r.(string)
+		if !strings.Contains(msg, "Transport") {
+			t.Fatalf("expected Transport in panic message, got %q", msg)
+		}
+	}()
+	NewBaseConn(Config{})
+}
+
+func TestConfig_NilSerializerPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil serializer")
+		}
+	}()
+	NewBaseConn(Config{
+		Transport:   newFakeFrameTransport(),
+		Serializers: map[byte]*OpSerializer{0x01: nil},
+	})
+}
+
+func TestConfig_NilHandlerPanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil handler")
+		}
+	}()
+	NewBaseConn(Config{
+		Transport: newFakeFrameTransport(),
+		Handlers:  map[byte]TypedHandler{0x01: nil},
+	})
+}
+
+// -- BaseConn unit tests (fake transport) -------------------------------------
 
 func TestBaseConn_CloseWaitsForOutboundWrite(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeStarted = make(chan struct{})
 	tr.releaseWrite = make(chan struct{})
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	result := make(chan error, 1)
@@ -270,7 +340,7 @@ func TestBaseConn_CloseInterruptsBlockedWriter(t *testing.T) {
 	base.writeStarted = make(chan struct{})
 	base.releaseWrite = make(chan struct{})
 	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	result := make(chan error, 1)
@@ -300,7 +370,7 @@ func TestBaseConn_CloseInterruptsBlockedWriter(t *testing.T) {
 }
 
 func TestBaseConn_CleanCloseDoesNotPublishError(t *testing.T) {
-	conn := NewBaseConn(newFakeFrameTransport(), log.New())
+	conn := newConn(newFakeFrameTransport())
 	conn.Start()
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close connection: %v", err)
@@ -316,21 +386,17 @@ func TestBaseConn_CloseReturnsTransportError(t *testing.T) {
 	closeErr := errors.New("close failed")
 	tr := newFakeFrameTransport()
 	tr.closeErr = closeErr
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	if err := conn.Close(); !errors.Is(err, closeErr) {
 		t.Fatalf("expected transport close error, got %v", err)
 	}
 }
 
-// TestBaseConn_CanceledRPCNotWritten verifies that a blocked SendRPC whose
-// context expires while waiting for writeMu does not write a frame. In the
-// pure-mutex model there is no writer queue; the blocked SendRPC checks
-// ctx.Err() after acquiring writeMu and returns without allocating an rpcID.
 func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeStarted = make(chan struct{})
 	tr.releaseWrite = make(chan struct{})
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	// RPC with background context — will hold writeMu and block in WriteFrame.
@@ -395,7 +461,7 @@ func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
 func TestConcurrentCloseAndSendRPC(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writes = make(chan *wire.Frame, 64)
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	const senders = 64
@@ -435,39 +501,41 @@ func TestConcurrentCloseAndSendRPC(t *testing.T) {
 	}
 }
 
-// TestBaseConn_SubmitWhileShutdown verifies that concurrent SubmitFrame and
+// TestBaseConn_WriteWhileShutdown verifies that concurrent writeFrame and
 // SendRPC during Close neither deadlock, race, nor panic. Close acquires mu
-// to mark the connection Closed (so submitters see a non-Active state and
+// to mark the connection Closed (so writers see a non-Active state and
 // return), then takes the writeMu barrier to drain in-flight writes before
-// closing the transport. Submitters blocked on writeMu are released once the
+// closing the transport. Writers blocked on writeMu are released once the
 // barrier completes, and any blocked writer is interrupted via the transport.
-func TestBaseConn_SubmitWhileShutdown(t *testing.T) {
+func TestBaseConn_WriteWhileShutdown(t *testing.T) {
 	base := newFakeFrameTransport()
 	base.writes = make(chan *wire.Frame, 4096)
 	base.writeStarted = make(chan struct{})
 	base.releaseWrite = make(chan struct{})
 	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
-	const submitters = 64
+	const writers = 64
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(submitters)
-	for i := 0; i < submitters; i++ {
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
 		i := i
 		go func() {
 			defer wg.Done()
 			<-start
 			for j := 0; j < 1000; j++ {
 				if i%2 == 0 {
-					if err := conn.SubmitFrame(&wire.Frame{
+					// writeFrame is the package-private raw write path
+					// (used internally by SendCommand and dispatch).
+					if err := conn.writeFrame(&wire.Frame{
 						Meta:    wire.ClusterMetadata{Branch: 1, ClusterPeerID: 99},
 						Opcode:  byte(wire.ClusterOpPong),
 						RPCID:   uint64(j),
 						Payload: []byte{0x01},
 					}); err != nil && err != ErrConnectionClosed {
-						t.Errorf("unexpected SubmitFrame error: %v", err)
+						t.Errorf("unexpected writeFrame error: %v", err)
 					}
 				} else {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
@@ -487,7 +555,7 @@ func TestBaseConn_SubmitWhileShutdown(t *testing.T) {
 	select {
 	case <-closeDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Close deadlocked with concurrent SubmitFrame/SendRPC")
+		t.Fatal("Close deadlocked with concurrent writeFrame/SendRPC")
 	}
 	wg.Wait()
 
@@ -503,20 +571,23 @@ func TestBaseConn_LateHandlerCompletedAfterClose(t *testing.T) {
 	base := newFakeFrameTransport()
 	base.releaseWrite = make(chan struct{})
 	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
-	conn := NewBaseConn(tr, log.New())
 
 	const op = byte(wire.ClusterOpPing)
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		op: OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
 	handlerStarted := make(chan struct{})
 	releaseHandler := make(chan struct{})
-	conn.RegisterTypedHandlers(map[byte]TypedHandler{
-		op: func(req any) (any, error) {
-			close(handlerStarted)
-			<-releaseHandler
-			return &wire.PongResponse{}, nil
+	conn := NewBaseConn(Config{
+		Transport: tr,
+		Serializers: map[byte]*OpSerializer{
+			op: OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 		},
+		Handlers: map[byte]TypedHandler{
+			op: func(req any) (any, error) {
+				close(handlerStarted)
+				<-releaseHandler
+				return &wire.PongResponse{}, nil
+			},
+		},
+		Logger: log.New(),
 	})
 
 	before := runtime.NumGoroutine()
@@ -574,8 +645,7 @@ func waitForGoroutines(t *testing.T, baseline int) {
 
 func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
+	conn := newPingConn(tr)
 	conn.Start()
 	defer conn.Close()
 
@@ -610,7 +680,7 @@ func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
 
 func TestBaseConn_CancelPreservesContextError(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 	defer conn.Close()
 
@@ -624,7 +694,7 @@ func TestBaseConn_CancelPreservesContextError(t *testing.T) {
 
 func TestBaseConn_SendRPCWithAlreadyCancelledContext(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 	defer conn.Close()
 
@@ -639,7 +709,7 @@ func TestBaseConn_SendRPCWithAlreadyCancelledContext(t *testing.T) {
 func TestBaseConn_WriteFailurePublishesError(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeErr = errors.New("write failed")
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
@@ -662,8 +732,7 @@ func TestBaseConn_LateResponseIsSilentlyIgnored(t *testing.T) {
 	// late responses are silently dropped regardless of delay.
 
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
+	conn := newPingConn(tr)
 	conn.Start()
 	defer conn.Close()
 
@@ -698,14 +767,17 @@ func TestBaseConn_LateResponseIsSilentlyIgnored(t *testing.T) {
 
 func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
-	conn.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			panic("handler panic test")
+	conn := NewBaseConn(Config{
+		Transport: tr,
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 		},
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(req any) (any, error) {
+				panic("handler panic test")
+			},
+		},
+		Logger: log.New(),
 	})
 	conn.Start()
 
@@ -723,8 +795,7 @@ func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
 
 func TestBaseConn_UnknownRPCIDResponseShutsDownConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
+	conn := newPingConn(tr)
 	conn.Start()
 	defer conn.Close()
 
@@ -750,8 +821,7 @@ func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 	pongPayload := validPongPayload(t)
 	for i := 0; i < iterations; i++ {
 		tr := newFakeFrameTransport()
-		conn := NewBaseConn(tr, log.New())
-		registerPingSerializer(t, conn)
+		conn := newPingConn(tr)
 		conn.Start()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -792,7 +862,7 @@ func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 
 func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	result := make(chan error, 1)
@@ -828,7 +898,7 @@ func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 // Error channel receives nothing, matching Python's close() on EOF.
 func TestBaseConn_CleanEOFDoesNotPublishError(t *testing.T) {
 	tr := newStaticReaderTransport(bytes.NewReader(nil))
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	<-conn.WaitUntilClosed()
@@ -850,7 +920,7 @@ func TestBaseConn_CleanEOFDoesNotPublishError(t *testing.T) {
 func TestBaseConn_TruncatedFramePublishesError(t *testing.T) {
 	// payload_len = 10 but the stream ends right after the length header.
 	tr := newStaticReaderTransport(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}))
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	select {
@@ -867,7 +937,7 @@ func TestBaseConn_TruncatedFramePublishesError(t *testing.T) {
 func TestBaseConn_WriteFailureWakesPendingRPC(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeErr = errors.New("write failed")
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
@@ -883,7 +953,7 @@ func TestBaseConn_WriteFailureWakesPendingRPC(t *testing.T) {
 func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writes = make(chan *wire.Frame, 64)
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	const senders = 32
@@ -926,8 +996,7 @@ func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 
 func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
+	conn := newPingConn(tr)
 	conn.Start()
 	defer conn.Close()
 
@@ -955,7 +1024,7 @@ func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
 
 func TestBaseConn_DoubleClose(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 
 	if err := conn.Close(); err != nil {
 		t.Fatalf("first Close failed: %v", err)
@@ -970,7 +1039,7 @@ func TestBaseConn_DoubleClose(t *testing.T) {
 
 func TestBaseConn_StartOnClosedConnectionIsNoOp(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Close()
 
 	// Start on an already-closed connection must be a no-op: no state
@@ -989,7 +1058,7 @@ func TestBaseConn_StartOnClosedConnectionIsNoOp(t *testing.T) {
 // readerDone.
 func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 
 	// Close a connection whose Start() was never called: readerDone is nil
 	// and readerLoop was never launched.
@@ -1017,7 +1086,7 @@ func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
 func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		tr := newFakeFrameTransport()
-		conn := NewBaseConn(tr, log.New())
+		conn := newConn(tr)
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -1053,14 +1122,13 @@ func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
 // validate the response opcode (see AbstractConnection.handle_metadata_and_raw_data).
 func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-
-	// Register PING and ADD_XSHARD_TX_LIST serializers so the wrong response
-	// opcode is a *known* response opcode that deserializes cleanly but does
-	// not match PING's expected PONG.
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing):                   OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-		byte(wire.ClusterOpAddXshardTxListRequest): OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+	conn := NewBaseConn(Config{
+		Transport: tr,
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing):                   OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+			byte(wire.ClusterOpAddXshardTxListRequest): OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+		},
+		Logger: log.New(),
 	})
 	conn.Start()
 	defer conn.Close()
@@ -1113,7 +1181,54 @@ func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 	}
 }
 
-// ── BaseConn integration tests (TCP pair) ────────────────────────────────────
+// -- SendCommand tests -------------------------------------------------------
+
+func TestBaseConn_SendCommandWritesFireAndForgetResponse(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := newPingServerConn(tr)
+	conn.Start()
+	defer conn.Close()
+
+	// SendCommand should write a frame with rpc_id=0.
+	if err := conn.SendCommand(byte(wire.ClusterOpPing), nil); err != nil {
+		t.Fatalf("SendCommand failed: %v", err)
+	}
+
+	select {
+	case f := <-tr.writes:
+		if f.RPCID != 0 {
+			t.Fatalf("expected rpc_id=0, got %d", f.RPCID)
+		}
+		if f.Opcode != byte(wire.ClusterOpPing) {
+			t.Fatalf("expected opcode 0x%x, got 0x%x", byte(wire.ClusterOpPing), f.Opcode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendCommand did not write a frame")
+	}
+
+	// The server should process it and write a PONG response with rpc_id=0
+	// (fire-and-forget: dispatch returns early when frame.RPCID == 0, so
+	// no response is written).
+	select {
+	case <-tr.writes:
+		t.Fatal("expected no response for fire-and-forget command")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no response frame.
+	}
+}
+
+func TestBaseConn_SendCommandOnClosedConnection(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := newConn(tr)
+	conn.Close()
+
+	err := conn.SendCommand(byte(wire.ClusterOpPing), nil)
+	if err != ErrConnectionClosed {
+		t.Fatalf("expected ErrConnectionClosed, got %v", err)
+	}
+}
+
+// -- BaseConn integration tests (TCP pair) -----------------------------------
 
 // TestBaseConn_CloseWakesPendingRPC verifies that Close wakes all pending RPCs.
 func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {
@@ -1149,13 +1264,7 @@ func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {
 // Sending a duplicate RPC ID causes the server to close the connection.
 func TestBaseConn_RPCIDMonotonic(t *testing.T) {
 	tr := newFakeFrameTransport()
-	server := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, server)
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
+	server := newPingServerConn(tr)
 	defer server.Close()
 
 	server.Start()
@@ -1192,13 +1301,7 @@ func TestBaseConn_RPCIDMonotonic(t *testing.T) {
 // connection.
 func TestBaseConn_RPCIDDecreasing(t *testing.T) {
 	tr := newFakeFrameTransport()
-	server := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, server)
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
+	server := newPingServerConn(tr)
 	defer server.Close()
 
 	server.Start()
@@ -1275,13 +1378,7 @@ func TestDispatch_UnsupportedOpcodeClosesConnection(t *testing.T) {
 // deserializer must consume exactly the payload length — no more, no less.
 func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	server := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, server)
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
+	server := newPingServerConn(tr)
 	defer server.Close()
 
 	server.Start()
@@ -1345,8 +1442,7 @@ func TestDispatch_ExactPayloadProcessesNormally(t *testing.T) {
 // close the connection.
 func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	client := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, client)
+	client := newPingConn(tr)
 	defer client.Close()
 
 	client.Start()
@@ -1381,8 +1477,7 @@ func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
 // response opcode causes the receiver to close the connection.
 func TestDispatch_UnknownResponseOpcodeClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	client := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, client)
+	client := newPingConn(tr)
 	defer client.Close()
 
 	client.Start()
@@ -1446,118 +1541,13 @@ func TestDispatch_ValidResponseBehaviorUnchanged(t *testing.T) {
 	}
 }
 
-// ── Configuration lifecycle tests ────────────────────────────────────────────
-
-// assertPanics runs fn and fails the test if it does not panic with a message
-// containing want.
-func assertPanics(t *testing.T, want string, fn func()) {
-	t.Helper()
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatalf("expected panic containing %q, got no panic", want)
-		}
-		msg, _ := r.(string)
-		if !strings.Contains(msg, want) {
-			t.Fatalf("expected panic containing %q, got %q", want, msg)
-		}
-	}()
-	fn()
-}
-
-// TestBaseConn_RegisterAfterStartPanics verifies that every Register*/Set*
-// method rejects mutation once the connection is Active, establishing the
-// invariant that Active => configuration immutable.
-func TestBaseConn_RegisterAfterStartPanics(t *testing.T) {
-	methods := []struct {
-		name string
-		call func(*BaseConn)
-	}{
-		{"RegisterTypedHandlers", func(c *BaseConn) {
-			c.RegisterTypedHandlers(map[byte]TypedHandler{
-				byte(wire.ClusterOpPing): func(any) (any, error) { return nil, nil },
-			})
-		}},
-		{"RegisterOpSerializers", func(c *BaseConn) {
-			c.RegisterOpSerializers(map[byte]*OpSerializer{
-				byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			})
-		}},
-		{"RegisterNonRPCOps", func(c *BaseConn) { c.RegisterNonRPCOps([]byte{1}) }},
-		{"SetForwarder", func(c *BaseConn) {
-			c.SetForwarder(func(*wire.Frame) bool { return false })
-		}},
-		{"SetValidateRPCID", func(c *BaseConn) {
-			c.SetValidateRPCID(func(uint64, uint64) bool { return true })
-		}},
-	}
-
-	for _, m := range methods {
-		t.Run(m.name, func(t *testing.T) {
-			conn := NewBaseConn(newFakeFrameTransport(), log.New())
-			conn.Start()
-			defer conn.Close()
-			assertPanics(t, "before Start", func() { m.call(conn) })
-		})
-	}
-}
-
-// TestBaseConn_StartFreezesConfiguration directly exercises the concern that a
-// caller doing RegisterOpSerializers → Start → RegisterTypedHandlers would end
-// up with an Active connection whose configuration is incomplete. The second
-// registration must be rejected (panic), never silently allowed.
-func TestBaseConn_StartFreezesConfiguration(t *testing.T) {
-	conn := NewBaseConn(newFakeFrameTransport(), log.New())
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
-	conn.Start()
-	defer conn.Close()
-
-	assertPanics(t, "before Start", func() {
-		conn.RegisterTypedHandlers(map[byte]TypedHandler{
-			byte(wire.ClusterOpPing): func(any) (any, error) { return nil, nil },
-		})
-	})
-}
-
-// TestBaseConn_ConcurrentRegisterStartStress races Register*/Set* against
-// Start. Both are serialized by mu: either the registration commits before the
-// Connecting→Active transition (so the config is complete when Active), or the
-// registration observes Active and panics. There is no interleaving that yields
-// a silently half-configured Active connection, and no data race.
-func TestBaseConn_ConcurrentRegisterStartStress(t *testing.T) {
-	for i := 0; i < 200; i++ {
-		conn := NewBaseConn(newFakeFrameTransport(), log.New())
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			<-start
-			defer func() { _ = recover() }() // panic is a valid outcome
-			conn.RegisterOpSerializers(map[byte]*OpSerializer{
-				byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			})
-		}()
-		go func() {
-			defer wg.Done()
-			<-start
-			conn.Start()
-		}()
-
-		close(start)
-		wg.Wait()
-		conn.Close()
-	}
-}
+// -- Concurrency state reader tests ------------------------------------------
 
 // TestBaseConn_ConcurrentStateReaders exercises the RLock path of
 // State/IsActive/IsClosed under concurrent reads while Close performs the
 // state write. The race detector verifies no unsynchronized access to state.
 func TestBaseConn_ConcurrentStateReaders(t *testing.T) {
-	conn := NewBaseConn(newFakeFrameTransport(), log.New())
+	conn := newConn(newFakeFrameTransport())
 	conn.Start()
 
 	stop := make(chan struct{})

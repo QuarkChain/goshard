@@ -37,6 +37,23 @@ type transport struct {
 	remoteAddr string
 }
 
+// NewTCPTransport creates a FrameTransport backed by a real TCP connection.
+// The readFrame and writeFrame functions define the wire codec (e.g.
+// wire.ReadFrame/wire.WriteFrame for master connections with 12-byte
+// metadata, or wire.ReadFrameNoMeta/wire.WriteFrameNoMeta for slave-slave
+// connections with 0-byte metadata).
+//
+// The returned transport implements interruptibleTransport, so BaseConn can
+// interrupt blocked reads during shutdown without closing the underlying
+// socket (the socket is closed separately in the shutdown barrier).
+func NewTCPTransport(
+	conn net.Conn,
+	readFrame func(io.Reader) (*wire.Frame, error),
+	writeFrame func(io.Writer, *wire.Frame) error,
+) FrameTransport {
+	return newTransport(conn, readFrame, writeFrame)
+}
+
 func newTransport(
 	conn net.Conn,
 	readFrame func(io.Reader) (*wire.Frame, error),
