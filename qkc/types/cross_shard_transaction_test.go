@@ -101,3 +101,27 @@ func TestCrossShardTransactionListRejectsUnsupportedVersion(t *testing.T) {
 	_, err := FromBytesToCrossShardTransactionList(common.FromHex("0000000000000000"))
 	assert.Error(t, err)
 }
+
+func TestCrossShardTransactionListDeserializePreservesStreamBoundary(t *testing.T) {
+	first := NewCrossShardTransactionList(nil)
+	second := NewCrossShardTransactionList([]*CrossShardTransactionDeposit{{
+		Value:       &serialize.Uint256{Value: new(big.Int)},
+		GasPrice:    &serialize.Uint256{Value: new(big.Int)},
+		GasRemained: &serialize.Uint256{Value: new(big.Int)},
+		RefundRate:  7,
+	}})
+
+	var encoded []byte
+	assert.NoError(t, first.Serialize(&encoded))
+	assert.NoError(t, second.Serialize(&encoded))
+
+	bb := serialize.NewByteBuffer(encoded)
+	var decodedFirst, decodedSecond CrossShardTransactionList
+	assert.NoError(t, decodedFirst.Deserialize(bb))
+	assert.Empty(t, decodedFirst.TXList)
+	assert.NoError(t, decodedSecond.Deserialize(bb))
+	if assert.Len(t, decodedSecond.TXList, 1) {
+		assert.Equal(t, uint8(7), decodedSecond.TXList[0].RefundRate)
+	}
+	assert.Equal(t, len(encoded), bb.GetOffset())
+}

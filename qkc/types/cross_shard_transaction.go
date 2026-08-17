@@ -68,13 +68,12 @@ func (c *CrossShardTransactionList) Deserialize(bb *serialize.ByteBuffer) error 
 	if c == nil {
 		return fmt.Errorf("nil cross-shard transaction list")
 	}
-	b, err := bb.ReadRemaining()
-	if err != nil {
+	var decoded crossShardTransactionListV1
+	if err := serialize.Deserialize(bb, &decoded); err != nil {
 		return err
 	}
-	decoded, err := FromBytesToCrossShardTransactionList(b)
-	if err != nil {
-		return err
+	if decoded.Version != crossShardTransactionListVersion {
+		return fmt.Errorf("unsupported cross-shard transaction list version %d", decoded.Version)
 	}
 	c.TXList = decoded.TXList
 	return nil
