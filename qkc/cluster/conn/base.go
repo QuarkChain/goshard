@@ -66,30 +66,15 @@ type rpcResult struct {
 // BaseConn is the shared RPC engine used by cluster connection
 // implementations.
 //
-// Concurrency model:
-//   - mu protects lifecycle, RPC state, and close state.
-//   - writeMu serializes transport writes and RPC ID/send ordering.
-//   - shutdownOnce ensures shutdown runs once.
-//   - Channels carry lifecycle/event notifications.
-//
 // Lock ordering: writeMu -> mu. Never acquire writeMu while holding mu.
-//
-// All configuration (handlers, serializers, forwarder, validateRPCID) is
-// immutable after construction — set via Config at NewBaseConn time and never
-// modified. This eliminates the previous Register*/Set* methods and their
-// associated lock contention.
 type BaseConn struct {
-	// transport is the frame I/O backend. It is a private field — external
-	// callers never access it directly. All writes go through the serialized
-	// internal path (writeFrame/writeFrameLocked), never through the
-	// transport directly.
+	// transport is the frame I/O backend. All writes go through
+	// writeFrame/writeFrameLocked.
 	transport FrameTransport
 
-	// Configuration. Immutable after construction (set from Config).
+	// Configuration. Immutable after construction.
 	typedHandlers map[byte]TypedHandler
 	nonRPCOps     map[byte]struct{}
-	// serializers is keyed by both request and response opcodes; each
-	// OpSerializer is installed under both keys during construction.
 	serializers   map[byte]*OpSerializer
 	forwarder     func(*wire.Frame) bool
 	validateRPCID func(clusterPeerID uint64, rpcID uint64) bool
@@ -119,12 +104,8 @@ type BaseConn struct {
 	log log.Logger
 }
 
-// NewBaseConn creates a BaseConn from the supplied configuration. The
-// configuration is validated and then frozen — no post-construction
-// mutation is possible.
-//
-// The caller is responsible for calling Start() to transition the connection
-// to ACTIVE and launch the reader loop.
+// NewBaseConn creates a BaseConn from the supplied configuration.
+// The caller is responsible for calling Start().
 func NewBaseConn(cfg Config) *BaseConn {
 	cfg.validate()
 
@@ -140,13 +121,11 @@ func NewBaseConn(cfg Config) *BaseConn {
 		serializers[ser.ResponseOpCode] = ser
 	}
 
-	// Copy nonRPCOps so the caller's map is not shared.
+	// Copy maps so the caller's maps are not shared.
 	nonRPCOps := make(map[byte]struct{}, len(cfg.NonRPCOps))
 	for op := range cfg.NonRPCOps {
 		nonRPCOps[op] = struct{}{}
 	}
-
-	// Copy handlers so the caller's map is not shared.
 	handlers := make(map[byte]TypedHandler, len(cfg.Handlers))
 	for op, h := range cfg.Handlers {
 		handlers[op] = h
@@ -186,18 +165,9 @@ func NewBaseConn(cfg Config) *BaseConn {
 //   WaitUntilActive        -> wait_until_active
 //   WaitUntilClosed        -> wait_until_closed
 //   IsActive / IsClosed    -> is_active / is_closed
-//
-// The raw frame write (Python's write_raw_data) is package-private
-// (writeFrame) — it is only used internally and by virtual connections
-// within the conn package. External callers must use SendRPC or SendCommand.
 
 // Start transitions the connection to ACTIVE and starts the reader loop.
 // If the connection is already closed, Start is a no-op.
-//
-// Idempotence is guaranteed by the state machine alone: state starts as
-// Connecting and the only transition out of it (to Active) happens here under
-// mu. Since no path returns state to Connecting, Start's side effects run at
-// most once.
 func (c *BaseConn) Start() {
 	c.mu.Lock()
 	if c.state != ConnectionStateConnecting {
@@ -207,9 +177,6 @@ func (c *BaseConn) Start() {
 	c.state = ConnectionStateActive
 	close(c.activeChan)
 
-	// Allocate the reader's done channel before spawning it. A non-nil
-	// readerDone marks that readerLoop has been scheduled; it is closed
-	// exactly once when readerLoop exits.
 	done := make(chan struct{})
 	c.readerDone = done
 	c.mu.Unlock()
@@ -233,16 +200,11 @@ func (c *BaseConn) Close() error {
 }
 
 // SendRPC sends a request without metadata and waits for its response.
-// This corresponds to Python's write_rpc_request with empty metadata.
 func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*wire.Frame, error) {
 	return c.SendRPCMeta(ctx, opcode, payload, wire.ClusterMetadata{})
 }
 
 // SendRPCMeta sends a request with metadata and waits for its response.
-// This corresponds to Python's write_rpc_request.
-//
-// rpc_id allocation, pending registration, and frame write are serialized
-// under writeMu to guarantee rpc_id ordering matches network send order.
 func (c *BaseConn) SendRPCMeta(
 	ctx context.Context,
 	opcode byte,
@@ -253,7 +215,7 @@ func (c *BaseConn) SendRPCMeta(
 		result: make(chan rpcResult, 1),
 	}
 
-	// Phase 1: allocate rpc_id + register pending (writeMu -> mu).
+	// Allocate rpc_id and register pending (writeMu -> mu).
 	c.writeMu.Lock()
 
 	c.mu.Lock()
@@ -277,20 +239,15 @@ func (c *BaseConn) SendRPCMeta(
 	rpcID := c.nextRPCID
 	c.pending[rpcID] = call
 
-	// AfterFunc is registered after pending assignment. mu is held
-	// throughout, so if ctx is already done, the cancelRPC goroutine
-	// blocks on mu until we unlock — it will always see a valid entry.
 	call.stop = context.AfterFunc(ctx, func() {
 		c.cancelRPC(rpcID, ctx.Err())
 	})
 	c.mu.Unlock()
 
-	// Phase 2: recheck under writeMu, then write.
+	// Recheck state before writing; the result may already be delivered.
 	c.mu.Lock()
 	_, stillPending := c.pending[rpcID]
 	if !stillPending || c.state != ConnectionStateActive {
-		// Cancelled or closed while waiting for write — result already
-		// delivered by cancelRPC or shutdown.
 		c.mu.Unlock()
 		c.writeMu.Unlock()
 		res := <-call.result
@@ -308,9 +265,8 @@ func (c *BaseConn) SendRPCMeta(
 	c.writeMu.Unlock()
 
 	if err != nil {
-		// writeFrameLocked does NOT call shutdown (it cannot — writeMu
-		// is still held and initiateShutdown needs writeMu as a barrier).
-		// Call shutdown here, after writeMu is released.
+		// writeFrameLocked cannot call shutdown (writeMu still held);
+		// call it here after releasing writeMu.
 		if !errors.Is(err, ErrConnectionClosed) {
 			c.shutdown(fmt.Errorf("write frame rpc=%d: %w", rpcID, err))
 		}
@@ -318,7 +274,7 @@ func (c *BaseConn) SendRPCMeta(
 		return nil, res.err
 	}
 
-	// Phase 3: wait for response / timeout / close.
+	// Wait for response / timeout / close.
 	res := <-call.result
 	if res.err != nil {
 		return nil, res.err
@@ -327,13 +283,7 @@ func (c *BaseConn) SendRPCMeta(
 }
 
 // SendCommand sends a fire-and-forget command (rpc_id=0, no response
-// expected). This corresponds to Python's write_command with rpc_id=0.
-//
-// The caller is responsible for serializing the payload. SendCommand does
-// not look up serializers — it wraps the payload into a frame with rpc_id=0
-// and writes it through the serialized path. The opcode does not need to be
-// registered in NonRPCOps (that set is only consulted on the receiving side
-// to validate that inbound fire-and-forget frames have rpc_id=0).
+// expected).
 func (c *BaseConn) SendCommand(opcode byte, payload []byte) error {
 	return c.SendCommandMeta(opcode, payload, wire.ClusterMetadata{})
 }
@@ -404,24 +354,12 @@ func rpcTimeoutError(err error) error {
 
 // -- Write path (package-private) ---------------------------------------------
 //
-// writeFrame is the single entry point for one-shot frame writes (SendCommand,
-// dispatch response write, virtual connection forwarding). It acquires writeMu
-// internally.
-//
-// writeFrameLocked is for callers that already hold writeMu (SendRPCMeta,
-// which needs rpc_id allocation and write under the same lock to guarantee
-// send ordering).
-//
-// Both check connection state and write through the transport. writeFrame
-// calls shutdown on write failure (after releasing writeMu); writeFrameLocked
-// does NOT call shutdown — the caller must release writeMu first, then call
-// shutdown. This prevents a deadlock: initiateShutdown acquires writeMu as a
-// barrier (step 3), so shutdown cannot be called while writeMu is held.
-// External callers never touch these — they use SendRPC or SendCommand.
+// writeFrame acquires writeMu internally and calls shutdown on write failure
+// (after releasing writeMu). writeFrameLocked assumes writeMu is already held
+// and does NOT call shutdown — the caller must release writeMu first, since
+// initiateShutdown acquires writeMu as a barrier and would deadlock otherwise.
 
-// writeFrame writes a pre-built frame through the serialized path. It is the
-// package-private equivalent of Python's write_raw_data: the frame's rpc_id,
-// opcode, and metadata are preserved as-is, and no RPC tracking is created.
+// writeFrame writes a pre-built frame through the serialized path.
 func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	c.writeMu.Lock()
 	err := c.writeFrameLocked(f)
@@ -432,14 +370,7 @@ func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	return err
 }
 
-// writeFrameLocked writes a frame assuming writeMu is already held. This is
-// used by SendRPCMeta (which holds writeMu across rpc_id allocation + write
-// to guarantee ordering) and by writeFrame (which acquires writeMu first).
-//
-// It does NOT call shutdown on write failure — the caller must release writeMu
-// first, then call shutdown. This is because initiateShutdown needs to acquire
-// writeMu as a barrier (step 3), and calling shutdown while writeMu is held
-// would deadlock.
+// writeFrameLocked writes a frame assuming writeMu is already held.
 func (c *BaseConn) writeFrameLocked(f *wire.Frame) error {
 	c.mu.Lock()
 	if c.state != ConnectionStateActive {
@@ -453,9 +384,8 @@ func (c *BaseConn) writeFrameLocked(f *wire.Frame) error {
 
 // -- readerLoop --------------------------------------------------------------
 
-// readerLoop is the single persistent goroutine. It reads frames from the
-// transport and dispatches them. Read errors trigger shutdown. done is closed
-// exactly once when readerLoop exits.
+// readerLoop reads frames from the transport and dispatches them.
+// Read errors trigger shutdown. done is closed exactly once when it exits.
 func (c *BaseConn) readerLoop(done chan struct{}) {
 	defer close(done)
 	for {
@@ -471,8 +401,6 @@ func (c *BaseConn) readerLoop(done chan struct{}) {
 // -- handleFrame -------------------------------------------------------------
 
 func (c *BaseConn) handleFrame(frame *wire.Frame) {
-	// Configuration is immutable after construction, so readerLoop (which
-	// only runs once the connection is Active) reads it without any lock.
 	fwd := c.forwarder
 	handler, isRequest := c.typedHandlers[frame.Opcode]
 	_, isNonRPC := c.nonRPCOps[frame.Opcode]
@@ -506,23 +434,13 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 		return
 	}
 
-	// Claim pattern: delete from pending under mu. Only one path
-	// (response, timeout, close) can complete each RPC.
+	// Only one path (response, timeout, close) can complete each RPC:
+	// delete from pending under mu, then deliver.
 	c.mu.Lock()
 	call, ok := c.pending[frame.RPCID]
 	if ok {
-		// Python compatibility:
-		//
-		// RPC responses are matched solely by rpc_id.
-		//
-		// Python's RPCConnection does not verify that the response opcode
-		// matches the original request's expected response opcode.
-		// If rpc_id matches a pending RPC, the response is delivered to
-		// the waiting caller and the connection remains active.
-		//
-		// Although validating the response opcode would be more defensive,
-		// doing so would diverge from Python behavior and break migration
-		// compatibility.
+		// Responses are matched solely by rpc_id (Python compatibility);
+		// the response opcode is not validated.
 		delete(c.pending, frame.RPCID)
 		c.mu.Unlock()
 		if call.stop != nil {
@@ -532,11 +450,7 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 		return
 	}
 
-	// Late response: check the timedOut table.
-	// TimedOut entries are permanent (matching Python's behaviour where
-	// cancelled futures stay in rpc_future_map until a response arrives
-	// or the connection closes).  A late response is silently dropped
-	// regardless of how much time has passed since the timeout.
+	// Late response for a timed-out RPC: drop it silently.
 	_, isTimedOut := c.timedOut[frame.RPCID]
 	if isTimedOut {
 		delete(c.timedOut, frame.RPCID)
@@ -566,9 +480,7 @@ func (c *BaseConn) handleRequest(frame *wire.Frame, handler TypedHandler, ser *O
 	}
 
 	if !isNonRPC {
-		// validateRPCID (and peerRPCID behind the default implementation) is
-		// owned exclusively by readerLoop — the sole caller of handleRequest —
-		// so no lock is required here.
+		// validateRPCID is owned exclusively by readerLoop, so no lock needed.
 		ok := c.validateRPCID(frame.Meta.ClusterPeerID, frame.RPCID)
 		if !ok {
 			c.log.Warn("incorrect rpc request id sequence", "rpcid", frame.RPCID)
@@ -619,8 +531,6 @@ func (c *BaseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeri
 		Payload: respPayload,
 	}
 
-	// writeFrame acquires writeMu internally and checks connection state.
-	// On write failure, shutdown is called inside writeFrame.
 	if err := c.writeFrame(respFrame); err != nil {
 		c.log.Debug("response write failed, connection shutting down", "rpcid", frame.RPCID, "err", err)
 	}
@@ -628,14 +538,9 @@ func (c *BaseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeri
 
 // -- cancelRPC ----------------------------------------------------------------
 
-// cancelRPC completes an RPC with a timeout error. It atomically removes the
-// RPC from pending and adds a timedOut entry to silence any late response —
-// both under the same mu lock to prevent a TOCTOU between readerLoop and
-// handleResponse.
-//
-// The timedOut entry lives until a late response arrives (and is silently
-// dropped) or the connection closes.  This matches Python's behaviour where
-// cancelled futures stay in rpc_future_map indefinitely.
+// cancelRPC completes an RPC with a timeout error. The pending deletion and
+// timedOut entry are set under the same mu lock, so a late response always
+// sees a consistent view.
 func (c *BaseConn) cancelRPC(rpcID uint64, cause error) {
 	c.mu.Lock()
 	call, ok := c.pending[rpcID]
@@ -645,10 +550,6 @@ func (c *BaseConn) cancelRPC(rpcID uint64, cause error) {
 	}
 	delete(c.pending, rpcID)
 
-	// Set timedOut atomically with the pending deletion so that a late
-	// response arriving concurrently always sees a consistent view:
-	// either "pending exists" (before cancel) or "timedOut exists"
-	// (after cancel). There is no window where both are empty.
 	c.timedOut[rpcID] = struct{}{}
 	c.mu.Unlock()
 
@@ -657,40 +558,36 @@ func (c *BaseConn) cancelRPC(rpcID uint64, cause error) {
 
 // -- Shutdown -----------------------------------------------------------------
 
-// shutdown is the non-blocking internal entry point. Multiple callers
-// (read failure, write failure, handler error/panic) may call concurrently;
-// sync.Once guarantees exactly one execution.
+// shutdown is the non-blocking internal entry point; sync.Once guarantees
+// exactly one execution across all concurrent callers.
 func (c *BaseConn) shutdown(cause error) {
 	c.initiateShutdown(cause)
 }
 
-// initiateShutdown performs the one-time state transition from any state to
-// Closed. It wakes all pending RPCs, interrupts blocked I/O, waits for
-// in-flight writes, and closes the transport.
+// initiateShutdown transitions to Closed, wakes pending RPCs, interrupts
+// blocked I/O, waits for in-flight writes, and closes the transport.
 //
-// Important: it does NOT wait for readerDone inside sync.Once — otherwise
-// readerLoop's own initiateShutdown call (triggered by transport.Close
-// unblocking ReadFrame) would deadlock. Close() waits for readerDone
-// outside sync.Once.
+// It must NOT wait for readerDone here: readerLoop calls initiateShutdown
+// itself, and Close() waits for readerDone outside sync.Once.
 func (c *BaseConn) initiateShutdown(cause error) {
 	c.shutdownOnce.Do(func() {
-		// Step 1: state transition + wake pending + clear timedOut.
+		// Collect completions under mu; run stop/send side effects outside.
+		var pending []*pendingRPC
+
 		c.mu.Lock()
 		if c.state != ConnectionStateClosed {
+			wasConnecting := c.state == ConnectionStateConnecting
+
 			c.state = ConnectionStateClosed
 			close(c.closedChan)
-			select {
-			case <-c.activeChan:
-			default:
+
+			if wasConnecting {
 				close(c.activeChan)
 			}
 
 			for id, call := range c.pending {
 				delete(c.pending, id)
-				if call.stop != nil {
-					call.stop()
-				}
-				call.result <- rpcResult{err: ErrConnectionClosed}
+				pending = append(pending, call)
 			}
 			for id := range c.timedOut {
 				delete(c.timedOut, id)
@@ -702,16 +599,14 @@ func (c *BaseConn) initiateShutdown(cause error) {
 		}
 		c.mu.Unlock()
 
-		// Step 2: interrupt blocked I/O.
-		if it, ok := c.transport.(interruptibleTransport); ok {
-			_ = it.interrupt()
+		for _, call := range pending {
+			if call.stop != nil {
+				call.stop()
+			}
+			call.result <- rpcResult{err: ErrConnectionClosed}
 		}
 
-		// Step 3: wait for in-flight writes to complete (barrier).
-		c.writeMu.Lock()
-		c.writeMu.Unlock()
-
-		// Step 4: close transport (no concurrent writes).
+		// Close the transport first so blocked reads/writes are interrupted.
 		if err := c.transport.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			c.mu.Lock()
 			if c.closeErr == nil {
@@ -720,7 +615,10 @@ func (c *BaseConn) initiateShutdown(cause error) {
 			c.mu.Unlock()
 		}
 
-		// Step 5: publish non-user error.
+		c.writeMu.Lock()
+		c.writeMu.Unlock()
+
+		// Publish the non-user error, if any.
 		if cause != nil {
 			select {
 			case c.errChan <- cause:

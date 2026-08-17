@@ -12,18 +12,14 @@ import (
 )
 
 // FrameTransport is the frame I/O contract required by BaseConn.
+//
+// Close must be safe to call concurrently with ReadFrame/WriteFrame and must
+// unblock any currently blocked I/O operation.
 type FrameTransport interface {
 	ReadFrame() (*wire.Frame, error)
 	WriteFrame(*wire.Frame) error
 	Close() error
 	RemoteAddr() string
-}
-
-// interruptibleTransport can interrupt a blocked read or write. TCP transport
-// implements this separately from close so BaseConn can wait for the writer
-// before completing the transport shutdown.
-type interruptibleTransport interface {
-	interrupt() error
 }
 
 type transport struct {
@@ -38,14 +34,7 @@ type transport struct {
 }
 
 // NewTCPTransport creates a FrameTransport backed by a real TCP connection.
-// The readFrame and writeFrame functions define the wire codec (e.g.
-// wire.ReadFrame/wire.WriteFrame for master connections with 12-byte
-// metadata, or wire.ReadFrameNoMeta/wire.WriteFrameNoMeta for slave-slave
-// connections with 0-byte metadata).
-//
-// The returned transport implements interruptibleTransport, so BaseConn can
-// interrupt blocked reads during shutdown without closing the underlying
-// socket (the socket is closed separately in the shutdown barrier).
+// readFrame and writeFrame define the wire codec.
 func NewTCPTransport(
 	conn net.Conn,
 	readFrame func(io.Reader) (*wire.Frame, error),
@@ -81,10 +70,6 @@ func (t *transport) WriteFrame(f *wire.Frame) error {
 		return fmt.Errorf("flush: %w", err)
 	}
 	return nil
-}
-
-func (t *transport) interrupt() error {
-	return t.conn.Close()
 }
 
 func (t *transport) Close() error {
