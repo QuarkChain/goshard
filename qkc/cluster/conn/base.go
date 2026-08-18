@@ -55,7 +55,7 @@ const (
 // pendingRPC represents an in-flight RPC call waiting for its response.
 type pendingRPC struct {
 	result chan rpcResult // cap 1
-	stop   func() bool    // context.AfterFunc stop
+	stop   func() bool    // context.AfterFunc stop; It is always non-nil.
 }
 
 type rpcResult struct {
@@ -66,10 +66,32 @@ type rpcResult struct {
 // BaseConn is the shared RPC engine used by cluster connection
 // implementations.
 //
-// Lock ordering: writeMu -> mu. Never acquire writeMu while holding mu.
+// Concurrency model:
+//
+//   - Reader: a single readerLoop owns transport.ReadFrame() and inbound
+//     frame processing. No other goroutine reads the transport.
+//
+//   - Writer: there is no writer loop. All transport.WriteFrame() calls are
+//     serialized by writeMu. SendRPC allocates rpc_id while holding writeMu,
+//     preserving the ordering between rpc_id allocation and serialized writes.
+//
+//   - State: mu protects the protocol state group:
+//     state, closeErr, nextRPCID, pending, timedOut, and readerDone.
+//
+// Lock rules:
+//
+//   - writeMu may be acquired before mu.
+//   - mu must never be held while acquiring writeMu.
+//   - mu must never be held during network I/O.
+//
+// Invariants:
+//
+//   - Never hold writeMu while waiting for an RPC response.
+//   - RPC completion is arbitrated by pending deletion under mu.
+//     Each RPC completes exactly once by response, timeout, or connection close.
 type BaseConn struct {
 	// transport is the frame I/O backend. All writes go through
-	// writeFrame/writeFrameLocked.
+	// writeMu; all reads through readerLoop.
 	transport FrameTransport
 
 	// Configuration. Immutable after construction.
@@ -78,7 +100,7 @@ type BaseConn struct {
 	serializers   map[byte]*OpSerializer
 	forwarder     func(*wire.Frame) bool
 
-	// -- Lifecycle + protocol state (mu) --
+	// -- Protocol state (mu) --
 	mu        sync.RWMutex
 	state     ConnectionState
 	pending   map[uint64]*pendingRPC
@@ -113,7 +135,7 @@ func NewBaseConn(cfg Config) *BaseConn {
 		logger = log.Root()
 	}
 
-	// Build the serializers map with both request and response opcodes.
+	// Register each serializer under both its request and response opcodes.
 	serializers := make(map[byte]*OpSerializer, len(cfg.Serializers)*2)
 	for opcode, ser := range cfg.Serializers {
 		serializers[opcode] = ser
@@ -180,7 +202,7 @@ func (c *BaseConn) Start() {
 
 // Close closes the connection and wakes all pending RPCs.
 func (c *BaseConn) Close() error {
-	c.initiateShutdown(nil)
+	c.shutdown(nil)
 	c.mu.RLock()
 	done := c.readerDone
 	c.mu.RUnlock()
@@ -210,24 +232,13 @@ func (c *BaseConn) SendRPCMeta(
 		result: make(chan rpcResult, 1),
 	}
 
-	// Allocate rpc_id and register pending (writeMu -> mu).
 	c.writeMu.Lock()
 
 	c.mu.Lock()
-	if c.state == ConnectionStateClosed {
+	if err := c.checkActiveLocked(); err != nil {
 		c.mu.Unlock()
 		c.writeMu.Unlock()
-		return nil, ErrConnectionClosed
-	}
-	if c.state != ConnectionStateActive {
-		c.mu.Unlock()
-		c.writeMu.Unlock()
-		return nil, ErrNotActive
-	}
-	if err := ctx.Err(); err != nil {
-		c.mu.Unlock()
-		c.writeMu.Unlock()
-		return nil, rpcTimeoutError(err)
+		return nil, err
 	}
 
 	c.nextRPCID++
@@ -239,44 +250,24 @@ func (c *BaseConn) SendRPCMeta(
 	})
 	c.mu.Unlock()
 
-	// Recheck state before writing; the result may already be delivered.
-	c.mu.Lock()
-	_, stillPending := c.pending[rpcID]
-	if !stillPending || c.state != ConnectionStateActive {
-		c.mu.Unlock()
-		c.writeMu.Unlock()
-		res := <-call.result
-		// res.resp is nil for timeout/close; only a (non-standard) early
-		// response can set it — return it rather than dropping it.
-		return res.resp, res.err
-	}
-	c.mu.Unlock()
-
 	frame := &wire.Frame{
 		Meta:    meta,
 		Opcode:  opcode,
 		RPCID:   rpcID,
 		Payload: payload,
 	}
-	err := c.writeFrameLocked(frame)
+	err := c.transport.WriteFrame(frame)
 	c.writeMu.Unlock()
 
 	if err != nil {
-		// writeFrameLocked cannot call shutdown (writeMu still held);
-		// call it here after releasing writeMu.
-		if !errors.Is(err, ErrConnectionClosed) {
-			c.shutdown(fmt.Errorf("write frame rpc=%d: %w", rpcID, err))
-		}
-		res := <-call.result
-		return res.resp, res.err
+		// The transport is unusable: trigger shutdown (sync.Once,
+		// non-blocking). Shutdown completes this RPC with ErrConnectionClosed
+		// alongside every other pending RPC.
+		c.shutdown(fmt.Errorf("write frame rpc=%d: %w", rpcID, err))
 	}
 
-	// Wait for response / timeout / close.
 	res := <-call.result
-	if res.err != nil {
-		return nil, res.err
-	}
-	return res.resp, nil
+	return res.resp, res.err
 }
 
 // SendCommand sends a fire-and-forget command (rpc_id=0, no response
@@ -345,38 +336,49 @@ func (c *BaseConn) pendingLen() int {
 	return len(c.pending)
 }
 
+// checkActiveLocked maps the connection state to the error an in-flight write
+// should return. It must be called with mu held: Active is nil, Closed is
+// ErrConnectionClosed, and Connecting is ErrNotActive.
+func (c *BaseConn) checkActiveLocked() error {
+	switch c.state {
+	case ConnectionStateActive:
+		return nil
+	case ConnectionStateClosed:
+		return ErrConnectionClosed
+	default:
+		return ErrNotActive
+	}
+}
+
 func rpcTimeoutError(err error) error {
 	return fmt.Errorf("rpc timeout: %w", err)
 }
 
-// -- Write path (package-private) ---------------------------------------------
+// -- Write path ---------------------------------------------------------------
 //
-// writeFrame acquires writeMu internally and calls shutdown on write failure
-// (after releasing writeMu). writeFrameLocked assumes writeMu is already held
-// and does NOT call shutdown — the caller must release writeMu first, since
-// initiateShutdown acquires writeMu as a barrier and would deadlock otherwise.
+// writeFrame serializes a frame write with writeMu; a write failure other than
+// ErrConnectionClosed triggers shutdown after writeMu is released (shutdown
+// acquires writeMu as a barrier, so it must never run while writeMu is held).
 
-// writeFrame writes a pre-built frame through the serialized path.
+// writeFrame writes a pre-built frame.
 func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	c.writeMu.Lock()
-	err := c.writeFrameLocked(f)
+
+	c.mu.Lock()
+	if err := c.checkActiveLocked(); err != nil {
+		c.mu.Unlock()
+		c.writeMu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	err := c.transport.WriteFrame(f)
 	c.writeMu.Unlock()
+
 	if err != nil && !errors.Is(err, ErrConnectionClosed) {
 		c.shutdown(fmt.Errorf("write frame: %w", err))
 	}
 	return err
-}
-
-// writeFrameLocked writes a frame assuming writeMu is already held.
-func (c *BaseConn) writeFrameLocked(f *wire.Frame) error {
-	c.mu.Lock()
-	if c.state != ConnectionStateActive {
-		c.mu.Unlock()
-		return ErrConnectionClosed
-	}
-	c.mu.Unlock()
-
-	return c.transport.WriteFrame(f)
 }
 
 // -- readerLoop --------------------------------------------------------------
@@ -388,7 +390,7 @@ func (c *BaseConn) readerLoop(done chan struct{}) {
 	for {
 		frame, err := c.transport.ReadFrame()
 		if err != nil {
-			c.initiateShutdown(normalizeReadErr(err))
+			c.shutdown(normalizeReadErr(err))
 			return
 		}
 		c.handleFrame(frame)
@@ -431,8 +433,8 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 		return
 	}
 
-	// Only one path (response, timeout, close) can complete each RPC:
-	// delete from pending under mu, then deliver.
+	// The pending deletion under mu decides which of response/timeout/close
+	// completes the RPC; only the winner delivers on result.
 	c.mu.Lock()
 	call, ok := c.pending[frame.RPCID]
 	if ok {
@@ -440,9 +442,7 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 		// the response opcode is not validated.
 		delete(c.pending, frame.RPCID)
 		c.mu.Unlock()
-		if call.stop != nil {
-			call.stop()
-		}
+		call.stop()
 		call.result <- rpcResult{resp: resp}
 		return
 	}
@@ -510,7 +510,7 @@ func (c *BaseConn) dispatch(frame *wire.Frame, handler TypedHandler, ser *OpSeri
 		return
 	}
 
-	// fire-and-forget: no response frame to send.
+	// Fire-and-forget commands (rpc_id=0) get no response frame.
 	if frame.RPCID == 0 {
 		return
 	}
@@ -558,52 +558,38 @@ func (c *BaseConn) cancelRPC(rpcID uint64, cause error) {
 // shutdown is the non-blocking internal entry point; sync.Once guarantees
 // exactly one execution across all concurrent callers.
 func (c *BaseConn) shutdown(cause error) {
-	c.initiateShutdown(cause)
-}
-
-// initiateShutdown transitions to Closed, wakes pending RPCs, interrupts
-// blocked I/O, waits for in-flight writes, and closes the transport.
-//
-// It must NOT wait for readerDone here: readerLoop calls initiateShutdown
-// itself, and Close() waits for readerDone outside sync.Once.
-func (c *BaseConn) initiateShutdown(cause error) {
 	c.shutdownOnce.Do(func() {
 		// Collect completions under mu; run stop/send side effects outside.
 		var pending []*pendingRPC
 
 		c.mu.Lock()
-		if c.state != ConnectionStateClosed {
-			wasConnecting := c.state == ConnectionStateConnecting
+		wasConnecting := c.state == ConnectionStateConnecting
 
-			c.state = ConnectionStateClosed
-			close(c.closedChan)
+		c.state = ConnectionStateClosed
+		if cause != nil {
+			c.closeErr = cause
+		}
+		close(c.closedChan)
+		if wasConnecting {
+			close(c.activeChan)
+		}
 
-			if wasConnecting {
-				close(c.activeChan)
-			}
-
-			for id, call := range c.pending {
-				delete(c.pending, id)
-				pending = append(pending, call)
-			}
-			for id := range c.timedOut {
-				delete(c.timedOut, id)
-			}
-
-			if cause != nil && c.closeErr == nil {
-				c.closeErr = cause
-			}
+		for id, call := range c.pending {
+			delete(c.pending, id)
+			pending = append(pending, call)
+		}
+		for id := range c.timedOut {
+			delete(c.timedOut, id)
 		}
 		c.mu.Unlock()
 
 		for _, call := range pending {
-			if call.stop != nil {
-				call.stop()
-			}
+			call.stop()
 			call.result <- rpcResult{err: ErrConnectionClosed}
 		}
 
-		// Close the transport first so blocked reads/writes are interrupted.
+		// Close transport to interrupt blocked I/O.
+		// Writes already accepted by the transport may still complete.
 		if err := c.transport.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			c.mu.Lock()
 			if c.closeErr == nil {

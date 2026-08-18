@@ -402,14 +402,19 @@ func TestBaseConn_CloseReturnsTransportError(t *testing.T) {
 	}
 }
 
-func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
+// TestBaseConn_CanceledRPCStillWritesFrame pins the new concurrency-model
+// semantics: rpc_id allocation and the write happen inside one writeMu
+// critical section, and there is deliberately no second context/state recheck
+// before the write (check-then-act adds no guarantee). So an RPC whose context
+// expires while it waits for writeMu still writes its request frame, returns
+// the timeout error, and its late response is silently dropped by the timedOut
+// mechanism without closing the connection.
+func TestBaseConn_CanceledRPCStillWritesFrame(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeStarted = make(chan struct{})
 	tr.releaseWrite = make(chan struct{})
-	conn := newConn(tr)
+	conn := newPingConn(tr)
 	conn.Start()
-
-	// First RPC parks in WriteFrame holding writeMu.
 	firstResult := make(chan error, 1)
 	go func() {
 		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
@@ -437,8 +442,9 @@ func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
 
 	time.Sleep(30 * time.Millisecond)
 
-	// Releasing the slow write lets the blocked RPC acquire writeMu, see the
-	// expired context, and return without allocating an rpcID or writing a frame.
+	// Releasing the slow write unblocks the second RPC. It acquires writeMu,
+	// allocates rpc_id 2, and writes its frame regardless of the expired
+	// context; the timeout is delivered via the AfterFunc completion path.
 	close(tr.releaseWrite)
 
 	select {
@@ -450,10 +456,39 @@ func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
 		t.Fatal("blocked RPC did not return after writer unblocked")
 	}
 
+	// The timed-out RPC's request frame is still written (rpc_id already
+	// allocated under writeMu; no pre-write recheck by design).
 	select {
 	case frame := <-tr.writes:
-		t.Fatalf("canceled RPC was written: %#v", frame)
-	case <-time.After(20 * time.Millisecond):
+		if frame.RPCID != 2 {
+			t.Fatalf("expected rpc_id=2 for second RPC, got %d", frame.RPCID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed-out RPC did not write its request frame")
+	}
+
+	// The late response for the timed-out rpc_id is dropped, not treated as an
+	// unknown rpc_id (which would close the connection). The timed-out RPC must
+	// be gone from pending and its timedOut marker cleared by the late
+	// response; the first RPC (rpc_id=1) legitimately remains pending.
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 2, Payload: validPongPayload(t)}
+	select {
+	case <-time.After(50 * time.Millisecond):
+		if conn.IsClosed() {
+			t.Fatal("late response for timed-out RPC closed the connection")
+		}
+	case <-conn.WaitUntilClosed():
+		t.Fatal("late response for timed-out RPC closed the connection")
+	}
+	conn.mu.RLock()
+	_, p2 := conn.pending[2]
+	_, t2 := conn.timedOut[2]
+	conn.mu.RUnlock()
+	if p2 {
+		t.Fatal("timed-out RPC remains pending after late response")
+	}
+	if t2 {
+		t.Fatal("timedOut entry not cleared by late response")
 	}
 
 	if err := conn.Close(); err != nil {
