@@ -519,3 +519,43 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	require.NoError(t, rlp.DecodeBytes(reencoded, &reencodedWire))
 	assert.Empty(t, reencodedWire.TokenBal)
 }
+
+// TestZeroBalanceUpdateRoundTrip distinguishes the consensus account codec
+// from the slim codec used to persist and transfer snapshot accounts. The
+// consensus codec intentionally normalizes an explicitly updated zero balance
+// away on decode, while slim encoding must preserve it across a sync roundtrip.
+func TestZeroBalanceUpdateRoundTrip(t *testing.T) {
+	account := NewEmptyStateAccount()
+	account.AddBalanceUpdate()
+
+	consensusEncoded, err := rlp.EncodeToBytes(&account)
+	require.NoError(t, err)
+	var consensusWire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(consensusEncoded, &consensusWire))
+	require.Equal(t, []byte{0x00, 0xc0}, consensusWire.TokenBal)
+	consensusDecoded := new(StateAccount)
+	require.NoError(t, rlp.DecodeBytes(consensusEncoded, consensusDecoded))
+	require.False(t, consensusDecoded.IsBalanceUpdated())
+	consensusReencoded, err := rlp.EncodeToBytes(consensusDecoded)
+	require.NoError(t, err)
+	assert.NotEqual(t, consensusEncoded, consensusReencoded)
+	require.NoError(t, rlp.DecodeBytes(consensusReencoded, &consensusWire))
+	assert.Empty(t, consensusWire.TokenBal)
+
+	slimEncoded := SlimAccountRLP(*account)
+	var slimWire SlimAccount
+	require.NoError(t, rlp.DecodeBytes(slimEncoded, &slimWire))
+	require.Equal(t, []byte{0x00, 0xc0}, slimWire.MntBal)
+	slimDecoded, err := FullAccount(slimEncoded)
+	require.NoError(t, err)
+	require.True(t, slimDecoded.IsBalanceUpdated())
+
+	slimReencoded := SlimAccountRLP(*slimDecoded)
+	require.NoError(t, rlp.DecodeBytes(slimReencoded, &slimWire))
+	assert.Equal(t, []byte{0x00, 0xc0}, slimWire.MntBal)
+
+	consensusAfterSync, err := rlp.EncodeToBytes(slimDecoded)
+	require.NoError(t, err)
+	require.NoError(t, rlp.DecodeBytes(consensusAfterSync, &consensusWire))
+	assert.Equal(t, []byte{0x00, 0xc0}, consensusWire.TokenBal)
+}

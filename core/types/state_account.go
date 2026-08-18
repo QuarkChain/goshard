@@ -100,10 +100,12 @@ func (acct *StateAccount) FinaliseBalanceUpdates() {
 	}
 }
 
-// SlimAccount is the compact RLP account format used by state snapshots and
-// related readers. goshard adds FullShardKey and MntBal so snapshots preserve
-// QuarkChain-specific account state. Both fields are optional in RLP to keep
-// older snapshots readable.
+// SlimAccount is the compact RLP account format used by state snapshots,
+// pathdb readers, and account iterators. To support snapshots in goshard, the
+// standard format must be extended with FullShardKey and MntBal so snapshots
+// preserve QuarkChain-specific account state. The added fields are optional
+// trailing RLP fields, keeping old snapshots readable and leaving room for
+// future extensions without changing the existing account format.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
