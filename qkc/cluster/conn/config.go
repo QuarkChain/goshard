@@ -4,7 +4,6 @@ package conn
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
@@ -28,18 +27,14 @@ type Config struct {
 	NonRPCOps map[byte]struct{}
 
 	// Forwarder optionally intercepts inbound frames before normal dispatch.
+	// It runs inline on the reader goroutine: it must not block for long,
+	// must not call SendRPC on this same connection (the response would
+	// require the blocked reader), and must synchronize any shared state it
+	// touches on its own.
 	Forwarder func(*wire.Frame) bool
-
-	// ValidateRPCID optionally validates inbound RPC IDs.
-	ValidateRPCID func(clusterPeerID uint64, rpcID uint64) bool
 
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger
-
-	// WriteTimeout bounds how long a single frame write may block on the
-	// transport. Zero (default) means no timeout. Only takes effect for
-	// transports that support per-write deadlines.
-	WriteTimeout time.Duration
 }
 
 // validate checks configuration invariants.

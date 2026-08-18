@@ -59,8 +59,8 @@ type pendingRPC struct {
 }
 
 type rpcResult struct {
-	frame *wire.Frame
-	err   error
+	resp any
+	err  error
 }
 
 // BaseConn is the shared RPC engine used by cluster connection
@@ -77,7 +77,6 @@ type BaseConn struct {
 	nonRPCOps     map[byte]struct{}
 	serializers   map[byte]*OpSerializer
 	forwarder     func(*wire.Frame) bool
-	validateRPCID func(clusterPeerID uint64, rpcID uint64) bool
 
 	// -- Lifecycle + protocol state (mu) --
 	mu        sync.RWMutex
@@ -146,11 +145,6 @@ func NewBaseConn(cfg Config) *BaseConn {
 		state:         ConnectionStateConnecting,
 		log:           logger,
 	}
-	if cfg.ValidateRPCID != nil {
-		rc.validateRPCID = cfg.ValidateRPCID
-	} else {
-		rc.validateRPCID = rc.defaultValidateRPCID
-	}
 	return rc
 }
 
@@ -200,17 +194,18 @@ func (c *BaseConn) Close() error {
 }
 
 // SendRPC sends a request without metadata and waits for its response.
-func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (*wire.Frame, error) {
+func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (any, error) {
 	return c.SendRPCMeta(ctx, opcode, payload, wire.ClusterMetadata{})
 }
 
 // SendRPCMeta sends a request with metadata and waits for its response.
+// Returns the deserialized response object (single-deserialization path).
 func (c *BaseConn) SendRPCMeta(
 	ctx context.Context,
 	opcode byte,
 	payload []byte,
 	meta wire.ClusterMetadata,
-) (*wire.Frame, error) {
+) (any, error) {
 	call := &pendingRPC{
 		result: make(chan rpcResult, 1),
 	}
@@ -251,7 +246,9 @@ func (c *BaseConn) SendRPCMeta(
 		c.mu.Unlock()
 		c.writeMu.Unlock()
 		res := <-call.result
-		return nil, res.err
+		// res.resp is nil for timeout/close; only a (non-standard) early
+		// response can set it — return it rather than dropping it.
+		return res.resp, res.err
 	}
 	c.mu.Unlock()
 
@@ -271,7 +268,7 @@ func (c *BaseConn) SendRPCMeta(
 			c.shutdown(fmt.Errorf("write frame rpc=%d: %w", rpcID, err))
 		}
 		res := <-call.result
-		return nil, res.err
+		return res.resp, res.err
 	}
 
 	// Wait for response / timeout / close.
@@ -279,7 +276,7 @@ func (c *BaseConn) SendRPCMeta(
 	if res.err != nil {
 		return nil, res.err
 	}
-	return res.frame, nil
+	return res.resp, nil
 }
 
 // SendCommand sends a fire-and-forget command (rpc_id=0, no response
@@ -446,7 +443,7 @@ func (c *BaseConn) handleResponse(frame *wire.Frame, ser *OpSerializer) {
 		if call.stop != nil {
 			call.stop()
 		}
-		call.result <- rpcResult{frame: frame}
+		call.result <- rpcResult{resp: resp}
 		return
 	}
 
@@ -480,8 +477,8 @@ func (c *BaseConn) handleRequest(frame *wire.Frame, handler TypedHandler, ser *O
 	}
 
 	if !isNonRPC {
-		// validateRPCID is owned exclusively by readerLoop, so no lock needed.
-		ok := c.validateRPCID(frame.Meta.ClusterPeerID, frame.RPCID)
+		// defaultValidateRPCID is owned exclusively by readerLoop, so no lock needed.
+		ok := c.defaultValidateRPCID(frame.RPCID)
 		if !ok {
 			c.log.Warn("incorrect rpc request id sequence", "rpcid", frame.RPCID)
 			c.shutdown(fmt.Errorf("incorrect rpc request id sequence"))
@@ -630,7 +627,7 @@ func (c *BaseConn) initiateShutdown(cause error) {
 
 // -- RPC ID validation (default) ---------------------------------------------
 
-func (c *BaseConn) defaultValidateRPCID(clusterPeerID uint64, rpcID uint64) bool {
+func (c *BaseConn) defaultValidateRPCID(rpcID uint64) bool {
 	if int64(rpcID) <= c.peerRPCID {
 		return false
 	}
