@@ -100,17 +100,10 @@ func (acct *StateAccount) FinaliseBalanceUpdates() {
 	}
 }
 
-// SlimAccount is a modified version of an Account, where the root is replaced
-// with a byte slice. This format can be used to represent full-consensus format
-// or slim format which replaces the empty root and code hash as nil byte slice.
-// FullShardKey and MntBal are rlp:"optional" so accounts without QKC-specific
-// fields still decode cleanly from older snapshots.
-//
-// MntBal holds TokenBalances.SerializeToBytes() output rather than the
-// *TokenBalances value directly: TokenBalances stores its balances in an
-// unexported map, so it is not RLP-struct-encodable and must go through the
-// same []byte serialization the trie account uses. MntBal also carries an
-// explicit zero-QKC update through the internal snapshot representation.
+// SlimAccount is the compact RLP account format used by state snapshots and
+// related readers. goshard adds FullShardKey and MntBal so snapshots preserve
+// QuarkChain-specific account state. Both fields are optional in RLP to keep
+// older snapshots readable.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
