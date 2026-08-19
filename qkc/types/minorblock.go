@@ -8,7 +8,6 @@ package types
 import (
 	"math/big"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -155,15 +154,6 @@ type MinorBlock struct {
 	// caches
 	hash atomic.Value
 	size atomic.Value
-
-	// Td is used by package core to store the total difficulty
-	// of the chain up to and including the block.
-	td *big.Int
-
-	// These fields are used by package eth to track
-	// inter-peer block relay.
-	ReceivedAt   time.Time
-	ReceivedFrom interface{}
 }
 
 // "external" block encoding. used for qkc protocol, etc.
@@ -181,7 +171,7 @@ type extminorblock struct {
 // The values of Root, ReceiptHash and Bloom in header
 // are ignored and set to values derived from the given txs and receipts.
 func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, receipts []*Receipt, trackingdata []byte) *MinorBlock {
-	b := &MinorBlock{header: CopyMinorBlockHeader(header), meta: CopyMinorBlockMeta(meta), td: new(big.Int)}
+	b := &MinorBlock{header: CopyMinorBlockHeader(header), meta: CopyMinorBlockMeta(meta)}
 
 	b.meta.TxHash = CalculateMerkleRoot(Transactions(txs))
 	if len(txs) > 0 {
@@ -402,9 +392,7 @@ func (b *MinorBlock) IHeader() IHeader {
 
 // WithMiningResult returns a new block with the data from b and update nonce and mixDigest.
 //
-// signature is ignored: minor block headers carry no signature field (only
-// RootBlockHeader does), so there is nowhere to put it. The parameter exists
-// because IBlock is shared with RootBlock.
+// signature is ignored because minor block headers carry no signature field.
 func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
 	cpy := CopyMinorBlockHeader(b.header)
 	cpy.Nonce = nonce
@@ -452,9 +440,13 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 		m.meta.XShardTxCursorInfo = &cursor
 	}
 	m.meta.Root = rootHash
-	m.meta.GasUsed = &serialize.Uint256{Value: gasUsed}
-	m.meta.CrossShardGasUsed = &serialize.Uint256{Value: xShardReceiveGasUsed}
-	m.header.CoinbaseAmount = coinbaseAmount
+	m.meta.GasUsed = &serialize.Uint256{Value: new(big.Int).Set(gasUsed)}
+	m.meta.CrossShardGasUsed = &serialize.Uint256{Value: new(big.Int).Set(xShardReceiveGasUsed)}
+	if coinbaseAmount == nil {
+		m.header.CoinbaseAmount = nil
+	} else {
+		m.header.CoinbaseAmount = coinbaseAmount.Copy()
+	}
 	m.meta.TxHash = CalculateMerkleRoot(m.Transactions())
 	m.meta.ReceiptHash = DeriveSha(receipts)
 	m.header.MetaHash = m.meta.Hash()

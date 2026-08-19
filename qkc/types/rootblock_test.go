@@ -32,8 +32,6 @@ func TestRootBlockEncoding(t *testing.T) {
 		t.Fatal("Serialize error: ", err)
 	}
 
-	key, _ := crypto.HexToECDSA("c987d4506fb6824639f9a9e3b8834584f5165e94680501d1b0044071cd36c3b3")
-
 	check := func(f string, got, want interface{}) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s mismatch: got %v, want %v", f, got, want)
@@ -87,7 +85,6 @@ func TestRootBlockEncoding(t *testing.T) {
 		t.Fatal("Serialize error: ", err)
 	}
 
-	block.SignWithPrivateKey(key)
 	check("header", block.header, &blockHeader)
 	check("headers", block.minorBlockHeaders.Len(), headers.Len())
 	check("headers[0]", block.minorBlockHeaders[0].Hash(), headers[0].Hash())
@@ -107,68 +104,30 @@ func TestNewRootBlockEmptyMinorHeaderRoot(t *testing.T) {
 	}
 }
 
-func TestRootBlockSignRefreshesHash(t *testing.T) {
-	block := NewRootBlockWithHeader(&RootBlockHeader{
-		CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
-		Difficulty:      big.NewInt(1),
-		TotalDifficulty: big.NewInt(1),
-	})
-	unsignedHash := block.Hash()
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := block.SignWithPrivateKey(key); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := block.Hash(), block.Header().Hash(); got != want {
-		t.Fatalf("cached hash mismatch: got %x, want %x", got, want)
-	}
-	if block.Hash() == unsignedHash {
-		t.Fatal("signing did not refresh the cached hash")
-	}
-	if !block.header.VerifySignature(key.PublicKey) {
-		t.Fatal("generated signature did not verify")
-	}
-}
-
-func TestRootBlockWithBodyTrackingData(t *testing.T) {
-	block := NewRootBlockWithHeader(&RootBlockHeader{}).WithBody(nil, []byte{1, 2, 3})
-	if got, want := block.TrackingData(), []byte{1, 2, 3}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("tracking data mismatch: got %x, want %x", got, want)
-	}
-}
-
-func TestRootBlockMutationInvalidatesCaches(t *testing.T) {
-	header := &RootBlockHeader{
-		CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
-		Difficulty:      big.NewInt(1),
-		TotalDifficulty: big.NewInt(1),
-	}
-	block := NewRootBlockWithHeader(header)
-	originalHash := block.Hash()
-	block.Size()
-
-	block.Header().SetNonce(1)
-	if block.Hash() != originalHash {
-		t.Fatal("Header exposed the block's internal header")
-	}
-	sealedHeader := block.Header()
-	sealed := block.WithSeal(sealedHeader)
-	sealedHeader.Difficulty.SetInt64(2)
-	if sealed.Difficulty().Cmp(big.NewInt(1)) != 0 {
-		t.Fatal("WithSeal retained mutable header fields")
-	}
-
+func TestRootBlockCopiesBody(t *testing.T) {
 	minorHeader, _ := testMinorBlockHeader()
-	block.AddMinorBlockHeader(minorHeader)
-	if block.size.Load() != nil {
-		t.Fatal("AddMinorBlockHeader did not clear the size cache")
+	trackingData := []byte{1, 2, 3}
+	block := NewRootBlock(&RootBlockHeader{}, MinorBlockHeaders{minorHeader}, trackingData)
+	wantHash := block.MinorBlockHeaders()[0].Hash()
+
+	minorHeader.Time++
+	trackingData[0] = 9
+	if got := block.MinorBlockHeaders()[0].Hash(); got != wantHash {
+		t.Fatal("NewRootBlock retained the caller's minor header")
 	}
-	block.Size()
-	block.Finalize(nil, nil, common.Hash{})
-	if block.size.Load() != nil {
-		t.Fatal("Finalize did not clear the size cache")
+	if got := block.TrackingData(); got[0] != 1 {
+		t.Fatal("NewRootBlock retained the caller's tracking data")
+	}
+
+	headers := block.MinorBlockHeaders()
+	headers[0].Time++
+	returnedTrackingData := block.TrackingData()
+	returnedTrackingData[0] = 9
+	if got := block.MinorBlockHeaders()[0].Hash(); got != wantHash {
+		t.Fatal("MinorBlockHeaders exposed the block's internal header")
+	}
+	if got := block.TrackingData(); got[0] != 1 {
+		t.Fatal("TrackingData exposed the block's internal data")
 	}
 }
 
@@ -239,12 +198,14 @@ func TestRootBlockHeaderSignature(t *testing.T) {
 	}
 
 	var rootBlockHeader RootBlockHeader
-	rootBlock := NewRootBlockWithHeader(&rootBlockHeader)
 	check("rootBlockHeader Signature ", rootBlockHeader.Signature, [65]byte{})
 	checkErr("", rootBlockHeader.VerifySignature(privateKey.PublicKey), true)
-	rootBlock.SignWithPrivateKey(privateKey)
-	checkErr("rootBlockHeader Signature ", rootBlock.header.Signature, [65]byte{})
-	check("", rootBlock.header.VerifySignature(privateKey.PublicKey), true)
+	signature, err := crypto.Sign(rootBlockHeader.SealHash().Bytes(), privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(rootBlockHeader.Signature[:], signature)
+	check("", rootBlockHeader.VerifySignature(privateKey.PublicKey), true)
 
 }
 

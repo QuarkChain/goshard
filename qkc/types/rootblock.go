@@ -9,11 +9,9 @@
 package types
 
 import (
-	"bytes"
 	"crypto/ecdsa"
 	"math/big"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -98,66 +96,6 @@ func (h *RootBlockHeader) NumberU64() uint64 { return uint64(h.Number) }
 
 func (h *RootBlockHeader) GetVersion() uint32 { return h.Version }
 
-func (h *RootBlockHeader) SetExtra(data []byte) {
-	h.Extra = common.CopyBytes(data)
-}
-
-func (h *RootBlockHeader) SetDifficulty(difficulty *big.Int) {
-	h.Difficulty = difficulty
-}
-
-func (h *RootBlockHeader) SetNonce(nonce uint64) {
-	h.Nonce = nonce
-}
-
-func (h *RootBlockHeader) SetCoinbase(addr account.Address) {
-	h.Coinbase = addr
-}
-
-func (h *RootBlockHeader) CreateBlockToAppend(createTime *uint64, difficulty *big.Int, address *account.Address, nonce *uint64, extraData []byte) *RootBlock {
-	if createTime == nil {
-		preTime := h.Time + 1
-		createTime = &preTime
-	}
-
-	if difficulty == nil {
-		difficulty = h.Difficulty
-	}
-	totalDifficulty := new(big.Int).Add(h.TotalDifficulty, difficulty)
-	if address == nil {
-		empty := account.CreatEmptyAddress(0)
-		address = &empty
-	}
-
-	if nonce == nil {
-		zeroNonce := uint64(0)
-		nonce = &zeroNonce
-	}
-
-	if extraData == nil {
-		extraData = make([]byte, 0)
-	}
-
-	header := &RootBlockHeader{
-		Version:         h.Version,
-		Number:          h.Number + 1,
-		ParentHash:      h.Hash(),
-		MinorHeaderHash: common.Hash{},
-		Coinbase:        *address,
-		CoinbaseAmount:  qkcCommon.NewEmptyTokenBalances(),
-		Time:            *createTime,
-		Difficulty:      difficulty,
-		TotalDifficulty: totalDifficulty,
-		Nonce:           *nonce,
-		Extra:           extraData,
-	}
-	return &RootBlock{
-		header:            header,
-		minorBlockHeaders: make(MinorBlockHeaders, 0),
-		trackingdata:      []byte{},
-	}
-}
-
 // Block represents an entire block in the QuarkChain.
 type RootBlock struct {
 	header            *RootBlockHeader
@@ -167,15 +105,6 @@ type RootBlock struct {
 	// caches
 	hash atomic.Value
 	size atomic.Value
-
-	// Td is used by package core to store the total difficulty
-	// of the chain up to and including the block.
-	td *big.Int
-
-	// These fields are used by package eth to track
-	// inter-peer block relay.
-	ReceivedAt   time.Time
-	ReceivedFrom interface{}
 }
 
 func (b *RootBlock) IHeader() IHeader {
@@ -189,20 +118,17 @@ type extrootblock struct {
 	Trackingdata      []byte            `bytesizeofslicelen:"2"`
 }
 
-// NewBlock creates a new block. The input data is copied,
-// changes to header and to the field values will not affect the
-// block.
-//
-// The values of MinorHeaderHash, ReceiptHash and Bloom in header
-// are ignored and set to values derived from the given txs, uncles
-// and receipts.
+// NewRootBlock creates a root block and copies all inputs. MinorHeaderHash in
+// the copied header is replaced with the commitment derived from mbHeaders.
 func NewRootBlock(header *RootBlockHeader, mbHeaders MinorBlockHeaders, trackingdata []byte) *RootBlock {
-	b := &RootBlock{header: CopyRootBlockHeader(header), td: new(big.Int)}
+	b := &RootBlock{header: CopyRootBlockHeader(header)}
 
 	b.header.MinorHeaderHash = CalculateMerkleRoot(MinorBlockHeaders(mbHeaders))
 	if len(mbHeaders) > 0 {
 		b.minorBlockHeaders = make(MinorBlockHeaders, len(mbHeaders))
-		copy(b.minorBlockHeaders, mbHeaders)
+		for i, header := range mbHeaders {
+			b.minorBlockHeaders[i] = CopyMinorBlockHeader(header)
+		}
 	}
 	if trackingdata != nil && len(trackingdata) > 0 {
 		b.trackingdata = make([]byte, len(trackingdata))
@@ -268,19 +194,25 @@ func (b *RootBlock) Serialize(w *[]byte) error {
 	return err
 }
 
-func (b *RootBlock) MinorBlockHeaders() MinorBlockHeaders { return b.minorBlockHeaders }
+func (b *RootBlock) MinorBlockHeaders() MinorBlockHeaders {
+	headers := make(MinorBlockHeaders, len(b.minorBlockHeaders))
+	for i, header := range b.minorBlockHeaders {
+		headers[i] = CopyMinorBlockHeader(header)
+	}
+	return headers
+}
 
 func (b *RootBlock) MinorBlockHeader(hash common.Hash) *MinorBlockHeader {
 	for _, minorBlockHeader := range b.minorBlockHeaders {
 		if minorBlockHeader.Hash() == hash {
-			return minorBlockHeader
+			return CopyMinorBlockHeader(minorBlockHeader)
 		}
 	}
 
 	return nil
 }
 
-func (b *RootBlock) TrackingData() []byte { return b.trackingdata }
+func (b *RootBlock) TrackingData() []byte { return common.CopyBytes(b.trackingdata) }
 
 func (b *RootBlock) Version() uint32                          { return b.header.Version }
 func (b *RootBlock) Number() uint32                           { return b.header.Number }
@@ -301,7 +233,7 @@ func (b *RootBlock) Header() *RootBlockHeader { return CopyRootBlockHeader(b.hea
 func (b *RootBlock) Content() []IHashable {
 	items := make([]IHashable, len(b.minorBlockHeaders), len(b.minorBlockHeaders))
 	for i, item := range b.minorBlockHeaders {
-		items[i] = item
+		items[i] = CopyMinorBlockHeader(item)
 	}
 	return items
 }
@@ -319,52 +251,6 @@ func (b *RootBlock) Size() common.StorageSize {
 	return common.StorageSize(len(bytes))
 }
 
-// WithMiningResult returns a new block with the data from b and update nonce and mixDigest
-func (b *RootBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
-	cpy := CopyRootBlockHeader(b.header)
-	cpy.Nonce = nonce
-	cpy.MixDigest = mixDigest
-	if signature != nil {
-		copy(cpy.Signature[:], signature[:])
-	}
-	return b.WithSeal(cpy)
-}
-
-func (b *RootBlock) SignWithPrivateKey(prv *ecdsa.PrivateKey) error {
-	hash := b.header.SealHash()
-	sig, err := crypto.Sign(hash[:], prv)
-	if err != nil {
-		return err
-	}
-
-	copy(b.header.Signature[:], sig)
-	b.hash.Store(b.header.Hash())
-	return nil
-}
-
-// WithSeal returns a new block with the data from b but the header replaced with
-// the sealed one.
-func (b *RootBlock) WithSeal(header *RootBlockHeader) *RootBlock {
-	return &RootBlock{
-		header:            CopyRootBlockHeader(header),
-		minorBlockHeaders: b.minorBlockHeaders,
-		trackingdata:      b.trackingdata,
-	}
-}
-
-// WithBody returns a new block with the given minorBlockHeaders contents.
-func (b *RootBlock) WithBody(minorBlockHeaders MinorBlockHeaders, trackingdata []byte) *RootBlock {
-	block := &RootBlock{
-		header:            CopyRootBlockHeader(b.header),
-		minorBlockHeaders: make(MinorBlockHeaders, len(minorBlockHeaders)),
-		trackingdata:      make([]byte, len(trackingdata)),
-	}
-
-	copy(block.minorBlockHeaders, minorBlockHeaders)
-	copy(block.trackingdata, trackingdata)
-	return block
-}
-
 // Hash returns the keccak256 hash of b's header.
 // The hash is computed on the first call and cached thereafter.
 func (b *RootBlock) Hash() common.Hash {
@@ -377,49 +263,9 @@ func (b *RootBlock) Hash() common.Hash {
 }
 
 func (b *RootBlock) GetTrackingData() []byte {
-	return b.trackingdata
+	return common.CopyBytes(b.trackingdata)
 }
 
 func (b *RootBlock) GetSize() common.StorageSize {
 	return b.Size()
-}
-
-func (b *RootBlock) Finalize(coinbaseAmount *qkcCommon.TokenBalances, coinbaseAddress *account.Address, root common.Hash) *RootBlock {
-	if coinbaseAmount == nil {
-		coinbaseAmount = qkcCommon.NewEmptyTokenBalances()
-	}
-
-	if coinbaseAddress == nil {
-		a := account.CreatEmptyAddress(0)
-		coinbaseAddress = &a
-	}
-	b.header.MinorHeaderHash = CalculateMerkleRoot(b.minorBlockHeaders)
-	b.header.CoinbaseAmount = coinbaseAmount
-	b.header.Coinbase = *coinbaseAddress
-	if !bytes.Equal(root.Bytes(), common.Hash{}.Bytes()) {
-		b.header.Root = root
-	} else {
-		b.header.Root = EmptyTrieHash
-	}
-	b.hash.Store(b.header.Hash())
-	b.size = atomic.Value{}
-	return b
-}
-
-// AddMinorBlockHeader appends to the body without touching the header, so it
-// leaves header.MinorHeaderHash — and therefore any Hash() already cached —
-// stale. Callers must Finalize before relying on Hash(); Finalize recomputes the
-// merkle root and refreshes the cache.
-func (b *RootBlock) AddMinorBlockHeader(header *MinorBlockHeader) {
-	b.minorBlockHeaders = append(b.minorBlockHeaders, header)
-	b.size = atomic.Value{}
-}
-
-func (b *RootBlock) ExtendMinorBlockHeaderList(headers []*MinorBlockHeader, createTime uint64) {
-	for _, header := range headers {
-		if header.Time <= createTime {
-			b.minorBlockHeaders = append(b.minorBlockHeaders, header)
-		}
-	}
-	b.size = atomic.Value{}
 }

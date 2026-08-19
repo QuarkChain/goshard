@@ -421,6 +421,26 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	if block.MetaHash() != wantMetaHash || block.Hash() != wantHash {
 		t.Fatal("caller cursor mutation changed finalized block hashes")
 	}
+
+	gasUsed := big.NewInt(11)
+	xShardGasUsed := big.NewInt(12)
+	coinbaseAmount := qkcCommon.NewEmptyTokenBalances()
+	coinbaseAmount.SetValue(uint256.NewInt(13), 1)
+	block.Finalize(nil, common.Hash{}, gasUsed, xShardGasUsed, coinbaseAmount, nil)
+	wantMetaHash = block.MetaHash()
+	wantHash = block.Hash()
+	gasUsed.SetInt64(21)
+	xShardGasUsed.SetInt64(22)
+	coinbaseAmount.SetValue(uint256.NewInt(23), 1)
+	if block.GasUsed().Cmp(big.NewInt(11)) != 0 || block.CrossShardGasUsed().Cmp(big.NewInt(12)) != 0 {
+		t.Fatal("Finalize retained caller-owned gas values")
+	}
+	if got := block.CoinbaseAmount().GetBalanceMap()[1]; got.Cmp(uint256.NewInt(13)) != 0 {
+		t.Fatalf("Finalize retained caller-owned coinbase amount: got %v, want 13", got)
+	}
+	if block.MetaHash() != wantMetaHash || block.Hash() != wantHash {
+		t.Fatal("caller finalization input mutation changed finalized block hashes")
+	}
 }
 
 func TestMinorBlockDeserializeClearsHash(t *testing.T) {
