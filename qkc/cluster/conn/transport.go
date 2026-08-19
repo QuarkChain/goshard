@@ -40,14 +40,6 @@ func NewTCPTransport(
 	readFrame func(io.Reader) (*wire.Frame, error),
 	writeFrame func(io.Writer, *wire.Frame) error,
 ) FrameTransport {
-	return newTransport(conn, readFrame, writeFrame)
-}
-
-func newTransport(
-	conn net.Conn,
-	readFrame func(io.Reader) (*wire.Frame, error),
-	writeFrame func(io.Writer, *wire.Frame) error,
-) *transport {
 	return &transport{
 		conn:         conn,
 		r:            bufio.NewReader(conn),

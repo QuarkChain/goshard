@@ -43,15 +43,6 @@ func OpSerializerFor[R, S any](respOp byte) *OpSerializer {
 	}
 }
 
-// ConnectionState mirrors Python's protocol.ConnectionState.
-type ConnectionState int32
-
-const (
-	ConnectionStateConnecting ConnectionState = iota
-	ConnectionStateActive
-	ConnectionStateClosed
-)
-
 // pendingRPC represents an in-flight RPC call waiting for its response.
 type pendingRPC struct {
 	result chan rpcResult // cap 1
@@ -62,6 +53,15 @@ type rpcResult struct {
 	resp any
 	err  error
 }
+
+// ConnectionState mirrors Python's protocol.ConnectionState.
+type ConnectionState int32
+
+const (
+	ConnectionStateConnecting ConnectionState = iota
+	ConnectionStateActive
+	ConnectionStateClosed
+)
 
 // BaseConn is the shared RPC engine used by cluster connection
 // implementations.
@@ -95,9 +95,9 @@ type BaseConn struct {
 	transport FrameTransport
 
 	// Configuration. Immutable after construction.
+	serializers   map[byte]*OpSerializer
 	typedHandlers map[byte]TypedHandler
 	nonRPCOps     map[byte]struct{}
-	serializers   map[byte]*OpSerializer
 	forwarder     func(*wire.Frame) bool
 
 	// -- Protocol state (mu) --
@@ -118,9 +118,11 @@ type BaseConn struct {
 
 	// -- Synchronization primitives --
 	shutdownOnce sync.Once
-	activeChan   chan struct{} // closed once active, or on shutdown before activation
-	closedChan   chan struct{} // closed during shutdown
-	errChan      chan error    // cap 1, non-user errors
+	// activeChan signals that startup has completed. The connection may be ACTIVE
+	// or already closed; callers must check IsActive().
+	activeChan chan struct{}
+	closedChan chan struct{} // closed during shutdown
+	errChan    chan error    // cap 1, non-user errors
 
 	log log.Logger
 }
@@ -183,7 +185,7 @@ func NewBaseConn(cfg Config) *BaseConn {
 //   IsActive / IsClosed    -> is_active / is_closed
 
 // Start transitions the connection to ACTIVE and starts the reader loop.
-// If the connection is already closed, Start is a no-op.
+// If the connection is already started or closed, Start is a no-op.
 func (c *BaseConn) Start() {
 	c.mu.Lock()
 	if c.state != ConnectionStateConnecting {
@@ -296,8 +298,8 @@ func (c *BaseConn) Error() <-chan error { return c.errChan }
 // RemoteAddr returns the transport's remote address.
 func (c *BaseConn) RemoteAddr() string { return c.transport.RemoteAddr() }
 
-// WaitUntilActive returns a channel closed after the connection becomes active
-// or closes before activation.
+// WaitUntilActive returns a channel closed when startup completes.
+// The connection may be ACTIVE or already closed; use IsActive() to check.
 func (c *BaseConn) WaitUntilActive() <-chan struct{} { return c.activeChan }
 
 // WaitUntilClosed returns a channel closed when shutdown begins.
@@ -564,15 +566,15 @@ func (c *BaseConn) shutdown(cause error) {
 
 		c.mu.Lock()
 		wasConnecting := c.state == ConnectionStateConnecting
+		if wasConnecting {
+			close(c.activeChan)
+		}
 
 		c.state = ConnectionStateClosed
 		if cause != nil {
 			c.closeErr = cause
 		}
 		close(c.closedChan)
-		if wasConnecting {
-			close(c.activeChan)
-		}
 
 		for id, call := range c.pending {
 			delete(c.pending, id)

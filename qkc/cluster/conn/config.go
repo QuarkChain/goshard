@@ -14,14 +14,14 @@ type Config struct {
 	// Transport is the frame I/O backend. Required.
 	Transport FrameTransport
 
+	// Serializers maps request opcodes to their serializers.
+	// Each serializer is also registered under its response opcode.
+	Serializers map[byte]*OpSerializer
+
 	// Handlers maps request opcodes to their handlers.
 	// Must be safe for concurrent use: handlers may be called from multiple
 	// dispatch goroutines.
 	Handlers map[byte]TypedHandler
-
-	// Serializers maps request opcodes to their serializers.
-	// Each serializer is also registered under its response opcode.
-	Serializers map[byte]*OpSerializer
 
 	// NonRPCOps marks fire-and-forget opcodes that must use rpc_id=0.
 	NonRPCOps map[byte]struct{}
