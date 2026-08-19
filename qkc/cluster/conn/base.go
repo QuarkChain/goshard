@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
@@ -406,11 +407,28 @@ func (c *BaseConn) readerLoop(done chan struct{}) {
 			c.shutdown(normalizeReadErr(err))
 			return
 		}
-		c.handleFrame(frame)
+		c.handleFrameSafely(frame)
 	}
 }
 
 // -- handleFrame -------------------------------------------------------------
+
+// handleFrameSafely runs handleFrame with panic isolation: any panic from
+// frame processing (the forwarder, response deserialization, serializer
+// callbacks, or future extension points) is converted into a connection
+// shutdown instead of crashing the process.
+func (c *BaseConn) handleFrameSafely(frame *wire.Frame) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.log.Error("frame processing panic",
+				"opcode", frame.Opcode, "rpcid", frame.RPCID,
+				"panic", recovered, "stack", string(debug.Stack()))
+			c.shutdown(fmt.Errorf("frame processing panic (opcode=0x%x rpc_id %d): %v",
+				frame.Opcode, frame.RPCID, recovered))
+		}
+	}()
+	c.handleFrame(frame)
+}
 
 func (c *BaseConn) handleFrame(frame *wire.Frame) {
 	if fwd := c.forwarder; fwd != nil {

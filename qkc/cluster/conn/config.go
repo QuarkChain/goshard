@@ -79,6 +79,12 @@ func (cfg *Config) validate() {
 		if ser == nil {
 			panic(fmt.Sprintf("conn.Config: serializer for opcode 0x%x must not be nil", op))
 		}
+		// An OpSerializer is a complete opcode codec; every callback must be
+		// present. Missing callbacks would panic at runtime on the reader
+		// goroutine, so they are rejected here at construction time.
+		if ser.NewRequest == nil || ser.NewResponse == nil || ser.Deserialize == nil || ser.Serialize == nil {
+			panic(fmt.Sprintf("conn.Config: serializer for opcode 0x%x has missing callback", op))
+		}
 		requestOps[op] = struct{}{}
 	}
 

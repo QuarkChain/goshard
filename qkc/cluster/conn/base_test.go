@@ -266,6 +266,25 @@ func waitForGoroutines(t *testing.T, baseline int) {
 
 // -- Config validation tests --------------------------------------------------
 
+// serializerMissingCallback returns a full ping serializer with one callback
+// removed, for config validation tests.
+func serializerMissingCallback(missing string) *OpSerializer {
+	ser := OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
+	switch missing {
+	case "NewRequest":
+		ser.NewRequest = nil
+	case "NewResponse":
+		ser.NewResponse = nil
+	case "Deserialize":
+		ser.Deserialize = nil
+	case "Serialize":
+		ser.Serialize = nil
+	default:
+		panic("unknown callback: " + missing)
+	}
+	return ser
+}
+
 // TestConfig_ValidationPanics covers config validation panics.
 func TestConfig_ValidationPanics(t *testing.T) {
 	tests := []struct {
@@ -276,6 +295,10 @@ func TestConfig_ValidationPanics(t *testing.T) {
 		{"nil transport", Config{}, "Transport"},
 		{"nil serializer", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: nil}}, "serializer"},
 		{"nil handler", Config{Transport: newFakeFrameTransport(), Handlers: map[byte]TypedHandler{0x01: nil}}, "handler"},
+		{"missing NewRequest callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("NewRequest")}}, "missing callback"},
+		{"missing NewResponse callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("NewResponse")}}, "missing callback"},
+		{"missing Deserialize callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("Deserialize")}}, "missing callback"},
+		{"missing Serialize callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("Serialize")}}, "missing callback"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -307,32 +330,32 @@ func TestConfig_ResponseOpcodePanics(t *testing.T) {
 		{
 			name: "response opcode conflicts with rpc request opcode",
 			serializers: map[byte]*OpSerializer{
-				0x01: {ResponseOpCode: 0x02},
-				0x02: {ResponseOpCode: 0x03},
+				0x01: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x02),
+				0x02: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x03),
 			},
 		},
 		{
 			name: "duplicate response opcode",
 			serializers: map[byte]*OpSerializer{
-				0x81: {ResponseOpCode: 0x90},
-				0x82: {ResponseOpCode: 0x90},
+				0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
+				0x82: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
 			},
 		},
 		{
 			name: "response opcode conflicts with non-rpc request opcode",
 			serializers: map[byte]*OpSerializer{
-				0x81: {ResponseOpCode: 0x90},
-				0x90: {ResponseOpCode: 0x90},
+				0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
+				0x90: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
 			},
 			nonRPC: map[byte]struct{}{0x90: {}},
 		},
 		{
 			name:        "self-referencing rpc response opcode",
-			serializers: map[byte]*OpSerializer{0x81: {ResponseOpCode: 0x81}},
+			serializers: map[byte]*OpSerializer{0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x81)},
 		},
 		{
 			name:        "zero response opcode for rpc",
-			serializers: map[byte]*OpSerializer{0x81: {ResponseOpCode: 0}},
+			serializers: map[byte]*OpSerializer{0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0)},
 		},
 	}
 	for _, tt := range tests {
@@ -361,7 +384,7 @@ func TestConfig_NonRPCDummyResponseOpcode(t *testing.T) {
 	conn := NewBaseConn(Config{
 		Transport: newFakeFrameTransport(),
 		Serializers: map[byte]*OpSerializer{
-			op: {ResponseOpCode: op}, // self-referencing dummy, as in slave configs
+			op: OpSerializerFor[wire.PingRequest, wire.PongResponse](op), // self-referencing dummy, as in slave configs
 		},
 		NonRPCOps: map[byte]struct{}{op: {}},
 		Handlers:  map[byte]TypedHandler{op: pongHandler()},
@@ -1285,6 +1308,45 @@ func TestForwarder_CloseRequest(t *testing.T) {
 	}
 	if got := tr.closes(); got != 1 {
 		t.Fatalf("transport closed %d times, want 1", got)
+	}
+}
+
+// TestForwarder_PanicIsolatesConnection: a panic inside the forwarder must
+// not crash the process; it shuts the connection down with a descriptive
+// error instead (reader-path panic isolation).
+func TestForwarder_PanicIsolatesConnection(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Forwarder: func(f *wire.Frame) ForwardResult {
+			panic("forwarder boom")
+		},
+		Logger: log.New(),
+	})
+	conn.Start()
+	defer conn.Close()
+
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
+
+	select {
+	case <-conn.WaitUntilClosed():
+	case <-time.After(time.Second):
+		t.Fatal("WaitUntilClosed did not fire after forwarder panic")
+	}
+	select {
+	case err := <-conn.Error():
+		if err == nil || !strings.Contains(err.Error(), "frame processing panic") {
+			t.Fatalf("expected frame processing panic error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Error() did not publish the panic error")
+	}
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after forwarder panic")
 	}
 }
 
