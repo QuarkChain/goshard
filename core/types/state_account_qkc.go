@@ -98,9 +98,13 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 			acct.Balance.Set(qkcBal)
 			delete(balMap, qkccommon.DefaultTokenID)
 		}
-		// Keep an empty serialized token list as a non-nil MNT set so it
-		// re-encodes as 00c0 without carrying balanceUpdateCount through RLP.
-		if !hasQKC || len(balMap) != 0 {
+		// A zero entry is deliberately not recovered here. pyquarkchain rebuilds
+		// its map from the pair list (state.py:104), which carries no zeros, so
+		// an account whose leaf is 00c0 comes back holding nothing and
+		// re-serializes to empty bytes the next time anything touches it.
+		// Reproducing the marker on read-back would look faithful and fork the
+		// state root of the first block that touches such an account.
+		if len(balMap) != 0 {
 			acct.MntBalances = qkccommon.NewTokenBalancesWithMap(balMap)
 		}
 	}

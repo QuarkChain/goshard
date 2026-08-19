@@ -39,7 +39,7 @@ type StateAccount struct {
 	CodeHash           []byte
 	MntBalances        *qkccommon.TokenBalances // Non-QKC balances.
 	FullShardKey       uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
-	balanceUpdateCount uint64                   // Number of non-reverted QKC balance updates.
+	balanceUpdateCount uint64                   // Number of QKC balance updates; >0 means the balance map holds an entry.
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -73,6 +73,16 @@ func (acct *StateAccount) Copy() *StateAccount {
 }
 
 // IsBalanceUpdated reports whether the QKC balance has been explicitly updated.
+//
+// It is what stands in for pyquarkchain's "the balance map has a key for this
+// token": Balance is a scalar and cannot tell a zero it was written down to
+// from one the account never held, yet the two serialize differently (0x00c0
+// against empty bytes) and are different trie leaves.
+//
+// There is deliberately no counterpart that undoes an update. pyquarkchain's
+// journal restores the previous *value* into the map (state.py:166) and so
+// leaves the key behind; only reset_balances removes it, which is what
+// ClearBalanceUpdates is for.
 func (acct *StateAccount) IsBalanceUpdated() bool {
 	return acct.balanceUpdateCount > 0
 }
@@ -82,16 +92,14 @@ func (acct *StateAccount) AddBalanceUpdate() {
 	acct.balanceUpdateCount++
 }
 
-// RevertBalanceUpdate removes a reverted QKC balance update.
-func (acct *StateAccount) RevertBalanceUpdate() {
-	if acct.balanceUpdateCount == 0 {
-		panic("reverting untracked QKC balance update")
-	}
-	acct.balanceUpdateCount--
+// ClearBalanceUpdates forgets the recorded updates, for reset_balances
+// (state.py:192) replacing the whole balance map with an empty one.
+func (acct *StateAccount) ClearBalanceUpdates() {
+	acct.balanceUpdateCount = 0
 }
 
-// FinaliseBalanceUpdates keeps committed update presence without retaining
-// the number of updates from journals that can no longer be reverted.
+// FinaliseBalanceUpdates keeps the recorded presence of an entry without
+// retaining a count that only grows over the life of a block.
 func (acct *StateAccount) FinaliseBalanceUpdates() {
 	if acct.balanceUpdateCount > 0 {
 		acct.balanceUpdateCount = 1
@@ -107,8 +115,8 @@ func (acct *StateAccount) FinaliseBalanceUpdates() {
 // MntBal holds TokenBalances.SerializeToBytes() output rather than the
 // *TokenBalances value directly: TokenBalances stores its balances in an
 // unexported map, so it is not RLP-struct-encodable and must go through the
-// same []byte serialization the trie account uses. An empty serialized list in
-// MntBal preserves QKC token presence in the snapshot representation.
+// same []byte serialization the trie account uses, and carries exactly what a
+// trie leaf would.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
@@ -132,18 +140,17 @@ func SlimAccountRLP(account StateAccount) []byte {
 	if !bytes.Equal(account.CodeHash, EmptyCodeHash[:]) {
 		slim.CodeHash = account.CodeHash
 	}
+	// Only what a trie leaf would carry. A recorded entry at zero is deliberately
+	// dropped here as well: the snapshot answers the same account reads the trie
+	// does, and the trie cannot express it either (see StateAccount.DecodeRLP).
+	// Keeping it on this path alone would let the two readers hand back different
+	// accounts for the same block.
 	if account.MntBalances != nil {
 		mntBal, err := account.MntBalances.SerializeToBytes()
 		if err != nil {
 			panic(err)
 		}
-		if len(mntBal) == 0 {
-			slim.MntBal = []byte{0x00, 0xc0}
-		} else {
-			slim.MntBal = mntBal
-		}
-	} else if account.IsBalanceUpdated() {
-		slim.MntBal = []byte{0x00, 0xc0}
+		slim.MntBal = mntBal
 	}
 	data, err := rlp.EncodeToBytes(slim)
 	if err != nil {
@@ -166,7 +173,11 @@ func FullAccount(data []byte) (*StateAccount, error) {
 		if err != nil {
 			return nil, err
 		}
-		account.MntBalances = tb
+		// An all-zero pair list decodes to an empty map, which is the same
+		// nothing DecodeRLP reads out of a 00c0 leaf.
+		if tb.Len() != 0 {
+			account.MntBalances = tb
+		}
 	}
 
 	// Interpret the storage root and code hash in slim format.

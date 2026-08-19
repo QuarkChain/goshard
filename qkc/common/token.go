@@ -259,6 +259,13 @@ func (t *TokenBalances) Len() int {
 	return len(t.balances)
 }
 
+// NonZeroLen is the number of tokens that survive serialization: entries holding
+// a zero balance stay in the map (so the blob is not empty) but are dropped from
+// the pair list, and it is the pair list that TokenTrieThreshold bounds.
+func (t *TokenBalances) NonZeroLen() int {
+	return t.nonZeroEntriesInBalancesCache()
+}
+
 func (t *TokenBalances) nonZeroEntriesInBalancesCache() int {
 	sum := 0
 	for _, v := range t.balances {

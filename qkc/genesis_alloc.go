@@ -3,7 +3,7 @@
 package qkc
 
 import (
-	"encoding/binary"
+	"bytes"
 	"fmt"
 	"math/big"
 
@@ -15,7 +15,6 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/config"
-	"github.com/ethereum/go-ethereum/qkc/state"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
@@ -79,7 +78,6 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		return common.Hash{}, fmt.Errorf("open genesis state trie: %w", err)
 	}
 	nodes := trienode.NewMergedNodeSet()
-	var storageRoots []common.Hash
 	batch := db.NewBatch()
 
 	for addr, allocation := range alloc {
@@ -90,14 +88,14 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		// Match pyquarkchain's account-existence rule: storage and the full shard
 		// key do not keep an otherwise blank account in the state trie. Its storage
 		// nodes go with it — dropped before the merge, since no leaf reaches them.
-		if acct.Nonce == 0 && len(acct.TokenBalances) == 0 && acct.CodeHash == coretypes.EmptyCodeHash {
+		blankBalances := acct.MntBalances == nil || acct.MntBalances.IsBlank()
+		if acct.Nonce == 0 && acct.Balance.IsZero() && blankBalances && bytes.Equal(acct.CodeHash, coretypes.EmptyCodeHash.Bytes()) {
 			continue
 		}
 		if storageNodes != nil {
 			if err := nodes.Merge(storageNodes); err != nil {
 				return common.Hash{}, err
 			}
-			storageRoots = append(storageRoots, acct.Root)
 		}
 		enc, err := rlp.EncodeToBytes(acct)
 		if err != nil {
@@ -108,7 +106,11 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		stateTrie.MustUpdate(addr.Recipient.Bytes(), enc)
 	}
 
-	root, set := stateTrie.Commit(false)
+	// Collect the leaves: hashdb builds its account -> storage-root references by
+	// decoding them as types.StateAccount (triedb/hashdb/database.go:574), which
+	// is the QuarkChain leaf here, so the storage tries become reachable from the
+	// account trie and Commit below flushes them along with it.
+	root, set := stateTrie.Commit(true)
 	if set != nil {
 		if err := nodes.Merge(set); err != nil {
 			return common.Hash{}, err
@@ -116,17 +118,6 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 	}
 	if err := tdb.Update(root, coretypes.EmptyRootHash, 0, nodes, nil); err != nil {
 		return common.Hash{}, fmt.Errorf("update genesis trie nodes: %w", err)
-	}
-	// Commit walks the trie from its root, and a storage root is reachable from
-	// the account trie only through the account -> storage-root references hashdb
-	// builds out of leaf metadata. It cannot build them here: it decodes leaves as
-	// geth's four-field StateAccount, which a QuarkChain account is not. So flush
-	// every storage trie as a root in its own right, before the account trie that
-	// names it.
-	for _, storageRoot := range storageRoots {
-		if err := tdb.Commit(storageRoot, false); err != nil {
-			return common.Hash{}, fmt.Errorf("commit genesis storage %s: %w", storageRoot, err)
-		}
 	}
 	if err := tdb.Commit(root, false); err != nil {
 		return common.Hash{}, fmt.Errorf("commit genesis state: %w", err)
@@ -139,11 +130,14 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 
 // genesisAccount turns one allocation entry into a state-trie leaf, returning the
 // storage trie's nodes when the entry has storage.
-func genesisAccount(tdb *triedb.Database, batch ethdb.Batch, addr account.Address, allocation config.Allocation) (*state.Account, *trienode.NodeSet, error) {
-	acct := &state.Account{Root: coretypes.EmptyRootHash, CodeHash: coretypes.EmptyCodeHash}
-	binary.BigEndian.PutUint32(acct.FullShardKey[:], addr.FullShardKey)
+func genesisAccount(tdb *triedb.Database, batch ethdb.Batch, addr account.Address, allocation config.Allocation) (*coretypes.StateAccount, *trienode.NodeSet, error) {
+	acct := &coretypes.StateAccount{
+		Balance:      new(uint256.Int),
+		Root:         coretypes.EmptyRootHash,
+		CodeHash:     coretypes.EmptyCodeHash.Bytes(),
+		FullShardKey: addr.FullShardKey,
+	}
 
-	balances := qkcCommon.NewEmptyTokenBalances()
 	for token, value := range allocation.Balances {
 		// The name is checked even for an entry that contributes no balance, so a
 		// malformed allocation is reported rather than silently dropped.
@@ -161,20 +155,26 @@ func genesisAccount(tdb *triedb.Database, batch ethdb.Batch, addr account.Addres
 		if overflow {
 			return nil, nil, fmt.Errorf("token %s: balance overflows 256 bits (%s)", token, value)
 		}
-		balances.SetValue(amount, tokenID)
+		// StateAccount splits what pyquarkchain keeps in one map: the QKC token in
+		// Balance, everything else in MntBalances. EncodeRLP merges them back into
+		// the single sorted pair list the leaf carries.
+		if tokenID == qkcCommon.DefaultTokenID {
+			acct.Balance = amount
+			continue
+		}
+		if acct.MntBalances == nil {
+			acct.MntBalances = qkcCommon.NewEmptyTokenBalances()
+		}
+		acct.MntBalances.SetValue(amount, tokenID)
 	}
-	blob, err := balances.SerializeToBytes()
-	if err != nil {
-		return nil, nil, fmt.Errorf("encode token balances: %w", err)
-	}
-	acct.TokenBalances = blob
 
 	// An allocated contract starts at nonce 1, as in pyquarkchain
 	// (quarkchain/genesis.py:68).
 	if allocation.CodePresent || allocation.Code != nil {
-		acct.CodeHash = crypto.Keccak256Hash(allocation.Code)
+		codeHash := crypto.Keccak256Hash(allocation.Code)
+		acct.CodeHash = codeHash.Bytes()
 		acct.Nonce = 1
-		rawdb.WriteCode(batch, acct.CodeHash, allocation.Code)
+		rawdb.WriteCode(batch, codeHash, allocation.Code)
 	}
 	if len(allocation.Storage) == 0 {
 		return acct, nil, nil

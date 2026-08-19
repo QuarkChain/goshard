@@ -142,6 +142,10 @@ type StateDB struct {
 	// assigned to any newly created accounts that have no prior state.
 	fullShardKey uint32
 
+	// qkcShardKeys is the shard key each absent address was first looked up
+	// with, kept for the lifetime of the block. See noteQKCShardKey.
+	qkcShardKeys map[common.Address]uint32
+
 	// State witness if cross validation is needed
 	witness *stateless.Witness
 
@@ -192,6 +196,7 @@ func NewWithReader(root common.Hash, db Database, reader Reader) (*StateDB, erro
 		reader:               reader,
 		stateObjects:         make(map[common.Address]*stateObject),
 		stateObjectsDestruct: make(map[common.Address]*stateObject),
+		qkcShardKeys:         make(map[common.Address]uint32),
 		mutations:            make(map[common.Address]*mutation),
 		logs:                 make(map[common.Hash][]*types.Log),
 		preimages:            make(map[common.Hash][]byte),
@@ -623,6 +628,7 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 
 	// Short circuit if the account is not found
 	if acct == nil {
+		s.noteQKCShardKey(addr)
 		return nil
 	}
 	// Schedule the resolved account for prefetching if it's enabled.
@@ -661,8 +667,9 @@ func (s *StateDB) createObject(addr common.Address) *stateObject {
 	prev := s.getStateObject(addr)
 
 	obj := newObject(s, addr, nil)
-	// New accounts inherit the current transaction's destination shard key.
-	obj.data.FullShardKey = s.fullShardKey
+	// New accounts carry the shard key that was current when the address was
+	// first looked up, not the one current now — see noteQKCShardKey.
+	obj.data.FullShardKey = s.qkcShardKey(addr)
 	// If the account previously existed, keep its original shard key unchanged.
 	if prev != nil {
 		obj.data.FullShardKey = prev.data.FullShardKey
@@ -722,6 +729,7 @@ func (s *StateDB) Copy() *StateDB {
 		logSize:              s.logSize,
 		preimages:            maps.Clone(s.preimages),
 		fullShardKey:         s.fullShardKey,
+		qkcShardKeys:         maps.Clone(s.qkcShardKeys),
 
 		// Do we need to copy the access list and transient storage?
 		// In practice: No. At the start of a transaction, these two lists are empty.
@@ -1350,6 +1358,9 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 	// Clear all internal flags and update state root at the end.
 	s.mutations = make(map[common.Address]*mutation)
 	s.stateObjectsDestruct = make(map[common.Address]*stateObject)
+	// The shard keys are a property of the account cache, which pyquarkchain
+	// also drops here (state.py:587).
+	s.qkcShardKeys = make(map[common.Address]uint32)
 
 	origin := s.originalRoot
 	s.originalRoot = root

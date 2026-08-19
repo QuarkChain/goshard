@@ -51,6 +51,9 @@ func TestMntBalanceBasic(t *testing.T) {
 	assert.Equal(t, uint256.NewInt(300), s.GetMntBalance(addr, tokenID))
 }
 
+// A rejected write must leave the balance alone and stop the state from
+// producing a root. Dropping it quietly would let a node commit a state the
+// reference clients never agreed to.
 func TestSubMntBalanceRejectsUnderflow(t *testing.T) {
 	s := newMntTestStateDB(t)
 	addr := common.HexToAddress("0x1235")
@@ -59,6 +62,8 @@ func TestSubMntBalanceRejectsUnderflow(t *testing.T) {
 
 	assert.False(t, s.Exist(addr), "underflow must not create an account")
 	assert.True(t, s.GetMntBalance(addr, 100).IsZero())
+	_, err := s.Commit(0, false, false)
+	require.ErrorContains(t, err, "underflow")
 }
 
 func TestAddMntBalanceRejectsOverflow(t *testing.T) {
@@ -72,17 +77,21 @@ func TestAddMntBalanceRejectsOverflow(t *testing.T) {
 
 	assert.Equal(t, max, s.GetMntBalance(addr, 100))
 	assert.Equal(t, dirtyCount, s.journal.dirties[addr], "overflow must not add a dirty journal entry")
+	_, err := s.Commit(0, false, false)
+	require.ErrorContains(t, err, "overflows")
 }
 
 func TestMntRejectsQKCTokenID(t *testing.T) {
 	s := newMntTestStateDB(t)
 	addr := common.HexToAddress("0x5678")
 
-	// SetMntBalance with QKC tokenID (35760) must be a no-op
 	s.SetMntBalance(addr, uint256.NewInt(999), qkccommon.DefaultTokenID)
 	assert.True(t, s.GetMntBalance(addr, qkccommon.DefaultTokenID).IsZero())
 	assert.True(t, s.GetBalance(addr).IsZero()) // QKC balance unchanged
 	assert.False(t, s.Exist(addr), "rejected update must not create an account")
+
+	_, err := s.Commit(0, false, false)
+	require.ErrorContains(t, err, "QKC token id")
 }
 
 func TestMntRejectsTokenAboveListLimit(t *testing.T) {
@@ -99,7 +108,7 @@ func TestMntRejectsTokenAboveListLimit(t *testing.T) {
 	assert.True(t, s.GetMntBalance(addr, qkccommon.TokenTrieThreshold+1).IsZero())
 	assert.Equal(t, dirtyCount, s.journal.dirties[addr], "rejected update must not add a dirty journal entry")
 	_, err := s.Commit(0, false, false)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "token limit")
 }
 
 func TestMntTokenLimitIncludesQKC(t *testing.T) {
@@ -115,7 +124,7 @@ func TestMntTokenLimitIncludesQKC(t *testing.T) {
 
 	assert.True(t, s.GetMntBalance(addr, qkccommon.TokenTrieThreshold).IsZero())
 	_, err := s.Commit(0, false, false)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "token limit")
 }
 
 func TestQKCBalanceRejectsTokenAboveListLimit(t *testing.T) {
@@ -132,7 +141,7 @@ func TestQKCBalanceRejectsTokenAboveListLimit(t *testing.T) {
 	assert.True(t, s.GetBalance(addr).IsZero())
 	assert.Equal(t, dirtyCount, s.journal.dirties[addr], "rejected update must not add a dirty journal entry")
 	_, err := s.Commit(0, false, false)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "token limit")
 }
 
 func TestMntTokenLimitIgnoresZeroEntries(t *testing.T) {

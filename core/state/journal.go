@@ -24,7 +24,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
@@ -230,12 +229,13 @@ func (j *journal) accessListAddSlot(addr common.Address, slot common.Hash) {
 	})
 }
 
-func (j *journal) mntBalanceChange(addr common.Address, prev *qkccommon.TokenBalances) {
-	var snap *qkccommon.TokenBalances
-	if prev != nil {
-		snap = prev.Copy()
-	}
-	j.append(mntBalanceChange{addr: addr, prev: snap})
+// mntBalanceChange journals one token's previous balance. It records the single
+// token rather than a snapshot of the whole balance map because pyquarkchain's
+// undo is `_balances[token_id] = preval` (state.py:163): reverting a token the
+// account did not hold leaves a zero entry behind rather than removing it, and
+// that entry is what makes the account's blob 0x00c0 instead of empty bytes.
+func (j *journal) mntBalanceChange(addr common.Address, tokenID uint64, prev *uint256.Int) {
+	j.append(mntBalanceChange{addr: addr, tokenID: tokenID, prev: new(uint256.Int).Set(prev)})
 }
 
 type (
@@ -299,10 +299,27 @@ type (
 		key, prevalue common.Hash
 	}
 
-	// mntBalanceChange records a snapshot of MNT balances for revert support.
+	// mntBalanceChange records one token's previous balance for revert support.
 	mntBalanceChange struct {
-		addr common.Address
-		prev *qkccommon.TokenBalances
+		addr    common.Address
+		tokenID uint64
+		prev    *uint256.Int
+	}
+
+	// qkcResetStorageChange undoes ResetStorage. pyquarkchain drops the storage
+	// by pointing the account's trie at the blank root and emptying its cache
+	// (state.py:631), journalling both, so the undo has to put back the caches
+	// as well as the root.
+	qkcResetStorageChange struct {
+		account     common.Address
+		root        common.Hash
+		dirty       Storage
+		pending     Storage
+		origin      Storage
+		uncommitted Storage
+		// hadDestruct records whether the address was already in the destruct
+		// set, so that undoing a reset does not undo an earlier one.
+		hadDestruct bool
 	}
 )
 
@@ -367,9 +384,14 @@ func (ch touchChange) copy() journalEntry {
 }
 
 func (ch balanceChange) revert(s *StateDB) {
-	obj := s.getStateObject(ch.account)
-	obj.setBalance(ch.prev)
-	obj.data.RevertBalanceUpdate()
+	// The value is restored but the presence of the entry is not: pyquarkchain
+	// undoes a balance write with `_balances[token_id] = preval` (state.py:166),
+	// which writes the key back rather than deleting it, so a token the account
+	// did not hold before the write is left holding zero. The account then
+	// serializes as 0x00c0 instead of empty bytes, and only reset_balances drops
+	// the entry again. Undoing the update count here would compute a different
+	// state root for any account that survives the block for another reason.
+	s.getStateObject(ch.account).setBalance(ch.prev)
 }
 
 func (ch balanceChange) dirtied() (common.Address, bool) {
@@ -521,11 +543,10 @@ func (ch accessListAddSlotChange) copy() journalEntry {
 func (ch mntBalanceChange) revert(s *StateDB) {
 	obj := s.getStateObject(ch.addr)
 	if obj != nil {
-		if ch.prev == nil {
-			obj.data.MntBalances = nil
-		} else {
-			obj.data.MntBalances = ch.prev.Copy()
-		}
+		// setMntBalance, not SetMntBalance: an undo has to put the value back
+		// whatever the guards would say about it, and it writes the entry even
+		// when the previous balance was zero.
+		obj.setMntBalance(ch.prev, ch.tokenID)
 	}
 }
 
@@ -534,12 +555,44 @@ func (ch mntBalanceChange) dirtied() (common.Address, bool) {
 }
 
 func (ch mntBalanceChange) copy() journalEntry {
-	var prev *qkccommon.TokenBalances
-	if ch.prev != nil {
-		prev = ch.prev.Copy()
-	}
 	return mntBalanceChange{
-		addr: ch.addr,
-		prev: prev,
+		addr:    ch.addr,
+		tokenID: ch.tokenID,
+		prev:    new(uint256.Int).Set(ch.prev),
+	}
+}
+
+func (ch qkcResetStorageChange) revert(s *StateDB) {
+	obj := s.getStateObject(ch.account)
+	if obj == nil {
+		return
+	}
+	obj.data.Root = ch.root
+	obj.dirtyStorage = maps.Clone(ch.dirty)
+	obj.pendingStorage = maps.Clone(ch.pending)
+	obj.originStorage = maps.Clone(ch.origin)
+	obj.uncommittedStorage = maps.Clone(ch.uncommitted)
+	obj.trie = nil
+	if !ch.hadDestruct {
+		delete(s.stateObjectsDestruct, ch.account)
+	}
+}
+
+// dirtied reports no address: reset_storage is one of the two QuarkChain
+// mutations that leave the account unmarked (the other is reset_balances), and
+// on its own it must not bring an account into the block's dirty set.
+func (ch qkcResetStorageChange) dirtied() (common.Address, bool) {
+	return common.Address{}, false
+}
+
+func (ch qkcResetStorageChange) copy() journalEntry {
+	return qkcResetStorageChange{
+		account:     ch.account,
+		root:        ch.root,
+		dirty:       maps.Clone(ch.dirty),
+		pending:     maps.Clone(ch.pending),
+		origin:      maps.Clone(ch.origin),
+		uncommitted: maps.Clone(ch.uncommitted),
+		hadDestruct: ch.hadDestruct,
 	}
 }

@@ -509,9 +509,13 @@ func (s *stateObject) AddBalance(amount *uint256.Int) uint256.Int {
 func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
 	prev := *s.data.Balance
 	if s.data.Balance.IsZero() && amount != nil && !amount.IsZero() && s.nonZeroMntBalanceCount() >= qkccommon.TokenTrieThreshold {
-		log.Error("SetBalance exceeds supported token limit", "addr", s.address, "limit", qkccommon.TokenTrieThreshold)
+		s.db.setError(fmt.Errorf("account %s: QKC balance exceeds the %d token limit; the trie balance format is not implemented",
+			s.address.Hex(), qkccommon.TokenTrieThreshold))
 		return prev
 	}
+	// set_token_balance returns before touching the balance map when the value
+	// is already held (state.py:445), so a no-op write must not record the
+	// presence of an entry either.
 	if s.data.Balance.Eq(amount) {
 		return prev
 	}
