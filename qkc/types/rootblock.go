@@ -2,7 +2,8 @@
 
 // RootBlockHeader mirrors goquarkchain's core/types.RootBlockHeader, kept minimal:
 // only the fields and the Hash/SealHash needed to derive and pin the root genesis
-// block. Mining, signing, and RLP helpers are omitted.
+// block, plus the body a shard needs to walk its cross-shard cursor. Mining,
+// signing, and RLP helpers are omitted.
 // TODO: more content need to be added later.
 //
 // Field order and ser tags reproduce pyquarkchain's RootBlockHeader.FIELDS
@@ -62,4 +63,34 @@ func (h *RootBlockHeader) Hash() common.Hash {
 // and Signature — pyquarkchain's get_hash_for_mining (the proof-of-work input).
 func (h *RootBlockHeader) SealHash() common.Hash {
 	return serHash(*h, map[string]bool{"Nonce": true, "MixDigest": true, "Signature": true})
+}
+
+// RootBlock is a root block: its header plus the minor block headers it confirms
+// (quarkchain/core.py:989). The header list is ordered, and that order is what
+// the shards' cross-shard cursor walks, so it is consensus data rather than an
+// index: a deposit's position is (root block height, index in this list, index
+// within that minor block's deposit list).
+type RootBlock struct {
+	Header            *RootBlockHeader
+	MinorBlockHeaders []*MinorBlockHeader `bytesizeofslicelen:"4"`
+	TrackingData      []byte              `bytesizeofslicelen:"2"`
+}
+
+// NewRootBlock assembles a root block. The merkle root over the header list is
+// not recomputed here: a block read off the wire must keep the root it carries,
+// so that a mismatch stays visible to validation.
+func NewRootBlock(header *RootBlockHeader, headers []*MinorBlockHeader, trackingData []byte) *RootBlock {
+	return &RootBlock{Header: header, MinorBlockHeaders: headers, TrackingData: trackingData}
+}
+
+// Hash returns the block hash: the header's hash.
+func (b *RootBlock) Hash() common.Hash { return b.Header.Hash() }
+
+// NumberU64 returns the block height.
+func (b *RootBlock) NumberU64() uint64 { return uint64(b.Header.Number) }
+
+// MinorHeaderMerkleRoot is the merkle root the header commits to over the minor
+// block header list (RootBlock.finalize, quarkchain/core.py:1017).
+func (b *RootBlock) MinorHeaderMerkleRoot() common.Hash {
+	return CalculateMerkleRoot(b.MinorBlockHeaders)
 }

@@ -3,6 +3,8 @@
 package types
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"math/big"
 	"testing"
@@ -115,6 +117,119 @@ func TestRootBlockHeaderSerializeAndHash(t *testing.T) {
 				t.Errorf("seal hash mismatch\n got %s\nwant 0x%s", h.Hex(), tc.sealHash)
 			}
 		})
+	}
+}
+
+// A root block carrying the synthetic header and one confirmed minor header,
+// serialized by pyquarkchain's RootBlock.
+const goldenRootBlockOneHeader = "0000000100000002010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000100010000000201010164030f42400203e7000000005f5e1000030f4240031e8480000000000000002a000568656c6c6f04040404040404040404040404040404040404040404040404040404040404040505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505000000010000000000000001000000000000000500000000000000000000000000000000000000000000000100000001028bb00164000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000b71b0027df63791519bb71d974f55cd25a4f9c42a44f12829c48654ea7b8676343164c000000005a8c59e1030f42400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003716b6300000000000000000000000000000000000000000000000000000000000000000000"
+
+// testRootBlockHeader is the synthetic_all_fields header above, reused as the
+// head of the body cases so those only vary in the minor header list.
+func testRootBlockHeader() *RootBlockHeader {
+	return &RootBlockHeader{
+		Version:         1,
+		Number:          2,
+		ParentHash:      common.BytesToHash(rep(0x01, 32)),
+		MinorHeaderHash: common.BytesToHash(rep(0x02, 32)),
+		Root:            common.BytesToHash(rep(0x03, 32)),
+		Coinbase:        account.NewAddress(common.BytesToAddress(rep(0xaa, 20)), 0x00010001),
+		CoinbaseAmount: qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
+			1:       uint256.NewInt(100),
+			2:       uint256.NewInt(0),
+			1000000: uint256.NewInt(999),
+		}),
+		Time:            1600000000,
+		Difficulty:      big.NewInt(1000000),
+		TotalDifficulty: big.NewInt(2000000),
+		Nonce:           42,
+		Extra:           []byte("hello"),
+		MixDigest:       common.BytesToHash(rep(0x04, 32)),
+		Signature:       sig65(0x05),
+	}
+}
+
+// testConfirmedHeaders returns n minor block headers differing only in height,
+// built on the same header/meta pair the minor block goldens use.
+func testConfirmedHeaders(n int) []*MinorBlockHeader {
+	headers := make([]*MinorBlockHeader, n)
+	for i := range headers {
+		header, _ := testMinorBlockHeader()
+		header.Number = uint64(5 + i)
+		headers[i] = header
+	}
+	return headers
+}
+
+// TestRootBlockSerializeLayout pins how the body is laid out around the header
+// list: a 4-byte element count, the headers in order, then the 2-byte-prefixed
+// tracking data (quarkchain/core.py:989). Element order is consensus data, since
+// the cross-shard cursor indexes into this list.
+func TestRootBlockSerializeLayout(t *testing.T) {
+	header := testRootBlockHeader()
+	headHex, err := serialize.SerializeToBytes(header)
+	if err != nil {
+		t.Fatalf("serialize header: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		headers      []*MinorBlockHeader
+		trackingData []byte
+		// Absolute bytes, from pyquarkchain, where given. The other cases are
+		// checked against the composition rule alone, which is what varies.
+		golden string
+	}{
+		{name: "empty"},
+		{name: "one header", headers: testConfirmedHeaders(1), golden: goldenRootBlockOneHeader},
+		{name: "two headers", headers: testConfirmedHeaders(2)},
+		{name: "tracking data", headers: testConfirmedHeaders(1), trackingData: []byte("qkc")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := serialize.SerializeToBytes(NewRootBlock(header, test.headers, test.trackingData))
+			if err != nil {
+				t.Fatalf("serialize block: %v", err)
+			}
+
+			want := bytes.Clone(headHex)
+			want = binary.BigEndian.AppendUint32(want, uint32(len(test.headers)))
+			for _, minorHeader := range test.headers {
+				encoded, err := serialize.SerializeToBytes(minorHeader)
+				if err != nil {
+					t.Fatalf("serialize minor header: %v", err)
+				}
+				want = append(want, encoded...)
+			}
+			want = binary.BigEndian.AppendUint16(want, uint16(len(test.trackingData)))
+			want = append(want, test.trackingData...)
+
+			if !bytes.Equal(got, want) {
+				t.Errorf("serialized block\n got %x\nwant %x", got, want)
+			}
+			if test.golden != "" && hex.EncodeToString(got) != test.golden {
+				t.Errorf("serialized block against pyquarkchain\n got %x\nwant %s", got, test.golden)
+			}
+		})
+	}
+}
+
+// TestRootBlockMinorHeaderMerkleRoot pins the root the header commits to over
+// the confirmed minor headers against pyquarkchain's calculate_merkle_root.
+func TestRootBlockMinorHeaderMerkleRoot(t *testing.T) {
+	tests := []struct {
+		count int
+		want  string
+	}{
+		{0, "daa77426c30c02a43d9fba4e841a6556c524d47030762eb14dc4af897e605d9b"},
+		{1, "f79cc5f96b978a601534959f72f91b236707b4f9231f72cb282a75ddbdf66211"},
+		{2, "49a400646be171f2aae4353e3ea56f1a4d287d5fc69d6d73fe0b858d7c928a36"},
+	}
+	for _, test := range tests {
+		block := NewRootBlock(testRootBlockHeader(), testConfirmedHeaders(test.count), nil)
+		if got := block.MinorHeaderMerkleRoot(); got != common.HexToHash(test.want) {
+			t.Errorf("merkle root over %d headers\n got %s\nwant 0x%s", test.count, got.Hex(), test.want)
+		}
 	}
 }
 
