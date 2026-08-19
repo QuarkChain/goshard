@@ -393,7 +393,7 @@ func (b *MinorBlock) IHeader() IHeader {
 // WithMiningResult returns a new block with the data from b and update nonce and mixDigest.
 //
 // signature is ignored because minor block headers carry no signature field.
-func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock {
+func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) *MinorBlock {
 	cpy := CopyMinorBlockHeader(b.header)
 	cpy.Nonce = nonce
 	cpy.MixDigest = mixDigest
