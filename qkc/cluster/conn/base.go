@@ -78,9 +78,6 @@ const (
 //
 //   - Protocol state (mu): mu protects mutable connection state shared across goroutines:
 //     state, nextRPCID, pending, timedOut, and readerDone.
-//     closeErr is intentionally not protected by mu. It is written only inside
-//     the sync.Once shutdown body, and sync.Once.Do provides the necessary
-//     happens-before ordering for callers after shutdown returns.
 //
 // Lock rules:
 //
@@ -110,7 +107,6 @@ type BaseConn struct {
 	pending   map[uint64]*pendingRPC
 	timedOut  map[uint64]struct{}
 	nextRPCID uint64
-	closeErr  error
 	// Closed when readerLoop exits; nil if the connection has not been started.
 	readerDone chan struct{}
 
@@ -210,13 +206,12 @@ func (c *BaseConn) Start() {
 }
 
 // Close closes the connection and wakes all pending RPCs.
-func (c *BaseConn) Close() error {
+func (c *BaseConn) Close() {
 	c.shutdown(nil)
 	done := c.readerDone
 	if done != nil {
 		<-done
 	}
-	return c.closeErr
 }
 
 // SendRPC sends a request without metadata and waits for its response.
@@ -601,7 +596,9 @@ func (c *BaseConn) shutdown(cause error) {
 
 		c.state = ConnectionStateClosed
 		if cause != nil {
-			c.closeErr = cause
+			// Mirror Python: the close cause is logged and otherwise
+			// discarded (close_with_error's return value is unused).
+			c.log.Error("connection closed with error", "err", cause)
 		}
 		close(c.closedChan)
 
@@ -622,9 +619,7 @@ func (c *BaseConn) shutdown(cause error) {
 		// Close transport to interrupt blocked I/O.
 		// Writes already accepted by the transport may still complete.
 		if err := c.transport.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			if c.closeErr == nil {
-				c.closeErr = err
-			}
+			c.log.Warn("transport close failed", "err", err)
 		}
 
 		c.writeMu.Lock()

@@ -36,7 +36,6 @@ type fakeFrameTransport struct {
 	writeOnce         sync.Once
 	releaseWrite      chan struct{}
 	writeErr          error
-	closeErr          error
 }
 
 // interruptibleFakeFrameTransport models a real net.Conn: Close releases a
@@ -105,7 +104,7 @@ func (t *fakeFrameTransport) Close() error {
 		t.closeMu.Unlock()
 		close(t.closed)
 	})
-	return t.closeErr
+	return nil
 }
 
 func (t *fakeFrameTransport) RemoteAddr() string {
@@ -485,39 +484,22 @@ func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
 }
 
 // TestBaseConn_CleanShutdown: graceful shutdown (local Close, clean peer EOF)
-// records no close error; transport close errors are returned by Close.
+// TestBaseConn_CleanShutdown: graceful shutdown (local Close, clean peer EOF)
+// completes without error.
 func TestBaseConn_CleanShutdown(t *testing.T) {
-	t.Run("local Close records no error", func(t *testing.T) {
+	t.Run("local Close", func(t *testing.T) {
 		conn := newConn(newFakeFrameTransport())
 		conn.Start()
-		if err := conn.Close(); err != nil {
-			t.Fatalf("close connection: %v", err)
-		}
-		if conn.closeErr != nil {
-			t.Fatalf("clean close recorded error: %v", conn.closeErr)
-		}
+		conn.Close()
 	})
 
-	t.Run("clean peer EOF records no error", func(t *testing.T) {
+	t.Run("clean peer EOF", func(t *testing.T) {
 		conn := newConn(newStaticReaderTransport(bytes.NewReader(nil)))
 		conn.Start()
 
 		<-conn.WaitUntilClosed()
 		if !conn.IsClosed() {
 			t.Fatal("connection should be closed after clean EOF")
-		}
-		if conn.closeErr != nil {
-			t.Fatalf("clean EOF recorded error: %v", conn.closeErr)
-		}
-	})
-
-	t.Run("Close returns transport error", func(t *testing.T) {
-		closeErr := errors.New("close failed")
-		tr := newFakeFrameTransport()
-		tr.closeErr = closeErr
-		conn := newConn(tr)
-		if err := conn.Close(); !errors.Is(err, closeErr) {
-			t.Fatalf("expected transport close error, got %v", err)
 		}
 	})
 }
@@ -605,9 +587,7 @@ func TestBaseConn_CanceledRPCNotSent(t *testing.T) {
 	if res := <-third; res.err != nil {
 		t.Fatalf("third RPC failed: %v", res.err)
 	}
-	if err := conn.Close(); err != nil {
-		t.Fatalf("close connection: %v", err)
-	}
+	conn.Close()
 }
 
 // TestBaseConn_CancelErrorContract: SendRPC with an expired or canceled
@@ -651,7 +631,7 @@ func TestBaseConn_CancelErrorContract(t *testing.T) {
 	}
 }
 
-func TestBaseConn_WriteFailureSetsCloseError(t *testing.T) {
+func TestBaseConn_WriteFailureClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeErr = errors.New("write failed")
 	conn := newConn(tr)
@@ -662,8 +642,8 @@ func TestBaseConn_WriteFailureSetsCloseError(t *testing.T) {
 		t.Fatalf("expected ErrConnectionClosed, got %v", err)
 	}
 	<-conn.WaitUntilClosed()
-	if conn.closeErr == nil {
-		t.Fatal("expected closeErr after write failure")
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after write failure")
 	}
 }
 
@@ -773,18 +753,18 @@ func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	}
 }
 
-// TestBaseConn_TruncatedFrameSetsCloseError: EOF mid-frame records
-// io.ErrUnexpectedEOF as the close error, matching Python's
-// close_with_error() on unexpected EOF.
-func TestBaseConn_TruncatedFrameSetsCloseError(t *testing.T) {
+// TestBaseConn_TruncatedFrameClosesConnection: EOF mid-frame shuts the
+// connection down (Python close_with_error on unexpected EOF; the cause is
+// only logged).
+func TestBaseConn_TruncatedFrameClosesConnection(t *testing.T) {
 	// payload_len = 10 but the stream ends right after the length header.
 	tr := newStaticReaderTransport(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}))
 	conn := newConn(tr)
 	conn.Start()
 
 	<-conn.WaitUntilClosed()
-	if !errors.Is(conn.closeErr, io.ErrUnexpectedEOF) {
-		t.Fatalf("want io.ErrUnexpectedEOF, got %v", conn.closeErr)
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after truncated frame")
 	}
 }
 
@@ -910,12 +890,8 @@ func TestBaseConn_StartCloseLifecycle(t *testing.T) {
 	t.Run("double close closes transport once", func(t *testing.T) {
 		tr := newFakeFrameTransport()
 		conn := newConn(tr)
-		if err := conn.Close(); err != nil {
-			t.Fatalf("first Close failed: %v", err)
-		}
-		if err := conn.Close(); err != nil {
-			t.Fatalf("second Close failed: %v", err)
-		}
+		conn.Close()
+		conn.Close()
 		if got := tr.closes(); got != 1 {
 			t.Fatalf("transport closed %d times, want 1", got)
 		}
@@ -1269,9 +1245,6 @@ func TestForwarder_CloseRequest(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("ForwardClose did not shut down the connection")
 	}
-	if conn.closeErr == nil || !strings.Contains(conn.closeErr.Error(), "forwarder requested close") {
-		t.Fatalf("expected forwarder-close error, got %v", conn.closeErr)
-	}
 	if !conn.IsClosed() {
 		t.Fatal("connection should be closed after ForwardClose")
 	}
@@ -1323,9 +1296,6 @@ func TestForwarder_PanicIsolatesConnection(t *testing.T) {
 	case <-conn.WaitUntilClosed():
 	case <-time.After(time.Second):
 		t.Fatal("WaitUntilClosed did not fire after forwarder panic")
-	}
-	if conn.closeErr == nil || !strings.Contains(conn.closeErr.Error(), "frame processing panic") {
-		t.Fatalf("expected frame processing panic error, got %v", conn.closeErr)
 	}
 	if !conn.IsClosed() {
 		t.Fatal("connection should be closed after forwarder panic")
