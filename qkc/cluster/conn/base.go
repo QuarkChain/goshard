@@ -77,7 +77,12 @@ const (
 //     preserving the ordering between rpc_id allocation and serialized writes.
 //
 //   - Protocol state (mu): mu protects mutable connection state shared across goroutines:
-//     state, nextRPCID, pending, timedOut, and readerDone.
+//     state, nextRPCID, pending, and timedOut.
+//     readerDone is created in the constructor and closed exactly once —
+//     by readerLoop on exit, or by shutdown when the connection is closed
+//     before Start (readerLoop never runs). Close() waits on it with a
+//     plain channel receive; receive/close are concurrency-safe, so no mu
+//     is needed on the read side.
 //
 // Lock rules:
 //
@@ -107,7 +112,8 @@ type BaseConn struct {
 	pending   map[uint64]*pendingRPC
 	timedOut  map[uint64]struct{}
 	nextRPCID uint64
-	// Closed when readerLoop exits; nil if the connection has not been started.
+	// Closed when readerLoop exits; closed by shutdown instead when the
+	// connection is closed before Start (no readerLoop ever runs).
 	readerDone chan struct{}
 
 	// Owned by readerLoop. Zero value is the "no request seen yet" sentinel:
@@ -168,6 +174,7 @@ func NewBaseConn(cfg Config) *BaseConn {
 		forwarder:     cfg.Forwarder,
 		activeChan:    make(chan struct{}),
 		closedChan:    make(chan struct{}),
+		readerDone:    make(chan struct{}),
 		pending:       make(map[uint64]*pendingRPC),
 		timedOut:      make(map[uint64]struct{}),
 		state:         ConnectionStateConnecting,
@@ -198,20 +205,19 @@ func (c *BaseConn) Start() {
 	}
 	c.state = ConnectionStateActive
 	close(c.activeChan)
-
-	c.readerDone = make(chan struct{})
 	c.mu.Unlock()
 
 	go c.readerLoop()
 }
 
-// Close closes the connection and wakes all pending RPCs.
+// Close closes the connection and wakes all pending RPCs. It mirrors
+// Python's close(): no return value — the close cause, if any, is only
+// logged. It blocks until the readerLoop has exited; when the connection
+// is closed before Start, shutdown closes readerDone itself (no
+// readerLoop ever runs), so Close never blocks on a never-started loop.
 func (c *BaseConn) Close() {
 	c.shutdown(nil)
-	done := c.readerDone
-	if done != nil {
-		<-done
-	}
+	<-c.readerDone
 }
 
 // SendRPC sends a request without metadata and waits for its response.
@@ -610,6 +616,17 @@ func (c *BaseConn) shutdown(cause error) {
 			delete(c.timedOut, id)
 		}
 		c.mu.Unlock()
+
+		if wasConnecting {
+			// The connection was closed before Start: no readerLoop ever
+			// runs (state is now Closed, so Start is a no-op), so there is
+			// no goroutine to close readerDone on exit. Complete the signal
+			// here so Close()'s <-readerDone does not block. On the normal
+			// path (wasConnecting == false) readerLoop closes it exactly
+			// once when it returns; the two paths are mutually exclusive,
+			// so readerDone is closed exactly once overall.
+			close(c.readerDone)
+		}
 
 		for _, call := range pending {
 			call.stop()

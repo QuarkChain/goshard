@@ -483,9 +483,6 @@ func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
 	})
 }
 
-// TestBaseConn_CleanShutdown: graceful shutdown (local Close, clean peer EOF)
-// TestBaseConn_CleanShutdown: graceful shutdown (local Close, clean peer EOF)
-// completes without error.
 func TestBaseConn_CleanShutdown(t *testing.T) {
 	t.Run("local Close", func(t *testing.T) {
 		conn := newConn(newFakeFrameTransport())
@@ -884,6 +881,24 @@ func TestBaseConn_StartCloseLifecycle(t *testing.T) {
 		case <-closeDone:
 		case <-time.After(2 * time.Second):
 			t.Fatal("Close() deadlocked waiting on readerDone for a readerLoop that never started")
+		}
+	})
+
+	t.Run("concurrent start and close", func(t *testing.T) {
+		conn := newConn(newFakeFrameTransport())
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			conn.Start()
+		}()
+		go func() {
+			defer wg.Done()
+			conn.Close()
+		}()
+		wg.Wait()
+		if !conn.IsClosed() {
+			t.Fatal("connection should be closed after concurrent Start/Close")
 		}
 	})
 
