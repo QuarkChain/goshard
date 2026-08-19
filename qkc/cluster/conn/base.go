@@ -202,11 +202,10 @@ func (c *BaseConn) Start() {
 	c.state = ConnectionStateActive
 	close(c.activeChan)
 
-	done := make(chan struct{})
-	c.readerDone = done
+	c.readerDone = make(chan struct{})
 	c.mu.Unlock()
 
-	go c.readerLoop(done)
+	go c.readerLoop()
 }
 
 // Close closes the connection and wakes all pending RPCs.
@@ -398,9 +397,9 @@ func (c *BaseConn) writeFrame(f *wire.Frame) error {
 // -- readerLoop --------------------------------------------------------------
 
 // readerLoop reads frames from the transport and dispatches them.
-// Read errors trigger shutdown. done is closed exactly once when it exits.
-func (c *BaseConn) readerLoop(done chan struct{}) {
-	defer close(done)
+// Read errors trigger shutdown.
+func (c *BaseConn) readerLoop() {
+	defer close(c.readerDone)
 	for {
 		frame, err := c.transport.ReadFrame()
 		if err != nil {
