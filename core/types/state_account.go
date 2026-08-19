@@ -39,8 +39,9 @@ type StateAccount struct {
 	CodeHash     []byte
 	MntBalances  *qkccommon.TokenBalances // Non-QKC balances.
 	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
-	// balanceUpdateCount keeps a changed zero QKC balance encoded as 00c0. Using
-	// a counter ensures that reverting one update does not clear earlier updates.
+	// balanceUpdateCount keeps a changed zero QKC balance encoded as 00c0. Only
+	// whether it is non-zero is ever read; FinaliseBalanceUpdates clamps it back
+	// to one at every transaction boundary.
 	balanceUpdateCount uint64
 }
 
