@@ -485,22 +485,20 @@ func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
 }
 
 // TestBaseConn_CleanShutdown: graceful shutdown (local Close, clean peer EOF)
-// publishes no error; transport close errors are returned by Close.
+// records no close error; transport close errors are returned by Close.
 func TestBaseConn_CleanShutdown(t *testing.T) {
-	t.Run("local Close publishes no error", func(t *testing.T) {
+	t.Run("local Close records no error", func(t *testing.T) {
 		conn := newConn(newFakeFrameTransport())
 		conn.Start()
 		if err := conn.Close(); err != nil {
 			t.Fatalf("close connection: %v", err)
 		}
-		select {
-		case err := <-conn.Error():
-			t.Fatalf("clean close published error: %v", err)
-		default:
+		if conn.closeErr != nil {
+			t.Fatalf("clean close recorded error: %v", conn.closeErr)
 		}
 	})
 
-	t.Run("clean peer EOF publishes no error", func(t *testing.T) {
+	t.Run("clean peer EOF records no error", func(t *testing.T) {
 		conn := newConn(newStaticReaderTransport(bytes.NewReader(nil)))
 		conn.Start()
 
@@ -508,10 +506,8 @@ func TestBaseConn_CleanShutdown(t *testing.T) {
 		if !conn.IsClosed() {
 			t.Fatal("connection should be closed after clean EOF")
 		}
-		select {
-		case err := <-conn.Error():
-			t.Fatalf("clean EOF published error: %v", err)
-		default:
+		if conn.closeErr != nil {
+			t.Fatalf("clean EOF recorded error: %v", conn.closeErr)
 		}
 	})
 
@@ -655,7 +651,7 @@ func TestBaseConn_CancelErrorContract(t *testing.T) {
 	}
 }
 
-func TestBaseConn_WriteFailurePublishesError(t *testing.T) {
+func TestBaseConn_WriteFailureSetsCloseError(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeErr = errors.New("write failed")
 	conn := newConn(tr)
@@ -665,15 +661,10 @@ func TestBaseConn_WriteFailurePublishesError(t *testing.T) {
 	if err != ErrConnectionClosed {
 		t.Fatalf("expected ErrConnectionClosed, got %v", err)
 	}
-	select {
-	case cerr := <-conn.Error():
-		if cerr == nil {
-			t.Fatal("expected non-nil error on Error() channel after write failure")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Error() channel did not receive write failure")
-	}
 	<-conn.WaitUntilClosed()
+	if conn.closeErr == nil {
+		t.Fatal("expected closeErr after write failure")
+	}
 }
 
 func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
@@ -782,23 +773,19 @@ func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	}
 }
 
-// TestBaseConn_TruncatedFramePublishesError: EOF mid-frame publishes
-// io.ErrUnexpectedEOF, matching Python's close_with_error() on unexpected EOF.
-func TestBaseConn_TruncatedFramePublishesError(t *testing.T) {
+// TestBaseConn_TruncatedFrameSetsCloseError: EOF mid-frame records
+// io.ErrUnexpectedEOF as the close error, matching Python's
+// close_with_error() on unexpected EOF.
+func TestBaseConn_TruncatedFrameSetsCloseError(t *testing.T) {
 	// payload_len = 10 but the stream ends right after the length header.
 	tr := newStaticReaderTransport(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}))
 	conn := newConn(tr)
 	conn.Start()
 
-	select {
-	case err := <-conn.Error():
-		if !errors.Is(err, io.ErrUnexpectedEOF) {
-			t.Fatalf("want io.ErrUnexpectedEOF, got %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("truncated frame did not publish an error")
-	}
 	<-conn.WaitUntilClosed()
+	if !errors.Is(conn.closeErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("want io.ErrUnexpectedEOF, got %v", conn.closeErr)
+	}
 }
 
 // TestSendRPC_ConcurrentSendsPreserveRPCIDOrder: concurrent SendRPC calls must
@@ -901,7 +888,7 @@ func TestBaseConn_StartCloseLifecycle(t *testing.T) {
 		conn := newConn(newFakeFrameTransport())
 		conn.Close()
 		conn.Start()
-		if conn.State() != ConnectionStateClosed {
+		if !conn.IsClosed() {
 			t.Fatal("expected closed state after Start on closed connection")
 		}
 	})
@@ -1278,12 +1265,12 @@ func TestForwarder_CloseRequest(t *testing.T) {
 	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
 
 	select {
-	case err := <-conn.Error():
-		if err == nil || !strings.Contains(err.Error(), "forwarder requested close") {
-			t.Fatalf("expected forwarder-close error, got %v", err)
-		}
+	case <-conn.WaitUntilClosed():
 	case <-time.After(time.Second):
 		t.Fatal("ForwardClose did not shut down the connection")
+	}
+	if conn.closeErr == nil || !strings.Contains(conn.closeErr.Error(), "forwarder requested close") {
+		t.Fatalf("expected forwarder-close error, got %v", conn.closeErr)
 	}
 	if !conn.IsClosed() {
 		t.Fatal("connection should be closed after ForwardClose")
@@ -1337,13 +1324,8 @@ func TestForwarder_PanicIsolatesConnection(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("WaitUntilClosed did not fire after forwarder panic")
 	}
-	select {
-	case err := <-conn.Error():
-		if err == nil || !strings.Contains(err.Error(), "frame processing panic") {
-			t.Fatalf("expected frame processing panic error, got %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Error() did not publish the panic error")
+	if conn.closeErr == nil || !strings.Contains(conn.closeErr.Error(), "frame processing panic") {
+		t.Fatalf("expected frame processing panic error, got %v", conn.closeErr)
 	}
 	if !conn.IsClosed() {
 		t.Fatal("connection should be closed after forwarder panic")

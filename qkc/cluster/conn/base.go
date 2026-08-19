@@ -76,8 +76,11 @@ const (
 //     serialized by writeMu. SendRPC allocates rpc_id while holding writeMu,
 //     preserving the ordering between rpc_id allocation and serialized writes.
 //
-//   - State: mu protects the protocol state group:
-//     state, closeErr, nextRPCID, pending, timedOut, and readerDone.
+//   - Protocol state (mu): mu protects mutable connection state shared across goroutines:
+//     state, nextRPCID, pending, timedOut, and readerDone.
+//     closeErr is intentionally not protected by mu. It is written only inside
+//     the sync.Once shutdown body, and sync.Once.Do provides the necessary
+//     happens-before ordering for callers after shutdown returns.
 //
 // Lock rules:
 //
@@ -108,7 +111,7 @@ type BaseConn struct {
 	timedOut  map[uint64]struct{}
 	nextRPCID uint64
 	closeErr  error
-	// nil until readerLoop starts; closed when readerLoop exits.
+	// Closed when readerLoop exits; nil if the connection has not been started.
 	readerDone chan struct{}
 
 	// Owned by readerLoop. Zero value is the "no request seen yet" sentinel:
@@ -126,7 +129,6 @@ type BaseConn struct {
 	// or already closed; callers must check IsActive().
 	activeChan chan struct{}
 	closedChan chan struct{} // closed during shutdown
-	errChan    chan error    // cap 1, non-user errors
 
 	log log.Logger
 }
@@ -170,7 +172,6 @@ func NewBaseConn(cfg Config) *BaseConn {
 		forwarder:     cfg.Forwarder,
 		activeChan:    make(chan struct{}),
 		closedChan:    make(chan struct{}),
-		errChan:       make(chan error, 1),
 		pending:       make(map[uint64]*pendingRPC),
 		timedOut:      make(map[uint64]struct{}),
 		state:         ConnectionStateConnecting,
@@ -211,16 +212,11 @@ func (c *BaseConn) Start() {
 // Close closes the connection and wakes all pending RPCs.
 func (c *BaseConn) Close() error {
 	c.shutdown(nil)
-	c.mu.RLock()
 	done := c.readerDone
-	c.mu.RUnlock()
 	if done != nil {
 		<-done
 	}
-	c.mu.RLock()
-	err := c.closeErr
-	c.mu.RUnlock()
-	return err
+	return c.closeErr
 }
 
 // SendRPC sends a request without metadata and waits for its response.
@@ -302,10 +298,6 @@ func (c *BaseConn) SendCommandMeta(opcode byte, payload []byte, meta wire.Cluste
 
 // -- Query methods -----------------------------------------------------------
 
-// Error returns connection failures. A caller-initiated Close does not publish
-// an error.
-func (c *BaseConn) Error() <-chan error { return c.errChan }
-
 // RemoteAddr returns the transport's remote address.
 func (c *BaseConn) RemoteAddr() string { return c.transport.RemoteAddr() }
 
@@ -369,9 +361,9 @@ func rpcTimeoutError(err error) error {
 
 // -- Write path ---------------------------------------------------------------
 //
-// writeFrame serializes a frame write with writeMu; a write failure other than
-// ErrConnectionClosed triggers shutdown after writeMu is released (shutdown
-// acquires writeMu as a barrier, so it must never run while writeMu is held).
+// writeFrame serializes transport writes with writeMu. Write failures trigger
+// shutdown after the lock is released; shutdown acquires writeMu as a barrier,
+// so shutdown must never be entered while writeMu is held.
 
 // writeFrame writes a pre-built frame.
 func (c *BaseConn) writeFrame(f *wire.Frame) error {
@@ -388,7 +380,7 @@ func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	err := c.transport.WriteFrame(f)
 	c.writeMu.Unlock()
 
-	if err != nil && !errors.Is(err, ErrConnectionClosed) {
+	if err != nil {
 		c.shutdown(fmt.Errorf("write frame: %w", err))
 	}
 	return err
@@ -630,23 +622,13 @@ func (c *BaseConn) shutdown(cause error) {
 		// Close transport to interrupt blocked I/O.
 		// Writes already accepted by the transport may still complete.
 		if err := c.transport.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			c.mu.Lock()
 			if c.closeErr == nil {
 				c.closeErr = err
 			}
-			c.mu.Unlock()
 		}
 
 		c.writeMu.Lock()
 		c.writeMu.Unlock()
-
-		// Publish the non-user error, if any.
-		if cause != nil {
-			select {
-			case c.errChan <- cause:
-			default:
-			}
-		}
 	})
 }
 
