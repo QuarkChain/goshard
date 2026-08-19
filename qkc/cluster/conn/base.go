@@ -98,7 +98,7 @@ type BaseConn struct {
 	serializers   map[byte]*OpSerializer
 	typedHandlers map[byte]TypedHandler
 	nonRPCOps     map[byte]struct{}
-	forwarder     func(*wire.Frame) bool
+	forwarder     func(*wire.Frame) ForwardResult
 
 	// -- Protocol state (mu) --
 	mu        sync.RWMutex
@@ -110,8 +110,11 @@ type BaseConn struct {
 	// nil until readerLoop starts; closed when readerLoop exits.
 	readerDone chan struct{}
 
-	// Owned by readerLoop.
-	peerRPCID int64
+	// Owned by readerLoop. Zero value is the "no request seen yet" sentinel:
+	// rpc_id=0 is reserved for non-RPC (fire-and-forget) commands (see
+	// SendCommandMeta), so every valid inbound RPC request has rpc_id >= 1 and
+	// passes the monotonic check against the zero-value state.
+	peerRPCID uint64
 
 	// -- Frame send serialization (writeMu) --
 	writeMu sync.Mutex
@@ -165,7 +168,6 @@ func NewBaseConn(cfg Config) *BaseConn {
 		errChan:       make(chan error, 1),
 		pending:       make(map[uint64]*pendingRPC),
 		timedOut:      make(map[uint64]struct{}),
-		peerRPCID:     -1,
 		state:         ConnectionStateConnecting,
 		log:           logger,
 	}
@@ -235,6 +237,11 @@ func (c *BaseConn) SendRPCMeta(
 	}
 
 	c.writeMu.Lock()
+
+	if err := ctx.Err(); err != nil {
+		c.writeMu.Unlock()
+		return nil, err
+	}
 
 	c.mu.Lock()
 	if err := c.checkActiveLocked(); err != nil {
@@ -402,14 +409,23 @@ func (c *BaseConn) readerLoop(done chan struct{}) {
 // -- handleFrame -------------------------------------------------------------
 
 func (c *BaseConn) handleFrame(frame *wire.Frame) {
-	fwd := c.forwarder
+	if fwd := c.forwarder; fwd != nil {
+		switch fwd(frame) {
+		case ForwardConsumed:
+			return
+		case ForwardClose:
+			// Forwarder detected an unrecoverable routing or protocol condition.
+			// The BaseConn owns connection shutdown, so the router only requests
+			// closure here instead of closing the connection directly.
+			c.log.Warn("forwarder requested close", "opcode", frame.Opcode, "rpcid", frame.RPCID)
+			c.shutdown(fmt.Errorf("forwarder requested close (opcode 0x%x rpc_id %d)", frame.Opcode, frame.RPCID))
+			return
+		}
+	}
+
 	handler, isRequest := c.typedHandlers[frame.Opcode]
 	_, isNonRPC := c.nonRPCOps[frame.Opcode]
 	ser := c.serializers[frame.Opcode]
-
-	if fwd != nil && fwd(frame) {
-		return
-	}
 
 	if isRequest {
 		c.handleRequest(frame, handler, ser, isNonRPC)
@@ -616,10 +632,10 @@ func (c *BaseConn) shutdown(cause error) {
 // -- RPC ID validation (default) ---------------------------------------------
 
 func (c *BaseConn) defaultValidateRPCID(rpcID uint64) bool {
-	if int64(rpcID) <= c.peerRPCID {
+	if rpcID <= c.peerRPCID {
 		return false
 	}
-	c.peerRPCID = int64(rpcID)
+	c.peerRPCID = rpcID
 	return true
 }
 
