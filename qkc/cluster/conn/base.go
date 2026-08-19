@@ -140,11 +140,15 @@ func NewBaseConn(cfg Config) *BaseConn {
 		logger = log.Root()
 	}
 
-	// Register each serializer under both its request and response opcodes.
+	// Register RPC serializers under both their request and response opcodes;
+	// non-RPC serializers are request-only (dummy response opcode ignored).
 	serializers := make(map[byte]*OpSerializer, len(cfg.Serializers)*2)
 	for opcode, ser := range cfg.Serializers {
 		serializers[opcode] = ser
-		serializers[ser.ResponseOpCode] = ser
+
+		if _, nonRPC := cfg.NonRPCOps[opcode]; !nonRPC {
+			serializers[ser.ResponseOpCode] = ser
+		}
 	}
 
 	// Copy maps so the caller's maps are not shared.

@@ -294,23 +294,85 @@ func TestConfig_ValidationPanics(t *testing.T) {
 	}
 }
 
-// TestConfig_ResponseOpcodeConflictPanics: a response opcode colliding with a
-// request opcode would overwrite the serializer map entry and misroute frames.
-func TestConfig_ResponseOpcodeConflictPanics(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic for response/request opcode conflict")
-		}
-	}()
-	NewBaseConn(Config{
+// TestConfig_ResponseOpcodePanics: response opcodes must be unique and disjoint
+// from every request opcode (RPC or non-RPC), otherwise serializers[respOp]
+// would be overwritten by map-iteration order and inbound frames decoded
+// through a random serializer.
+func TestConfig_ResponseOpcodePanics(t *testing.T) {
+	tests := []struct {
+		name        string
+		serializers map[byte]*OpSerializer
+		nonRPC      map[byte]struct{}
+	}{
+		{
+			name: "response opcode conflicts with rpc request opcode",
+			serializers: map[byte]*OpSerializer{
+				0x01: {ResponseOpCode: 0x02},
+				0x02: {ResponseOpCode: 0x03},
+			},
+		},
+		{
+			name: "duplicate response opcode",
+			serializers: map[byte]*OpSerializer{
+				0x81: {ResponseOpCode: 0x90},
+				0x82: {ResponseOpCode: 0x90},
+			},
+		},
+		{
+			name: "response opcode conflicts with non-rpc request opcode",
+			serializers: map[byte]*OpSerializer{
+				0x81: {ResponseOpCode: 0x90},
+				0x90: {ResponseOpCode: 0x90},
+			},
+			nonRPC: map[byte]struct{}{0x90: {}},
+		},
+		{
+			name:        "self-referencing rpc response opcode",
+			serializers: map[byte]*OpSerializer{0x81: {ResponseOpCode: 0x81}},
+		},
+		{
+			name:        "zero response opcode for rpc",
+			serializers: map[byte]*OpSerializer{0x81: {ResponseOpCode: 0}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic for " + tt.name)
+				}
+			}()
+			NewBaseConn(Config{
+				Transport:   newFakeFrameTransport(),
+				Serializers: tt.serializers,
+				NonRPCOps:   tt.nonRPC,
+				Logger:      log.New(),
+			})
+		})
+	}
+}
+
+// TestConfig_NonRPCDummyResponseOpcode: fire-and-forget commands (Python's
+// op_non_rpc_map, e.g. NEW_BLOCK_MINOR) configure a dummy self-referencing or
+// zero ResponseOpCode. Declared in NonRPCOps, the dummy value must be ignored:
+// no panic, no response-opcode registration, no opcode 0x00 pollution.
+func TestConfig_NonRPCDummyResponseOpcode(t *testing.T) {
+	const op = byte(0x42)
+	conn := NewBaseConn(Config{
 		Transport: newFakeFrameTransport(),
 		Serializers: map[byte]*OpSerializer{
-			0x01: {ResponseOpCode: 0x02},
-			0x02: {ResponseOpCode: 0x03},
+			op: {ResponseOpCode: op}, // self-referencing dummy, as in slave configs
 		},
-		Logger: log.New(),
+		NonRPCOps: map[byte]struct{}{op: {}},
+		Handlers:  map[byte]TypedHandler{op: pongHandler()},
+		Logger:    log.New(),
 	})
+	if _, ok := conn.serializers[op]; !ok {
+		t.Fatal("non-RPC request opcode not registered")
+	}
+	if len(conn.serializers) != 1 {
+		t.Fatalf("serializers has %d entries, want 1 (dummy response opcode must not be registered)", len(conn.serializers))
+	}
 }
 
 // -- BaseConn unit tests (fake transport) --------------------------------------
