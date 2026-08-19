@@ -92,8 +92,13 @@ func (acct *StateAccount) RevertBalanceUpdate() {
 	acct.balanceUpdateCount--
 }
 
-// FinaliseBalanceUpdates keeps committed update presence without retaining
-// the number of updates from journals that can no longer be reverted.
+// FinaliseBalanceUpdates is called at the transaction boundary before the
+// journal is cleared. It collapses committed balance updates to a single
+// presence marker: their individual counts are no longer needed for reverts,
+// but the marker must remain so an explicitly updated zero balance continues
+// to encode as 00c0 in snapshots and consensus state. The compaction is
+// required to keep the counter bounded; without it, successful transactions
+// would accumulate counts indefinitely and could eventually overflow.
 func (acct *StateAccount) FinaliseBalanceUpdates() {
 	if acct.balanceUpdateCount > 0 {
 		acct.balanceUpdateCount = 1
