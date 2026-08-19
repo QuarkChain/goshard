@@ -77,7 +77,7 @@ func loadStateGolden(t *testing.T) []goldenStateCase {
 	return file.Cases
 }
 
-func newTestState(t *testing.T) *StateDB {
+func newTestState(t *testing.T) *EvmState {
 	t.Helper()
 	db := rawdb.NewMemoryDatabase()
 	state, err := New(coretypes.EmptyRootHash, db, NewDatabase(db))
@@ -112,7 +112,7 @@ func mustBig(t *testing.T, raw json.RawMessage) *big.Int {
 // applyAlloc is quarkchain/genesis.py:55-86: the shard key is set per address
 // before its account is created, code comes with nonce 1, and balances arrive as
 // deltas.
-func applyAlloc(t *testing.T, state *StateDB, alloc map[string]goldenAllocation) {
+func applyAlloc(t *testing.T, state *EvmState, alloc map[string]goldenAllocation) {
 	t.Helper()
 	addresses := make([]string, 0, len(alloc))
 	for addr := range alloc {
@@ -152,7 +152,7 @@ func applyAlloc(t *testing.T, state *StateDB, alloc map[string]goldenAllocation)
 	}
 }
 
-func runOps(t *testing.T, state *StateDB, ops []goldenOp) {
+func runOps(t *testing.T, state *EvmState, ops []goldenOp) {
 	t.Helper()
 	var snapshots []int
 	for i, op := range ops {
@@ -184,6 +184,10 @@ func runOps(t *testing.T, state *StateDB, ops []goldenOp) {
 				t.Fatalf("op %d: balance overflows 256 bits", i)
 			}
 			state.SetTokenBalance(addr, tokenID, value)
+		case "read_account":
+			// A read is not inert: it is where an absent account's shard key
+			// freezes, so the op has to reach the state rather than be skipped.
+			state.GetBalance(addr, qkcCommon.DefaultTokenID)
 		case "set_nonce":
 			var nonce uint64
 			if err := json.Unmarshal(op.Value, &nonce); err != nil {
@@ -202,8 +206,6 @@ func runOps(t *testing.T, state *StateDB, ops []goldenOp) {
 			state.SetState(addr, common.HexToHash(op.Key), common.HexToHash(value))
 		case "reset_balances":
 			state.ResetBalances(addr)
-		case "reset_storage":
-			state.ResetStorage(addr)
 		case "del_account":
 			state.DelAccount(addr)
 		case "snapshot":
@@ -215,7 +217,7 @@ func runOps(t *testing.T, state *StateDB, ops []goldenOp) {
 			state.RevertToSnapshot(snapshots[len(snapshots)-1])
 			snapshots = snapshots[:len(snapshots)-1]
 		case "commit":
-			if _, err := state.Commit(); err != nil {
+			if _, err := state.Commit(0); err != nil {
 				t.Fatalf("op %d: commit: %v", i, err)
 			}
 		default:
@@ -224,7 +226,7 @@ func runOps(t *testing.T, state *StateDB, ops []goldenOp) {
 	}
 }
 
-func checkAccounts(t *testing.T, state *StateDB, want map[string]goldenAccount) {
+func checkAccounts(t *testing.T, state *EvmState, want map[string]goldenAccount) {
 	t.Helper()
 	for addrHex, expected := range want {
 		addr := mustRecipient(t, addrHex)
@@ -276,7 +278,7 @@ func TestStateGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			state := newTestState(t)
 			applyAlloc(t, state, tc.PreAlloc)
-			preRoot, err := state.Commit()
+			preRoot, err := state.Commit(0)
 			if err != nil {
 				t.Fatalf("commit allocation: %v", err)
 			}
@@ -286,7 +288,7 @@ func TestStateGolden(t *testing.T) {
 
 			runOps(t, state, tc.Ops)
 
-			root, err := state.Commit()
+			root, err := state.Commit(0)
 			if err != nil {
 				t.Fatalf("commit: %v", err)
 			}
@@ -315,7 +317,7 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 				t.Fatalf("New: %v", err)
 			}
 			applyAlloc(t, state, tc.PreAlloc)
-			root, err := state.Commit()
+			root, err := state.Commit(0)
 			if err != nil {
 				t.Fatalf("commit: %v", err)
 			}
@@ -331,7 +333,7 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 				addr := mustRecipient(t, addrHex[:2*account.RecipientLength])
 				reopened.SetNonce(addr, reopened.GetNonce(addr))
 			}
-			again, err := reopened.Commit()
+			again, err := reopened.Commit(0)
 			if err != nil {
 				t.Fatalf("recommit: %v", err)
 			}
@@ -359,7 +361,7 @@ func TestStoragePersistsAcrossReopen(t *testing.T) {
 	for slot := 1; slot <= 3; slot++ {
 		state.SetState(addr, common.BigToHash(big.NewInt(int64(slot))), common.BigToHash(big.NewInt(int64(slot*100))))
 	}
-	root, err := state.Commit()
+	root, err := state.Commit(0)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -400,7 +402,7 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(1000))
 	state.SetNonce(addr, 3)
 	state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x11"))
-	base, err := state.Commit()
+	base, err := state.Commit(0)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -408,7 +410,6 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	outer := state.Snapshot()
 	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(-500))
 	state.AddGasUsed(21000)
-	state.AddSuicide(other)
 
 	inner := state.Snapshot()
 	state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x22"))
@@ -434,14 +435,11 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	if got := state.GasUsed(); got != 0 {
 		t.Errorf("gas used after outer revert = %d, want 0", got)
 	}
-	if got := len(state.Suicides()); got != 0 {
-		t.Errorf("suicides after outer revert = %d, want 0", got)
-	}
 	if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != 1000 {
 		t.Errorf("balance after outer revert = %d, want 1000", got)
 	}
 
-	root, err := state.Commit()
+	root, err := state.Commit(0)
 	if err != nil {
 		t.Fatalf("recommit: %v", err)
 	}
@@ -466,7 +464,7 @@ func TestCorruptTrieFailsLoudly(t *testing.T) {
 	state.SetFullShardKey(1)
 	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(1000))
 	state.DeltaTokenBalance(other, qkcCommon.DefaultTokenID, big.NewInt(2000))
-	root, err := state.Commit()
+	root, err := state.Commit(0)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -498,7 +496,7 @@ func TestCorruptTrieFailsLoudly(t *testing.T) {
 		t.Error("reading an unresolvable account reported no error")
 	}
 	corrupt.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(500))
-	again, err := corrupt.Commit()
+	again, err := corrupt.Commit(0)
 	if err == nil {
 		t.Errorf("commit of a corrupt state succeeded with root %s (was %s)", again, root)
 	}
@@ -513,7 +511,7 @@ func TestBlankAccountsAreNeverWritten(t *testing.T) {
 		state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(0))
 		state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x2a"))
 	}
-	root, err := state.Commit()
+	root, err := state.Commit(0)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
