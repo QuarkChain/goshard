@@ -21,7 +21,7 @@ import (
 type xshardConn struct {
 	*conn.BaseConn
 
-	localID              []byte // this slave's identity, sent in PONG
+	localID              []byte // this slave's identity, sent in PING/PONG
 	localFullShardIDList []uint32
 
 	stateMu             sync.RWMutex // guards peerID / peerFullShardIDList
@@ -35,30 +35,31 @@ type xshardConn struct {
 // serializers and handlers. It does not dial, accept, ping, or register with a
 // pool; net.Conn ownership belongs to the caller.
 func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *xshardConn {
-	readFrame := func(r io.Reader) (*wire.Frame, error) {
-		return wire.ReadFrameNoMeta(r, maxPayloadSize)
-	}
 	xc := &xshardConn{
-		BaseConn:             conn.NewBaseConnFromConn(nc, readFrame, wire.WriteFrameNoMeta, logger),
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 		pingReceived:         make(chan struct{}),
 	}
+	xc.BaseConn = conn.NewBaseConn(conn.Config{
+		Transport: conn.NewTCPTransport(
+			nc,
+			func(r io.Reader) (*wire.Frame, error) { return wire.ReadFrameNoMeta(r, maxPayloadSize) },
+			wire.WriteFrameNoMeta,
+		),
+		Serializers: map[byte]*conn.OpSerializer{
+			byte(wire.ClusterOpPing):                        conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+			byte(wire.ClusterOpAddXshardTxListRequest):      conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+			byte(wire.ClusterOpBatchAddXshardTxListRequest): conn.OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](byte(wire.ClusterOpBatchAddXshardTxListResponse)),
+		},
+		Handlers: map[byte]conn.TypedHandler{
+			byte(wire.ClusterOpPing): xc.handlePing,
 
-	xc.BaseConn.RegisterOpSerializers(map[byte]*conn.OpSerializer{
-		byte(wire.ClusterOpPing):                        conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-		byte(wire.ClusterOpAddXshardTxListRequest):      conn.OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
-		byte(wire.ClusterOpBatchAddXshardTxListRequest): conn.OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](byte(wire.ClusterOpBatchAddXshardTxListResponse)),
+			// Fail-fast stubs: invoking them closes the connection until migrated.
+			byte(wire.ClusterOpAddXshardTxListRequest):      xc.handleAddXshardTxList,
+			byte(wire.ClusterOpBatchAddXshardTxListRequest): xc.handleBatchAddXshardTxList,
+		},
+		Logger: logger,
 	})
-
-	xc.BaseConn.RegisterTypedHandlers(map[byte]conn.TypedHandler{
-		byte(wire.ClusterOpPing): xc.handlePing,
-
-		// Fail-fast stubs: invoking them closes the connection until migrated.
-		byte(wire.ClusterOpAddXshardTxListRequest):      xc.handleAddXshardTxList,
-		byte(wire.ClusterOpBatchAddXshardTxListRequest): xc.handleBatchAddXshardTxList,
-	})
-
 	return xc
 }
 
@@ -75,13 +76,13 @@ func (x *xshardConn) handlePing(req any) (any, error) {
 	emptyShardList := len(x.peerFullShardIDList) == 0
 	x.stateMu.Unlock()
 
+	// Matches Python's close_with_error: a handler error closes the connection
+	// and the pending PING completes with ErrConnectionClosed.
 	if emptyShardList {
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
 
-	if !x.BaseConn.IsClosed() {
-		x.pingOnce.Do(func() { close(x.pingReceived) })
-	}
+	x.pingOnce.Do(func() { close(x.pingReceived) })
 
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), x.localID...),
@@ -142,89 +143,69 @@ func (x *xshardConn) waitUntilPingReceived() bool {
 	}
 }
 
+// sendRPCAs serializes req, sends it as an RPC under opcode, and returns the
+// response decoded as S. The response is deserialized once by BaseConn; a wrong
+// response opcode surfaces as a type mismatch here and does not close the
+// connection.
+func sendRPCAs[S any](x *xshardConn, ctx context.Context, opcode byte, req any) (*S, error) {
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		return nil, fmt.Errorf("serialize request: %w", err)
+	}
+	resp, err := x.BaseConn.SendRPC(ctx, opcode, payload)
+	if err != nil {
+		return nil, err
+	}
+	typed, ok := resp.(*S)
+	if !ok {
+		return nil, fmt.Errorf("unexpected response type %T for opcode 0x%x", resp, opcode)
+	}
+	return typed, nil
+}
+
 // sendPing sends PING and returns the peer's id and shard list from PONG.
 func (x *xshardConn) sendPing(ctx context.Context) (id []byte, shardList []uint32, err error) {
-	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
+	pong, err := sendRPCAs[wire.PongResponse](x, ctx, byte(wire.ClusterOpPing), &wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
-		// RootTip stays nil until the RootBlock wire type is ported; the
+		// TODO: RootTip stays nil until the RootBlock wire type is ported; the
 		// handshake does not consume it.
 		RootTip: nil,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("serialize ping: %w", err)
-	}
-
-	frame, err := x.BaseConn.SendRPC(ctx, byte(wire.ClusterOpPing), payload)
-	if err != nil {
 		return nil, nil, fmt.Errorf("send ping: %w", err)
-	}
-	if frame.Opcode != byte(wire.ClusterOpPong) {
-		return nil, nil, fmt.Errorf("unexpected ping response opcode: got 0x%x, want 0x%x",
-			frame.Opcode, byte(wire.ClusterOpPong))
-	}
-
-	var pong wire.PongResponse
-	if err := serialize.DeserializeFromBytes(frame.Payload, &pong); err != nil {
-		return nil, nil, fmt.Errorf("deserialize pong: %w", err)
 	}
 
 	if len(pong.ID) == 0 {
 		return nil, nil, fmt.Errorf("empty slave ID in PONG")
 	}
-
 	if len(pong.FullShardIDList) == 0 {
 		return nil, nil, fmt.Errorf("empty shard list in PONG")
 	}
-	return pong.ID, pong.FullShardIDList, nil
+	return append([]byte(nil), pong.ID...), append([]uint32(nil), pong.FullShardIDList...), nil
 }
 
-// sendXshardTxList sends an AddXshardTxListRequest RPC.
-func (x *xshardConn) sendXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
-	return x.BaseConn.SendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), payload)
-}
-
-// sendBatchXshardTxList sends a BatchAddXshardTxListRequest RPC.
-func (x *xshardConn) sendBatchXshardTxList(ctx context.Context, payload []byte) (*wire.Frame, error) {
-	return x.BaseConn.SendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), payload)
-}
-
-// parseAddXshardTxListResponse decodes an AddXshardTxListResponse; a non-zero
-// error_code is returned as an error.
-func parseAddXshardTxListResponse(frame *wire.Frame) (*wire.AddXshardTxListResponse, error) {
-	if frame == nil {
-		return nil, fmt.Errorf("nil xshard response frame")
-	}
-	if frame.Opcode != byte(wire.ClusterOpAddXshardTxListResponse) {
-		return nil, fmt.Errorf("unexpected xshard response opcode: got 0x%x, want 0x%x",
-			frame.Opcode, byte(wire.ClusterOpAddXshardTxListResponse))
-	}
-	var resp wire.AddXshardTxListResponse
-	if err := serialize.DeserializeFromBytes(frame.Payload, &resp); err != nil {
-		return nil, fmt.Errorf("deserialize AddXshardTxListResponse: %w", err)
+// sendXshardTxList sends an AddXshardTxListRequest and verifies its error code.
+func (x *xshardConn) sendXshardTxList(ctx context.Context, req *wire.AddXshardTxListRequest) error {
+	resp, err := sendRPCAs[wire.AddXshardTxListResponse](x, ctx, byte(wire.ClusterOpAddXshardTxListRequest), req)
+	if err != nil {
+		return err
 	}
 	if resp.ErrorCode != 0 {
-		return &resp, fmt.Errorf("AddXshardTxList failed: error_code=%d", resp.ErrorCode)
+		return fmt.Errorf("AddXshardTxList failed: error_code=%d", resp.ErrorCode)
 	}
-	return &resp, nil
+	return nil
 }
 
-// parseBatchAddXshardTxListResponse decodes a BatchAddXshardTxListResponse; a
-// non-zero error_code is returned as an error.
-func parseBatchAddXshardTxListResponse(frame *wire.Frame) (*wire.BatchAddXshardTxListResponse, error) {
-	if frame == nil {
-		return nil, fmt.Errorf("nil xshard response frame")
-	}
-	if frame.Opcode != byte(wire.ClusterOpBatchAddXshardTxListResponse) {
-		return nil, fmt.Errorf("unexpected xshard response opcode: got 0x%x, want 0x%x",
-			frame.Opcode, byte(wire.ClusterOpBatchAddXshardTxListResponse))
-	}
-	var resp wire.BatchAddXshardTxListResponse
-	if err := serialize.DeserializeFromBytes(frame.Payload, &resp); err != nil {
-		return nil, fmt.Errorf("deserialize BatchAddXshardTxListResponse: %w", err)
+// sendBatchXshardTxList sends a BatchAddXshardTxListRequest and verifies its
+// error code.
+func (x *xshardConn) sendBatchXshardTxList(ctx context.Context, req *wire.BatchAddXshardTxListRequest) error {
+	resp, err := sendRPCAs[wire.BatchAddXshardTxListResponse](x, ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), req)
+	if err != nil {
+		return err
 	}
 	if resp.ErrorCode != 0 {
-		return &resp, fmt.Errorf("BatchAddXshardTxList failed: error_code=%d", resp.ErrorCode)
+		return fmt.Errorf("BatchAddXshardTxList failed: error_code=%d", resp.ErrorCode)
 	}
-	return &resp, nil
+	return nil
 }

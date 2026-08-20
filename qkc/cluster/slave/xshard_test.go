@@ -16,6 +16,48 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
+// ── pool test helpers (white-box, same package) ──────────────────────────────
+
+// hasSlaveID reports whether the pool tracks the given peer identity.
+func (p *XshardPool) hasSlaveID(id []byte) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.slaveIDs[string(id)]
+}
+
+// outboundSize returns the number of unique outbound connections.
+func (p *XshardPool) outboundSize() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	seen := make(map[*xshardConn]struct{})
+	for _, conns := range p.conns {
+		for _, conn := range conns {
+			seen[conn] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// inboundSize returns the number of tracked inbound connections.
+func (p *XshardPool) inboundSize() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.inbound)
+}
+
+// targets returns all full shard IDs that have connections.
+func (p *XshardPool) targets() []uint32 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	targets := make([]uint32, 0, len(p.conns))
+	for id := range p.conns {
+		targets = append(targets, id)
+	}
+	return targets
+}
+
 // ── TCP test pair helpers ─────────────────────────────────────────────────────
 
 // newTestConnPair creates a pair of xshardConns connected over a local TCP
@@ -126,60 +168,6 @@ func establishInbound(t *testing.T, pool *XshardPool, remoteID []byte, remoteSha
 
 // ── xshardConn layer tests ────────────────────────────────────────────────────
 
-// TestXshardConn_BuiltinPingHandler verifies that the PING handler
-// auto-registered by newXshardConn records peer identity and returns a PONG
-// with the server's own identity.
-func TestXshardConn_BuiltinPingHandler(t *testing.T) {
-	clientID := []byte("client-slave")
-	clientShards := []uint32{0x00010001}
-	serverID := []byte("server-slave")
-	serverShards := []uint32{0x00030004}
-
-	client, server, cleanup := newTestConnPairWithIdentity(t, clientID, clientShards, serverID, serverShards)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              clientID,
-		FullShardIDList: clientShards,
-		RootTip:         nil,
-	})
-	if err != nil {
-		t.Fatalf("serialize ping: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
-	if err != nil {
-		t.Fatalf("send ping rpc: %v", err)
-	}
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.ClusterOpPong, resp.Opcode)
-	}
-
-	var pong wire.PongResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &pong); err != nil {
-		t.Fatalf("deserialize pong: %v", err)
-	}
-	if string(pong.ID) != string(serverID) {
-		t.Fatalf("pong id mismatch: got %s, expected %s", pong.ID, serverID)
-	}
-	if len(pong.FullShardIDList) != len(serverShards) {
-		t.Fatalf("pong shard list mismatch: got %v", pong.FullShardIDList)
-	}
-
-	if !server.waitUntilPingReceived() {
-		t.Fatal("server did not receive ping")
-	}
-	if string(server.remoteID()) != string(clientID) {
-		t.Fatalf("server remote id mismatch: got %s", server.remoteID())
-	}
-}
-
 func TestXshardConn_RPCRoundTrip(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
 	defer cleanup()
@@ -207,16 +195,13 @@ func TestXshardConn_RPCRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send ping rpc: %v", err)
 	}
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.ClusterOpPong, resp.Opcode)
-	}
 
-	var pong wire.PongResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &pong); err != nil {
-		t.Fatalf("deserialize pong: %v", err)
+	pong, ok := resp.(*wire.PongResponse)
+	if !ok {
+		t.Fatalf("expected *wire.PongResponse, got %T", resp)
 	}
 	if string(pong.ID) != string(serverID) {
-		t.Fatalf("pong id mismatch: got %s", pong.ID)
+		t.Fatalf("pong id mismatch: got %s, expected %s", pong.ID, serverID)
 	}
 
 	if !server.waitUntilPingReceived() {
@@ -239,16 +224,12 @@ func TestXshardConn_XshardRPCStubClosesConnection(t *testing.T) {
 	client.Start()
 
 	txList := wire.RawBytes{}
-	payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := client.sendXshardTxList(ctx, &wire.AddXshardTxListRequest{
 		Branch: 1,
 		TxList: &txList,
 	})
-	if err != nil {
-		t.Fatalf("serialize xshard request: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err = client.sendXshardTxList(ctx, payload)
 	if err != conn.ErrConnectionClosed {
 		t.Fatalf("expected ErrConnectionClosed, got %v", err)
 	}
@@ -307,9 +288,7 @@ func TestXshardConn_WaitUntilPingReceivedReturnsAfterClose(t *testing.T) {
 	go func() {
 		result <- server.waitUntilPingReceived()
 	}()
-	if err := server.Close(); err != nil {
-		t.Fatalf("close server: %v", err)
-	}
+	server.Close()
 	select {
 	case got := <-result:
 		if got {
@@ -421,59 +400,32 @@ func TestXshardConn_AcceptEmptyPingID(t *testing.T) {
 
 // ── XshardPool indexing / broadcast tests ─────────────────────────────────────
 
-func TestXshardPool_AddGet(t *testing.T) {
-	pool := NewXshardPool(nil, nil, 0, log.New())
-	defer pool.Close()
-
-	_, conn1, cleanup1 := newTestConnPair(t)
-	defer cleanup1()
-	_, conn2, cleanup2 := newTestConnPair(t)
-	defer cleanup2()
-
-	pool.add(0x00010001, conn1)
-	pool.add(0x00010001, conn2)
-	pool.add(0x00020001, conn1)
-
-	if got := pool.outboundSize(); got != 2 {
-		t.Fatalf("expected pool outbound size 2 (unique conns), got %d", got)
-	}
-
-	if conns := pool.get(0x00010001); len(conns) != 2 {
-		t.Fatalf("expected 2 conns for shard 0x00010001, got %d", len(conns))
-	}
-
-	if targets := pool.targets(); len(targets) != 2 {
-		t.Fatalf("expected 2 targets, got %d", len(targets))
-	}
-}
-
 // TestXshardPool_ClosedConnectionStaysIndexed verifies Python parity: a CLOSED
 // connection is never evicted from the routing index or slave ID registry.
 func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
-	client, server, cleanup := newTestConnPairWithIdentity(
-		t,
-		[]byte("client-slave"),
-		[]uint32{0x00010001},
-		[]byte("server-slave"),
-		[]uint32{0x00030004, 0x00030005},
-	)
-	defer cleanup()
+	rs := startRemoteSlave(t, []byte("server-slave"), []uint32{0x00030004, 0x00030005})
+	defer rs.close()
 
-	server.Start()
-	client.Start()
-	pool := NewXshardPool(nil, nil, 0, log.New())
+	pool := NewXshardPool([]byte("local-slave"), []uint32{0x00030004}, 0, log.New())
 	defer pool.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := pool.verifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
-		t.Fatalf("verify and add: %v", err)
+	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("server-slave"), []uint32{0x00030004, 0x00030005})); err != nil {
+		t.Fatalf("dial: %v", err)
 	}
 
-	client.Close()
+	// Grab the indexed outbound connection and close it directly.
+	var target *xshardConn
+	for _, shardID := range []uint32{0x00030004, 0x00030005} {
+		conns := pool.get(shardID)
+		if len(conns) != 1 {
+			t.Fatalf("expected 1 conn for shard 0x%x, got %d", shardID, len(conns))
+		}
+		target = conns[0]
+	}
+	target.Close()
 
 	for _, shardID := range []uint32{0x00030004, 0x00030005} {
-		if conns := pool.get(shardID); len(conns) != 1 || conns[0] != client {
+		if conns := pool.get(shardID); len(conns) != 1 || conns[0] != target {
 			t.Fatalf("route 0x%x no longer contains the closed connection: %v", shardID, conns)
 		}
 	}
@@ -488,27 +440,21 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 // TestXshardPool_SendXshardTxToClosedConnectionFails verifies broadcast attempts
 // a CLOSED connection (Python never filters it out) and fails.
 func TestXshardPool_SendXshardTxToClosedConnectionFails(t *testing.T) {
-	client, server, cleanup := newTestConnPairWithIdentity(
-		t,
-		[]byte("client-slave"),
-		[]uint32{0x00010001},
-		[]byte("server-slave"),
-		[]uint32{0x00030004, 0x00030005},
-	)
-	defer cleanup()
+	rs := startRemoteSlave(t, []byte("server-slave"), []uint32{0x00030004, 0x00030005})
+	defer rs.close()
 
-	server.Start()
-	client.Start()
-	pool := NewXshardPool(nil, nil, 0, log.New())
+	pool := NewXshardPool([]byte("local-slave"), []uint32{0x00030004}, 0, log.New())
 	defer pool.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := pool.verifyAndAddToShards(ctx, client, []byte("server-slave"), []uint32{0x00030004, 0x00030005}); err != nil {
-		t.Fatalf("verify and add: %v", err)
+	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("server-slave"), []uint32{0x00030004, 0x00030005})); err != nil {
+		t.Fatalf("dial: %v", err)
 	}
 
-	client.Close()
+	conns := pool.get(0x00030004)
+	if len(conns) != 1 {
+		t.Fatalf("expected 1 conn, got %d", len(conns))
+	}
+	conns[0].Close()
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
 	defer cancel2()
@@ -553,25 +499,17 @@ func TestXshardPool_HandleInboundAllowsMultipleInboundConnections(t *testing.T) 
 // TestXshardPool_OutboundAndInboundCoexist verifies an outbound and an inbound
 // connection to the same remote coexist (Python's bidirectional model).
 func TestXshardPool_OutboundAndInboundCoexist(t *testing.T) {
-	client1, server1, cleanup1 := newTestConnPairWithIdentity(
-		t, []byte("local"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001},
-	)
-	defer cleanup1()
-	client1.Start()
-	server1.Start()
-
 	pool := NewXshardPool([]byte("local"), []uint32{0x00030004}, 0, log.New())
 	defer pool.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	// Outbound (S1 → S2).
-	if err := pool.verifyAndAddToShards(ctx, client1, []byte("remote-slave"), []uint32{0x00010001}); err != nil {
-		t.Fatalf("outbound verify and add: %v", err)
+	// Outbound (local → remote-slave) via a simulated remote slave.
+	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
+	defer rs.close()
+	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("remote-slave"), []uint32{0x00010001})); err != nil {
+		t.Fatalf("outbound dial: %v", err)
 	}
 
-	// Inbound (S2 → S1).
+	// Inbound (remote-slave → local).
 	establishInbound(t, pool, []byte("remote-slave"), []uint32{0x00010001})
 
 	if conns := pool.get(0x00010001); len(conns) != 2 {
@@ -584,8 +522,8 @@ func TestXshardPool_OutboundAndInboundCoexist(t *testing.T) {
 
 // TestXshardPool_InboundFirstOutboundSkipped verifies that when inbound
 // registers the remote first, a later outbound to the same remote is silently
-// skipped by the final dedup (Python's connect_to_slave returns "" when the
-// slave is already in slave_ids).
+// skipped by DialToSlave's pre-check (Python's connect_to_slave returns "" when
+// the slave is already in slave_ids).
 func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 	pool := NewXshardPool([]byte("local"), []uint32{0x00030004}, 0, log.New())
 	defer pool.Close()
@@ -596,18 +534,14 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 		t.Fatal("slaveID not registered after inbound")
 	}
 
-	// Outbound should be silently skipped.
-	client1, server1, cleanup1 := newTestConnPairWithIdentity(
-		t, []byte("local"), []uint32{0x00030004}, []byte("remote-slave"), []uint32{0x00010001},
-	)
-	defer cleanup1()
-	client1.Start()
-	server1.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := pool.verifyAndAddToShards(ctx, client1, []byte("remote-slave"), []uint32{0x00010001}); err != nil {
+	// Outbound should be silently skipped (already known from inbound).
+	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
+	defer rs.close()
+	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("remote-slave"), []uint32{0x00010001})); err != nil {
 		t.Fatalf("outbound should be silently skipped, got error: %v", err)
+	}
+	if rs.acceptedCount() != 0 {
+		t.Fatalf("expected no accepted connection on the remote, got %d", rs.acceptedCount())
 	}
 
 	// Only the original inbound connection remains indexed.
@@ -616,6 +550,45 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
 		t.Fatal("slaveID should still be tracked")
+	}
+}
+
+// TestXshardPool_HandleInboundDeadConnEvicted verifies that an inbound conn
+// which closes before sending PING is evicted from the staging list: p.inbound
+// must not accumulate dead connections (F3).
+func TestXshardPool_HandleInboundDeadConnEvicted(t *testing.T) {
+	pool := NewXshardPool([]byte("local-slave"), []uint32{0x00030004}, 0, log.New())
+	defer pool.Close()
+
+	clientConn, serverConn := newRawConnPair(t)
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		pool.HandleInbound(serverConn)
+		close(done)
+	}()
+
+	// Wait until HandleInbound registers the connection as pending inbound.
+	deadline := time.Now().Add(2 * time.Second)
+	for pool.inboundSize() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("HandleInbound did not register pending inbound")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Remote disconnects without ever sending PING.
+	clientConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleInbound did not return after remote close")
+	}
+
+	if pool.inboundSize() != 0 {
+		t.Fatalf("expected dead inbound conn to be evicted, inboundSize=%d", pool.inboundSize())
 	}
 }
 
@@ -659,101 +632,89 @@ func TestXshardPool_HandleInboundPendingClose(t *testing.T) {
 	}
 }
 
-// TestXshardPool_SelfConnectionSkipped verifies verifyAndAddToShards skips a
-// connection whose expected ID equals the pool's own ID (Python's
-// connect_to_slave returns "" without dialing when slave_info.id ==
-// slave_server.id).
-func TestXshardPool_SelfConnectionSkipped(t *testing.T) {
-	client, server, cleanup := newTestConnPair(t)
-	defer cleanup()
-	server.Start()
-	client.Start()
-
-	pool := NewXshardPool([]byte("client-slave"), nil, 0, log.New())
+// TestXshardPool_InboundDoesNotSkipSelf verifies the deliberate Python-parity
+// divergence: HandleInbound does NOT skip a self connection, whereas DialToSlave
+// does. Only the outbound pre-check guards against self; inbound is allowed to
+// index a remote that claims our own identity (Python's handle_new_connection
+// performs no self check).
+func TestXshardPool_InboundDoesNotSkipSelf(t *testing.T) {
+	pool := NewXshardPool([]byte("local-slave"), []uint32{0x00030004}, 0, log.New())
 	defer pool.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	// Inbound connection claiming to be self must still be indexed.
+	establishInbound(t, pool, []byte("local-slave"), []uint32{0x00030004})
 
-	if err := pool.verifyAndAddToShards(ctx, client, []byte("client-slave"), []uint32{0x00030004}); err != nil {
-		t.Fatalf("self connection should be silently skipped, got error: %v", err)
+	if conns := pool.get(0x00030004); len(conns) != 1 {
+		t.Fatalf("expected self inbound connection to be indexed, got %d", len(conns))
 	}
-	if !client.IsClosed() {
-		t.Fatal("self connection should be closed")
-	}
-	if pool.hasSlaveID([]byte("client-slave")) {
-		t.Fatal("self ID should not be registered")
-	}
-	if pool.outboundSize() != 0 {
-		t.Fatalf("expected 0 outbound connections, got %d", pool.outboundSize())
+	if !pool.hasSlaveID([]byte("local-slave")) {
+		t.Fatal("self ID should be tracked for inbound")
 	}
 }
 
-func TestXshardPool_ClosedPoolRejectsAdd(t *testing.T) {
-	pool := NewXshardPool(nil, nil, 0, log.New())
-	pool.Close()
+// ── send-side response verification tests ────────────────────────────────────
 
-	_, xc, cleanup := newTestConnPair(t)
-	defer cleanup()
-
-	xc.Start()
-	pool.add(0x00010001, xc)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err := xc.SendRPC(ctx, byte(wire.ClusterOpPing), []byte("ping"))
-	if err != conn.ErrConnectionClosed {
-		t.Fatalf("expected ErrConnectionClosed, got %v", err)
-	}
+// rawXshardPeer answers one AddXshardTxListRequest with the given error code
+// over a net.Pipe, bypassing the (stubbed) business handlers.
+func rawXshardPeer(t *testing.T, serverConn net.Conn, errCode uint32) <-chan error {
+	t.Helper()
+	peerDone := make(chan error, 1)
+	go func() {
+		request, err := wire.ReadFrameNoMeta(serverConn, 0)
+		if err != nil {
+			peerDone <- err
+			return
+		}
+		payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: errCode})
+		if err == nil {
+			err = wire.WriteFrameNoMeta(serverConn, &wire.Frame{
+				Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
+				RPCID:   request.RPCID,
+				Payload: payload,
+			})
+		}
+		peerDone <- err
+	}()
+	return peerDone
 }
 
-// ── parse tests ───────────────────────────────────────────────────────────────
+func TestXshardConn_SendXshardTxListErrorCode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		errCode uint32
+		wantErr bool
+	}{
+		{"zero error code succeeds", 0, false},
+		{"non-zero error code fails", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			defer serverConn.Close()
 
-func TestParseAddXshardTxListResponse_NonZeroErrorCode(t *testing.T) {
-	const errCode uint32 = 2
-	payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: errCode})
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
-	}
-	frame := &wire.Frame{
-		Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
-		Payload: payload,
-	}
-	resp, err := parseAddXshardTxListResponse(frame)
-	if err == nil {
-		t.Fatal("expected error for non-zero error_code, got nil")
-	}
-	if resp == nil || resp.ErrorCode != errCode {
-		t.Fatalf("expected decoded response with error_code %d, got resp=%v err=%v", errCode, resp, err)
-	}
-}
+			client := newXshardConn(clientConn, 0, []byte("client"), []uint32{1}, log.New())
+			client.Start()
+			peerDone := rawXshardPeer(t, serverConn, tc.errCode)
 
-func TestParseAddXshardTxListResponse_ZeroErrorCode(t *testing.T) {
-	payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: 0})
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
-	}
-	frame := &wire.Frame{
-		Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
-		Payload: payload,
-	}
-	resp, err := parseAddXshardTxListResponse(frame)
-	if err != nil {
-		t.Fatalf("expected success for error_code 0, got: %v", err)
-	}
-	if resp.ErrorCode != 0 {
-		t.Fatalf("expected error_code 0, got %d", resp.ErrorCode)
-	}
-}
-
-func TestParseAddXshardTxListResponse_WrongOpcode(t *testing.T) {
-	payload, _ := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{ErrorCode: 0})
-	frame := &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPong),
-		Payload: payload,
-	}
-	if _, err := parseAddXshardTxListResponse(frame); err == nil {
-		t.Fatal("expected error for wrong opcode, got nil")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := client.sendXshardTxList(ctx, &wire.AddXshardTxListRequest{Branch: 1, TxList: &wire.RawBytes{}})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error for non-zero error_code, got nil")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected success for error_code 0, got: %v", err)
+				}
+			}
+			if err := <-peerDone; err != nil {
+				t.Fatalf("raw peer failed: %v", err)
+			}
+			if client.IsClosed() {
+				t.Fatal("error_code should not close the connection")
+			}
+		})
 	}
 }
 
@@ -875,6 +836,9 @@ func TestXshardPool_DialToSlaveSkipsSelf(t *testing.T) {
 	}
 	if rs.acceptedCount() != 0 {
 		t.Fatalf("expected no connection for self, got %d", rs.acceptedCount())
+	}
+	if pool.hasSlaveID([]byte("local-slave")) {
+		t.Fatal("self ID should not be registered")
 	}
 }
 
