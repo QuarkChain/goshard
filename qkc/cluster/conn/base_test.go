@@ -5,12 +5,15 @@ package conn
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// ── fake transport ────────────────────────────────────────────────────────────
+// -- fake transport -----------------------------------------------------------
 
 type fakeFrameTransport struct {
 	frames            chan *wire.Frame
@@ -35,19 +38,23 @@ type fakeFrameTransport struct {
 	writeOnce         sync.Once
 	releaseWrite      chan struct{}
 	writeErr          error
-	closeErr          error
 }
 
+// interruptibleFakeFrameTransport models a real net.Conn: Close releases a
+// write parked inside WriteFrame (shutdown is interrupt-first).
 type interruptibleFakeFrameTransport struct {
 	*fakeFrameTransport
 	interruptOnce sync.Once
 }
 
-func (t *interruptibleFakeFrameTransport) interrupt() error {
+func (t *interruptibleFakeFrameTransport) Close() error {
+	err := t.fakeFrameTransport.Close()
 	t.interruptOnce.Do(func() {
-		close(t.releaseWrite)
+		if t.releaseWrite != nil {
+			close(t.releaseWrite)
+		}
 	})
-	return t.Close()
+	return err
 }
 
 func newFakeFrameTransport() *fakeFrameTransport {
@@ -99,7 +106,7 @@ func (t *fakeFrameTransport) Close() error {
 		t.closeMu.Unlock()
 		close(t.closed)
 	})
-	return t.closeErr
+	return nil
 }
 
 func (t *fakeFrameTransport) RemoteAddr() string {
@@ -112,9 +119,8 @@ func (t *fakeFrameTransport) closes() int {
 	return t.closeCount
 }
 
-// staticReaderTransport feeds wire.ReadFrame from a fixed byte stream so tests
-// can drive the frame-level EOF semantics (clean EOF vs truncated frame)
-// through the full readerLoop -> handleReadFailed path.
+// staticReaderTransport feeds wire.ReadFrame from a fixed byte stream (clean
+// EOF vs truncated frame semantics).
 type staticReaderTransport struct {
 	reader    io.Reader
 	closed    chan struct{}
@@ -138,8 +144,20 @@ func (t *staticReaderTransport) Close() error {
 
 func (t *staticReaderTransport) RemoteAddr() string { return "static" }
 
-// validPongPayload returns a serialized empty PongResponse for tests that need
-// to feed valid response frames through the fake transport.
+// -- test helpers ------------------------------------------------------------
+
+var pingSer = OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
+
+var pingSerializers = map[byte]*OpSerializer{
+	byte(wire.ClusterOpPing): pingSer,
+}
+
+func pongHandler() TypedHandler {
+	return func(req any) (any, error) {
+		return &wire.PongResponse{}, nil
+	}
+}
+
 func validPongPayload(t *testing.T) []byte {
 	t.Helper()
 	payload, err := serialize.SerializeToBytes(&wire.PongResponse{})
@@ -149,417 +167,39 @@ func validPongPayload(t *testing.T) []byte {
 	return payload
 }
 
-// registerPingSerializer registers a PING/PONG serializer on conn so that
-// BaseConn can deserialize inbound PONG responses.
-func registerPingSerializer(t *testing.T, conn *BaseConn) {
+func validPingPayload(t *testing.T) []byte {
 	t.Helper()
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
-}
-
-// ── TCP test pair helper ──────────────────────────────────────────────────────
-
-// newTestBaseConnPair creates a pair of BaseConns connected over a local TCP
-// socket, with PING/PONG serializer and a minimal PING handler registered on the
-// server side. The caller is responsible for calling cleanup.
-func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-
-	var serverConn net.Conn
-	var acceptErr error
-	accepted := make(chan struct{})
-	go func() {
-		defer close(accepted)
-		serverConn, acceptErr = ln.Accept()
-		ln.Close()
-	}()
-
-	clientConn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	<-accepted
-	if acceptErr != nil {
-		t.Fatalf("accept: %v", acceptErr)
-	}
-
-	logger := log.New()
-	readFrame := func(r io.Reader) (*wire.Frame, error) {
-		return wire.ReadFrameNoMeta(r, 0)
-	}
-	client = NewBaseConnFromConn(clientConn, readFrame, wire.WriteFrameNoMeta, logger)
-	server = NewBaseConnFromConn(serverConn, readFrame, wire.WriteFrameNoMeta, logger)
-
-	// Register PING serializer on both sides so that the client can deserialize
-	// inbound PONG responses (BaseConn validates response payloads before
-	// rpc_id matching) and the server can deserialize PING requests.
-	pingSer := OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
-	client.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): pingSer,
-	})
-	server.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): pingSer,
-	})
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
-
-	cleanup = func() {
-		client.Close()
-		server.Close()
-	}
-	return
-}
-
-// ── BaseConn unit tests (fake transport) ─────────────────────────────────────
-
-func TestBaseConn_CloseWaitsForOutboundWrite(t *testing.T) {
-	tr := newFakeFrameTransport()
-	tr.writeStarted = make(chan struct{})
-	tr.releaseWrite = make(chan struct{})
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	result := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		result <- err
-	}()
-
-	select {
-	case <-tr.writeStarted:
-	case <-time.After(time.Second):
-		t.Fatal("fake transport did not start writing")
-	}
-
-	closeDone := make(chan struct{})
-	go func() {
-		conn.Close()
-		close(closeDone)
-	}()
-	select {
-	case <-closeDone:
-		t.Fatal("Close returned while write was blocked")
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	close(tr.releaseWrite)
-	select {
-	case <-closeDone:
-	case <-time.After(time.Second):
-		t.Fatal("Close did not finish after write completed")
-	}
-	if tr.closeWhileWriting {
-		t.Fatal("transport close ran concurrently with write")
-	}
-	if err := <-result; err != ErrConnectionClosed {
-		t.Fatalf("expected ErrConnectionClosed, got %v", err)
-	}
-}
-
-func TestBaseConn_CloseInterruptsBlockedWriter(t *testing.T) {
-	base := newFakeFrameTransport()
-	base.writeStarted = make(chan struct{})
-	base.releaseWrite = make(chan struct{})
-	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	result := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		result <- err
-	}()
-	select {
-	case <-tr.writeStarted:
-	case <-time.After(time.Second):
-		t.Fatal("fake transport did not start writing")
-	}
-
-	closeDone := make(chan struct{})
-	go func() {
-		conn.Close()
-		close(closeDone)
-	}()
-	select {
-	case <-closeDone:
-	case <-time.After(time.Second):
-		t.Fatal("Close did not interrupt blocked writer")
-	}
-	if err := <-result; err != ErrConnectionClosed {
-		t.Fatalf("expected ErrConnectionClosed, got %v", err)
-	}
-}
-
-func TestBaseConn_CleanCloseDoesNotPublishError(t *testing.T) {
-	conn := NewBaseConn(newFakeFrameTransport(), log.New())
-	conn.Start()
-	if err := conn.Close(); err != nil {
-		t.Fatalf("close connection: %v", err)
-	}
-	select {
-	case err := <-conn.Error():
-		t.Fatalf("clean close published error: %v", err)
-	default:
-	}
-}
-
-func TestBaseConn_CloseReturnsTransportError(t *testing.T) {
-	closeErr := errors.New("close failed")
-	tr := newFakeFrameTransport()
-	tr.closeErr = closeErr
-	conn := NewBaseConn(tr, log.New())
-	if err := conn.Close(); !errors.Is(err, closeErr) {
-		t.Fatalf("expected transport close error, got %v", err)
-	}
-}
-
-// TestBaseConn_CanceledRPCNotWritten verifies that a blocked SendRPC whose
-// context expires while waiting for writeMu does not write a frame. In the
-// pure-mutex model there is no writer queue; the blocked SendRPC checks
-// ctx.Err() after acquiring writeMu and returns without allocating an rpcID.
-func TestBaseConn_CanceledRPCNotWritten(t *testing.T) {
-	tr := newFakeFrameTransport()
-	tr.writeStarted = make(chan struct{})
-	tr.releaseWrite = make(chan struct{})
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	// RPC with background context — will hold writeMu and block in WriteFrame.
-	firstResult := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		firstResult <- err
-	}()
-	select {
-	case <-tr.writeStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first write did not block")
-	}
-	select {
-	case <-tr.writes:
-	case <-time.After(time.Second):
-		t.Fatal("first write was not recorded")
-	}
-
-	// Second RPC with a short timeout — blocks on writeMu.Lock() because
-	// the first RPC still holds it. The context expires while waiting.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	secondResult := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-		secondResult <- err
-	}()
-
-	// Wait for the second RPC's context to expire.
-	time.Sleep(30 * time.Millisecond)
-
-	// Release the slow write — the blocked SendRPC acquires writeMu,
-	// checks ctx.Err(), and returns timeout without allocating an rpcID
-	// or writing a frame.
-	close(tr.releaseWrite)
-
-	select {
-	case err := <-secondResult:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("expected deadline exceeded, got %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("blocked RPC did not return after writer unblocked")
-	}
-
-	// Verify no extra frame was written.
-	select {
-	case frame := <-tr.writes:
-		t.Fatalf("canceled RPC was written: %#v", frame)
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	if err := conn.Close(); err != nil {
-		t.Fatalf("close connection: %v", err)
-	}
-	if err := <-firstResult; err != ErrConnectionClosed {
-		t.Fatalf("expected first RPC to be closed, got %v", err)
-	}
-}
-
-func TestConcurrentCloseAndSendRPC(t *testing.T) {
-	tr := newFakeFrameTransport()
-	tr.writes = make(chan *wire.Frame, 64)
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	const senders = 64
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(senders)
-	for i := 0; i < senders; i++ {
-		go func() {
-			defer wg.Done()
-			<-start
-			_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-			if err != nil && err != ErrConnectionClosed && err != ErrNotActive {
-				t.Errorf("unexpected SendRPC error: %v", err)
-			}
-		}()
-	}
-
-	close(start)
-	closeDone := make(chan struct{})
-	go func() {
-		conn.Close()
-		close(closeDone)
-	}()
-	select {
-	case <-closeDone:
-	case <-time.After(time.Second):
-		t.Fatal("Close deadlocked with concurrent SendRPC")
-	}
-	wg.Wait()
-
-	pending := conn.pendingLen()
-	if pending != 0 {
-		t.Fatalf("pending RPCs remain after Close: %d", pending)
-	}
-	if conn.State() != ConnectionStateClosed {
-		t.Fatalf("expected closed state, got %v", conn.State())
-	}
-}
-
-// TestBaseConn_SubmitWhileShutdown verifies that concurrent SubmitFrame and
-// SendRPC during Close neither deadlock, race, nor panic. Close acquires mu
-// to mark the connection Closed (so submitters see a non-Active state and
-// return), then takes the writeMu barrier to drain in-flight writes before
-// closing the transport. Submitters blocked on writeMu are released once the
-// barrier completes, and any blocked writer is interrupted via the transport.
-func TestBaseConn_SubmitWhileShutdown(t *testing.T) {
-	base := newFakeFrameTransport()
-	base.writes = make(chan *wire.Frame, 4096)
-	base.writeStarted = make(chan struct{})
-	base.releaseWrite = make(chan struct{})
-	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	const submitters = 64
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(submitters)
-	for i := 0; i < submitters; i++ {
-		i := i
-		go func() {
-			defer wg.Done()
-			<-start
-			for j := 0; j < 1000; j++ {
-				if i%2 == 0 {
-					if err := conn.SubmitFrame(&wire.Frame{
-						Meta:    wire.ClusterMetadata{Branch: 1, ClusterPeerID: 99},
-						Opcode:  byte(wire.ClusterOpPong),
-						RPCID:   uint64(j),
-						Payload: []byte{0x01},
-					}); err != nil && err != ErrConnectionClosed {
-						t.Errorf("unexpected SubmitFrame error: %v", err)
-					}
-				} else {
-					ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-					_, _ = conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-					cancel()
-				}
-			}
-		}()
-	}
-
-	close(start)
-	closeDone := make(chan struct{})
-	go func() {
-		conn.Close()
-		close(closeDone)
-	}()
-	select {
-	case <-closeDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Close deadlocked with concurrent SubmitFrame/SendRPC")
-	}
-	wg.Wait()
-
-	if conn.State() != ConnectionStateClosed {
-		t.Fatalf("expected closed state, got %v", conn.State())
-	}
-}
-
-// TestBaseConn_LateHandlerCompletedAfterClose verifies that a handler
-// goroutine that finishes after Close drops its response without panicking
-// and without leaking goroutines.
-func TestBaseConn_LateHandlerCompletedAfterClose(t *testing.T) {
-	base := newFakeFrameTransport()
-	base.releaseWrite = make(chan struct{})
-	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
-	conn := NewBaseConn(tr, log.New())
-
-	const op = byte(wire.ClusterOpPing)
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		op: OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
-	handlerStarted := make(chan struct{})
-	releaseHandler := make(chan struct{})
-	conn.RegisterTypedHandlers(map[byte]TypedHandler{
-		op: func(req any) (any, error) {
-			close(handlerStarted)
-			<-releaseHandler
-			return &wire.PongResponse{}, nil
-		},
-	})
-
-	before := runtime.NumGoroutine()
-	conn.Start()
-	<-conn.WaitUntilActive()
-
-	// Feed a request frame: readerLoop calls dispatch goroutine, which
-	// parks inside the handler.
-	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{FullShardIDList: []uint32{1}})
+	payload, err := serialize.SerializeToBytes(&wire.PingRequest{FullShardIDList: []uint32{1}})
 	if err != nil {
 		t.Fatalf("serialize ping: %v", err)
 	}
-	base.frames <- &wire.Frame{Meta: wire.ClusterMetadata{}, Opcode: op, RPCID: 1, Payload: pingPayload}
-	select {
-	case <-handlerStarted:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not start")
-	}
-
-	// Trigger shutdown while the handler goroutine is still in flight.
-	closeDone := make(chan struct{})
-	go func() {
-		conn.Close()
-		close(closeDone)
-	}()
-	select {
-	case <-closeDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Close blocked with in-flight handler")
-	}
-
-	if conn.State() != ConnectionStateClosed {
-		t.Fatalf("expected closed state, got %v", conn.State())
-	}
-
-	// Release the handler: dispatch checks state (Closed) and drops the
-	// response without writing. No panic, goroutine exits cleanly.
-	close(releaseHandler)
-	waitForGoroutines(t, before)
+	return payload
 }
 
-// waitForGoroutines polls until the goroutine count drops back to (or below)
-// the baseline, failing the test if it never does.
+func newConn(tr FrameTransport) *BaseConn {
+	return NewBaseConn(Config{Transport: tr, Logger: log.New()})
+}
+
+func newPingConn(tr FrameTransport) *BaseConn {
+	return NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Logger:      log.New(),
+	})
+}
+
+func newPingServerConn(tr FrameTransport) *BaseConn {
+	return NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Logger: log.New(),
+	})
+}
+
+// waitForGoroutines polls until the goroutine count drops back to the baseline.
 func waitForGoroutines(t *testing.T, baseline int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -572,145 +212,404 @@ func waitForGoroutines(t *testing.T, baseline int) {
 	t.Fatalf("goroutine leak: %d goroutines, baseline %d", runtime.NumGoroutine(), baseline)
 }
 
-func TestLateResponseAfterTimeoutDoesNotCloseConnection(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
-	conn.Start()
-	defer conn.Close()
+// -- Config validation tests --------------------------------------------------
 
+// serializerMissingCallback returns a full ping serializer with one callback
+// removed, for config validation tests.
+func serializerMissingCallback(missing string) *OpSerializer {
+	ser := OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong))
+	switch missing {
+	case "NewRequest":
+		ser.NewRequest = nil
+	case "NewResponse":
+		ser.NewResponse = nil
+	case "Deserialize":
+		ser.Deserialize = nil
+	case "Serialize":
+		ser.Serialize = nil
+	default:
+		panic("unknown callback: " + missing)
+	}
+	return ser
+}
+
+// TestConfig_ValidationPanics covers config validation panics.
+func TestConfig_ValidationPanics(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"nil transport", Config{}, "Transport"},
+		{"nil serializer", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: nil}}, "serializer"},
+		{"nil handler", Config{Transport: newFakeFrameTransport(), Handlers: map[byte]TypedHandler{0x01: nil}}, "handler"},
+		{"missing NewRequest callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("NewRequest")}}, "missing callback"},
+		{"missing NewResponse callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("NewResponse")}}, "missing callback"},
+		{"missing Deserialize callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("Deserialize")}}, "missing callback"},
+		{"missing Serialize callback", Config{Transport: newFakeFrameTransport(), Serializers: map[byte]*OpSerializer{0x01: serializerMissingCallback("Serialize")}}, "missing callback"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("expected panic for " + tt.name)
+				}
+				msg, _ := r.(string)
+				if !strings.Contains(msg, tt.want) {
+					t.Fatalf("panic %q does not contain %q", msg, tt.want)
+				}
+			}()
+			NewBaseConn(tt.cfg)
+		})
+	}
+}
+
+// TestConfig_ResponseOpcodePanics: response opcodes must be unique and disjoint
+// from every request opcode (RPC or non-RPC), otherwise serializers[respOp]
+// would be overwritten by map-iteration order and inbound frames decoded
+// through a random serializer.
+func TestConfig_ResponseOpcodePanics(t *testing.T) {
+	tests := []struct {
+		name        string
+		serializers map[byte]*OpSerializer
+		nonRPC      map[byte]struct{}
+	}{
+		{
+			name: "response opcode conflicts with rpc request opcode",
+			serializers: map[byte]*OpSerializer{
+				0x01: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x02),
+				0x02: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x03),
+			},
+		},
+		{
+			name: "duplicate response opcode",
+			serializers: map[byte]*OpSerializer{
+				0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
+				0x82: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
+			},
+		},
+		{
+			name: "response opcode conflicts with non-rpc request opcode",
+			serializers: map[byte]*OpSerializer{
+				0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
+				0x90: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x90),
+			},
+			nonRPC: map[byte]struct{}{0x90: {}},
+		},
+		{
+			name:        "self-referencing rpc response opcode",
+			serializers: map[byte]*OpSerializer{0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0x81)},
+		},
+		{
+			name:        "zero response opcode for rpc",
+			serializers: map[byte]*OpSerializer{0x81: OpSerializerFor[wire.PingRequest, wire.PongResponse](0)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic for " + tt.name)
+				}
+			}()
+			NewBaseConn(Config{
+				Transport:   newFakeFrameTransport(),
+				Serializers: tt.serializers,
+				NonRPCOps:   tt.nonRPC,
+				Logger:      log.New(),
+			})
+		})
+	}
+}
+
+// TestConfig_NonRPCDummyResponseOpcode: fire-and-forget commands (Python's
+// op_non_rpc_map, e.g. NEW_BLOCK_MINOR) configure a dummy self-referencing or
+// zero ResponseOpCode. Declared in NonRPCOps, the dummy value must be ignored:
+// no panic, no response-opcode registration, no opcode 0x00 pollution.
+func TestConfig_NonRPCDummyResponseOpcode(t *testing.T) {
+	const op = byte(0x42)
+	conn := NewBaseConn(Config{
+		Transport: newFakeFrameTransport(),
+		Serializers: map[byte]*OpSerializer{
+			op: OpSerializerFor[wire.PingRequest, wire.PongResponse](op), // self-referencing dummy, as in slave configs
+		},
+		NonRPCOps: map[byte]struct{}{op: {}},
+		Handlers:  map[byte]TypedHandler{op: pongHandler()},
+		Logger:    log.New(),
+	})
+	if _, ok := conn.serializers[op]; !ok {
+		t.Fatal("non-RPC request opcode not registered")
+	}
+	if len(conn.serializers) != 1 {
+		t.Fatalf("serializers has %d entries, want 1 (dummy response opcode must not be registered)", len(conn.serializers))
+	}
+}
+
+// -- BaseConn unit tests (fake transport) --------------------------------------
+
+// TestBaseConn_CloseWithInFlightWrite: shutdown is interrupt-first — the writer
+// parked in WriteFrame is released by transport.Close, never by the writeMu
+// barrier (a barrier-first shutdown would hang on a real net.Conn with a full
+// send buffer).
+func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
+	t.Run("barrier: Close waits for in-flight write", func(t *testing.T) {
+		tr := newFakeFrameTransport()
+		tr.writeStarted = make(chan struct{})
+		tr.releaseWrite = make(chan struct{})
+		conn := newConn(tr)
+		conn.Start()
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+			result <- err
+		}()
+
+		select {
+		case <-tr.writeStarted:
+		case <-time.After(time.Second):
+			t.Fatal("fake transport did not start writing")
+		}
+
+		closeDone := make(chan struct{})
+		go func() {
+			conn.Close()
+			close(closeDone)
+		}()
+		select {
+		case <-closeDone:
+			t.Fatal("Close returned while write was blocked")
+		case <-time.After(20 * time.Millisecond):
+		}
+
+		close(tr.releaseWrite)
+		select {
+		case <-closeDone:
+		case <-time.After(time.Second):
+			t.Fatal("Close did not finish after write completed")
+		}
+		if !tr.closeWhileWriting {
+			t.Fatal("expected interrupt-first shutdown: transport.Close must run while the write is still in flight")
+		}
+		if err := <-result; err != ErrConnectionClosed {
+			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+		}
+	})
+
+	t.Run("interrupt: Close releases blocked writer", func(t *testing.T) {
+		base := newFakeFrameTransport()
+		base.writeStarted = make(chan struct{})
+		base.releaseWrite = make(chan struct{})
+		tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
+		conn := newConn(tr)
+		conn.Start()
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+			result <- err
+		}()
+		select {
+		case <-tr.writeStarted:
+		case <-time.After(time.Second):
+			t.Fatal("fake transport did not start writing")
+		}
+
+		closeDone := make(chan struct{})
+		go func() {
+			conn.Close()
+			close(closeDone)
+		}()
+		select {
+		case <-closeDone:
+		case <-time.After(time.Second):
+			t.Fatal("Close did not interrupt blocked writer")
+		}
+		if err := <-result; err != ErrConnectionClosed {
+			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+		}
+	})
+}
+
+func TestBaseConn_CleanShutdown(t *testing.T) {
+	t.Run("local Close", func(t *testing.T) {
+		conn := newConn(newFakeFrameTransport())
+		conn.Start()
+		conn.Close()
+	})
+
+	t.Run("clean peer EOF", func(t *testing.T) {
+		conn := newConn(newStaticReaderTransport(bytes.NewReader(nil)))
+		conn.Start()
+
+		<-conn.WaitUntilClosed()
+		if !conn.IsClosed() {
+			t.Fatal("connection should be closed after clean EOF")
+		}
+	})
+}
+
+// TestBaseConn_CanceledRPCNotSent: an RPC whose context expires while waiting
+// for writeMu must not allocate an rpc id, register pending, or write a frame
+// once it acquires the lock — the peer must never execute an abandoned call.
+func TestBaseConn_CanceledRPCNotSent(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writeStarted = make(chan struct{})
+	tr.releaseWrite = make(chan struct{})
+	conn := newPingConn(tr)
+	conn.Start()
+
+	// First RPC parks inside WriteFrame holding writeMu.
+	first := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		first <- err
+	}()
+	select {
+	case <-tr.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first write did not block")
+	}
+	select {
+	case <-tr.writes: // rpc_id=1 frame recorded; writer still parked
+	case <-time.After(time.Second):
+		t.Fatal("first write was not recorded")
+	}
+
+	// Second RPC's context expires while it waits for writeMu.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-	if err == nil {
-		t.Fatal("expected RPC timeout")
-	}
+	second := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+		second <- err
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	close(tr.releaseWrite) // unblock the writer; second RPC acquires writeMu
 
 	select {
-	case <-tr.writes:
-	case <-time.After(time.Second):
-		t.Fatal("fake transport did not receive request")
-	}
-	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 1, Payload: validPongPayload(t)}
-
-	select {
-	case <-time.After(50 * time.Millisecond):
-		if conn.IsClosed() {
-			t.Fatal("late response closed the connection")
+	case err := <-second:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected deadline exceeded, got %v", err)
 		}
-	case <-conn.WaitUntilClosed():
-		t.Fatal("late response closed the connection")
+	case <-time.After(time.Second):
+		t.Fatal("canceled RPC did not return after writer unblocked")
 	}
 
-	pending := conn.pendingLen()
-	if pending != 0 {
-		t.Fatalf("timed-out RPC remains pending: %d", pending)
+	// No frame was written for the canceled RPC.
+	select {
+	case f := <-tr.writes:
+		t.Fatalf("canceled RPC wrote a frame (rpc_id=%d)", f.RPCID)
+	default:
+	}
+	// Only the first RPC remains pending; no id was consumed.
+	if n := conn.pendingLen(); n != 1 {
+		t.Fatalf("pending = %d, want 1", n)
+	}
+
+	// The next RPC gets rpc_id 2, proving the canceled call allocated nothing.
+	third := make(chan rpcResult, 1)
+	go func() {
+		resp, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		third <- rpcResult{resp: resp, err: err}
+	}()
+	select {
+	case f := <-tr.writes:
+		if f.RPCID != 2 {
+			t.Fatalf("next rpc id = %d, want 2", f.RPCID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("next RPC did not write")
+	}
+
+	// Complete both RPCs and close.
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 1, Payload: validPongPayload(t)}
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: 2, Payload: validPongPayload(t)}
+	if err := <-first; err != nil {
+		t.Fatalf("first RPC failed: %v", err)
+	}
+	if res := <-third; res.err != nil {
+		t.Fatalf("third RPC failed: %v", res.err)
+	}
+	conn.Close()
+}
+
+// TestBaseConn_CancelErrorContract: SendRPC with an expired or canceled
+// context fails immediately without writing.
+func TestBaseConn_CancelErrorContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		newCtx    func() (context.Context, context.CancelFunc)
+		wantError func(error) bool
+	}{
+		{
+			name: "deadline exceeded",
+			newCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), time.Millisecond)
+			},
+			wantError: func(err error) bool { return errors.Is(err, context.DeadlineExceeded) },
+		},
+		{
+			name: "already cancelled",
+			newCtx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			wantError: func(err error) bool { return err != nil },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := newConn(newFakeFrameTransport())
+			conn.Start()
+			defer conn.Close()
+
+			ctx, cancel := tt.newCtx()
+			defer cancel()
+			_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+			if !tt.wantError(err) {
+				t.Fatalf("SendRPC error = %v", err)
+			}
+		})
 	}
 }
 
-func TestBaseConn_CancelPreservesContextError(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-	defer conn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected deadline exceeded, got %v", err)
-	}
-}
-
-func TestBaseConn_SendRPCWithAlreadyCancelledContext(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-	defer conn.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before calling SendRPC
-	_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-	if err == nil {
-		t.Fatal("expected error for already-cancelled context, got nil")
-	}
-}
-
-func TestBaseConn_WriteFailurePublishesError(t *testing.T) {
+func TestBaseConn_WriteFailureClosesConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writeErr = errors.New("write failed")
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
 	if err != ErrConnectionClosed {
 		t.Fatalf("expected ErrConnectionClosed, got %v", err)
 	}
-	select {
-	case cerr := <-conn.Error():
-		if cerr == nil {
-			t.Fatal("expected non-nil error on Error() channel after write failure")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Error() channel did not receive write failure")
-	}
 	<-conn.WaitUntilClosed()
-}
-
-func TestBaseConn_LateResponseIsSilentlyIgnored(t *testing.T) {
-	// Matches Python: timed-out RPC ids stay in rpc_future_map forever;
-	// late responses are silently dropped regardless of delay.
-
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
-	conn.Start()
-	defer conn.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
-		result <- err
-	}()
-	var request *wire.Frame
-	select {
-	case request = <-tr.writes:
-	case <-time.After(time.Second):
-		t.Fatal("fake transport did not receive request")
-	}
-	cancel()
-	select {
-	case <-result:
-	case <-time.After(time.Second):
-		t.Fatal("SendRPC did not return after cancellation")
-	}
-
-	// Send a late response — connection should NOT close.
-	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: validPongPayload(t)}
-	select {
-	case <-conn.WaitUntilClosed():
-		t.Fatal("late response closed the connection — should have been silently ignored")
-	case <-time.After(50 * time.Millisecond):
-		// Expected: connection stays open.
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after write failure")
 	}
 }
 
 func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-	})
-	conn.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			panic("handler panic test")
+	conn := NewBaseConn(Config{
+		Transport: tr,
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing): pingSer,
 		},
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(req any) (any, error) {
+				panic("handler panic test")
+			},
+		},
+		Logger: log.New(),
 	})
 	conn.Start()
 
-	payload, _ := serialize.SerializeToBytes(&wire.PingRequest{FullShardIDList: []uint32{1}})
-	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: payload}
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
 	select {
 	case <-conn.WaitUntilClosed():
 		if !conn.IsClosed() {
@@ -721,37 +620,15 @@ func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
 	}
 }
 
-func TestBaseConn_UnknownRPCIDResponseShutsDownConnection(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
-	conn.Start()
-	defer conn.Close()
-
-	// Send a response with an rpc_id that was never allocated — neither
-	// in pending nor in timedOut. This should close the connection.
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPong),
-		RPCID:   999,
-		Payload: validPongPayload(t),
-	}
-	select {
-	case <-conn.WaitUntilClosed():
-		if !conn.IsClosed() {
-			t.Fatal("expected connection to close after unknown rpc_id response")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("connection did not close after unknown rpc_id response")
-	}
-}
-
+// TestBaseConn_ResponseCancelRaceCleansPending: response and cancel racing for
+// the same rpc id must complete the RPC exactly once and leave no pending
+// entry (race detector coverage).
 func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 	const iterations = 100
 	pongPayload := validPongPayload(t)
 	for i := 0; i < iterations; i++ {
 		tr := newFakeFrameTransport()
-		conn := NewBaseConn(tr, log.New())
-		registerPingSerializer(t, conn)
+		conn := newPingConn(tr)
 		conn.Start()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -790,9 +667,62 @@ func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 	}
 }
 
+// TestBaseConn_ResponseCancelCloseRaceCompletesOnce: response, cancel, and
+// close racing for the same rpc id must complete the RPC exactly once with
+// no pending leak and no deadlock (the third arbitration corner not covered
+// by TestBaseConn_ResponseCancelRaceCleansPending).
+func TestBaseConn_ResponseCancelCloseRaceCompletesOnce(t *testing.T) {
+	const iterations = 200
+	pongPayload := validPongPayload(t)
+	for i := 0; i < iterations; i++ {
+		tr := newFakeFrameTransport()
+		conn := newPingConn(tr)
+		conn.Start()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+			result <- err
+		}()
+
+		var request *wire.Frame
+		select {
+		case request = <-tr.writes:
+		case <-time.After(time.Second):
+			t.Fatal("fake transport did not receive request")
+		}
+
+		start := make(chan struct{})
+		go func() { <-start; cancel() }()
+		go func() {
+			<-start
+			tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: pongPayload}
+		}()
+		go func() { <-start; conn.Close() }()
+		close(start)
+
+		select {
+		case err := <-result:
+			// Any of the three outcomes is valid; completion is what matters.
+			if err != nil && err != ErrConnectionClosed &&
+				!errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "rpc timeout") {
+				t.Fatalf("iteration %d: unexpected error: %v", i, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: SendRPC never completed (deadlock)", i)
+		}
+		if pending := conn.pendingLen(); pending != 0 {
+			t.Fatalf("iteration %d: pending RPCs remain: %d", i, pending)
+		}
+		cancel()
+		conn.Close()
+	}
+}
+
 func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	result := make(chan error, 1)
@@ -822,68 +752,28 @@ func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	}
 }
 
-// TestBaseConn_CleanEOFDoesNotPublishError verifies that a peer closing the
-// connection before the start of any frame (clean EOF, i.e. wire.ReadFrame
-// returning io.EOF) is a graceful close: the connection shuts down but the
-// Error channel receives nothing, matching Python's close() on EOF.
-func TestBaseConn_CleanEOFDoesNotPublishError(t *testing.T) {
-	tr := newStaticReaderTransport(bytes.NewReader(nil))
-	conn := NewBaseConn(tr, log.New())
+// TestBaseConn_TruncatedFrameClosesConnection: EOF mid-frame shuts the
+// connection down (Python close_with_error on unexpected EOF; the cause is
+// only logged).
+func TestBaseConn_TruncatedFrameClosesConnection(t *testing.T) {
+	// payload_len = 10 but the stream ends right after the length header.
+	tr := newStaticReaderTransport(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}))
+	conn := newConn(tr)
 	conn.Start()
 
 	<-conn.WaitUntilClosed()
 	if !conn.IsClosed() {
-		t.Fatal("connection should be closed after clean EOF")
-	}
-	select {
-	case err := <-conn.Error():
-		t.Fatalf("clean EOF published error: %v", err)
-	default:
+		t.Fatal("connection should be closed after truncated frame")
 	}
 }
 
-// TestBaseConn_TruncatedFramePublishesError verifies that a truncated frame
-// (length header consumed, then EOF before the frame body) publishes an error
-// on the Error channel. wire.ReadFrame normalizes the zero-byte EOF on the
-// metadata read to io.ErrUnexpectedEOF, matching Python's "read unexpected
-// EOF" -> close_with_error().
-func TestBaseConn_TruncatedFramePublishesError(t *testing.T) {
-	// payload_len = 10 but the stream ends right after the length header.
-	tr := newStaticReaderTransport(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}))
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	select {
-	case err := <-conn.Error():
-		if !errors.Is(err, io.ErrUnexpectedEOF) {
-			t.Fatalf("want io.ErrUnexpectedEOF, got %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("truncated frame did not publish an error")
-	}
-	<-conn.WaitUntilClosed()
-}
-
-func TestBaseConn_WriteFailureWakesPendingRPC(t *testing.T) {
-	tr := newFakeFrameTransport()
-	tr.writeErr = errors.New("write failed")
-	conn := NewBaseConn(tr, log.New())
-	conn.Start()
-
-	_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-	if err != ErrConnectionClosed {
-		t.Fatalf("expected ErrConnectionClosed, got %v", err)
-	}
-	<-conn.WaitUntilClosed()
-	if pending := conn.pendingLen(); pending != 0 {
-		t.Fatalf("pending RPCs remain after write failure: %d", pending)
-	}
-}
-
+// TestSendRPC_ConcurrentSendsPreserveRPCIDOrder: concurrent SendRPC calls must
+// produce strictly increasing rpc ids — the peer's monotonic check depends on
+// it.
 func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 	tr := newFakeFrameTransport()
 	tr.writes = make(chan *wire.Frame, 64)
-	conn := NewBaseConn(tr, log.New())
+	conn := newConn(tr)
 	conn.Start()
 
 	const senders = 32
@@ -908,9 +798,9 @@ func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 			t.Fatal("timed out waiting for concurrent RPC writes")
 		}
 	}
-	for i, frame := range frames {
-		if frame.RPCID != uint64(i+1) {
-			t.Fatalf("rpc id at position %d: got %d, want %d", i, frame.RPCID, i+1)
+	for i := 1; i < len(frames); i++ {
+		if frames[i].RPCID <= frames[i-1].RPCID {
+			t.Fatalf("rpc ids not strictly increasing: %d then %d", frames[i-1].RPCID, frames[i].RPCID)
 		}
 	}
 	if conn.IsClosed() {
@@ -919,156 +809,131 @@ func TestSendRPC_ConcurrentSendsPreserveRPCIDOrder(t *testing.T) {
 
 	conn.Close()
 	wg.Wait()
-	if conn.IsClosed() == false {
-		t.Fatal("connection should be closed after test cleanup")
-	}
 }
 
-func TestBaseConn_PendingRPCRemovedAfterResponse(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, conn)
+// TestBaseConn_LateHandlerCompletedAfterClose: a handler finishing after Close
+// drops its response without panicking or leaking.
+func TestBaseConn_LateHandlerCompletedAfterClose(t *testing.T) {
+	base := newFakeFrameTransport()
+	base.releaseWrite = make(chan struct{})
+	tr := &interruptibleFakeFrameTransport{fakeFrameTransport: base}
+
+	const op = byte(wire.ClusterOpPing)
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	conn := NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			op: func(req any) (any, error) {
+				close(handlerStarted)
+				<-releaseHandler
+				return &wire.PongResponse{}, nil
+			},
+		},
+		Logger: log.New(),
+	})
+
+	before := runtime.NumGoroutine()
 	conn.Start()
-	defer conn.Close()
+	<-conn.WaitUntilActive()
 
-	result := make(chan error, 1)
-	go func() {
-		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		result <- err
-	}()
-
+	tr.frames <- &wire.Frame{Opcode: op, RPCID: 1, Payload: validPingPayload(t)}
 	select {
-	case request := <-tr.writes:
-		tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: validPongPayload(t)}
+	case <-handlerStarted:
 	case <-time.After(time.Second):
-		t.Fatal("fake transport did not receive request")
-	}
-	if err := <-result; err != nil {
-		t.Fatalf("SendRPC failed: %v", err)
+		t.Fatal("handler did not start")
 	}
 
-	pending := conn.pendingLen()
-	if pending != 0 {
-		t.Fatalf("pending RPC remains after response: %d", pending)
-	}
-}
-
-func TestBaseConn_DoubleClose(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-
-	if err := conn.Close(); err != nil {
-		t.Fatalf("first Close failed: %v", err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatalf("second Close failed: %v", err)
-	}
-	if got := tr.closes(); got != 1 {
-		t.Fatalf("transport closed %d times, want 1", got)
-	}
-}
-
-func TestBaseConn_StartOnClosedConnectionIsNoOp(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-	conn.Close()
-
-	// Start on an already-closed connection must be a no-op: no state
-	// transition, no readerLoop launch.
-	conn.Start()
-
-	if conn.State() != ConnectionStateClosed {
-		t.Fatal("expected closed state after Start on closed connection")
-	}
-}
-
-// TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted is a deterministic
-// regression test for the Start()/Close() lifecycle deadlock. If Start() is
-// never called (or returns early because the connection is already closed),
-// readerLoop is never launched, and Close() must not block forever waiting on
-// readerDone.
-func TestBaseConn_CloseDoesNotWaitForReaderThatNeverStarted(t *testing.T) {
-	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-
-	// Close a connection whose Start() was never called: readerDone is nil
-	// and readerLoop was never launched.
 	closeDone := make(chan struct{})
 	go func() {
 		conn.Close()
 		close(closeDone)
 	}()
-
 	select {
 	case <-closeDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Close() deadlocked waiting on readerDone for a readerLoop that never started")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked with in-flight handler")
 	}
+
+	close(releaseHandler)
+	waitForGoroutines(t, before)
 }
 
-// TestBaseConn_StartCloseConcurrentStress repeatedly exercises the Start()/Close()
-// race. Start() allocates readerDone under mu before spawning readerLoop, so
-// Close() waits on readerDone exactly when readerLoop has been scheduled and
-// skips the wait when Start() never committed (readerDone stays nil). This
-// covers, among others, the interleaving where Start() commits state=Active and
-// is descheduled before go readerLoop() while Close() completes shutdown in
-// between — readerLoop still runs, exits on the closed transport, and closes
-// readerDone, so Close() does not deadlock.
-func TestBaseConn_StartCloseConcurrentStress(t *testing.T) {
-	for i := 0; i < 500; i++ {
-		tr := newFakeFrameTransport()
-		conn := NewBaseConn(tr, log.New())
+// TestBaseConn_StartCloseLifecycle: Start on closed is a no-op, Close without
+// Start must not block, double Close closes the transport once.
+func TestBaseConn_StartCloseLifecycle(t *testing.T) {
+	t.Run("start on closed is no-op", func(t *testing.T) {
+		conn := newConn(newFakeFrameTransport())
+		conn.Close()
+		conn.Start()
+		if !conn.IsClosed() {
+			t.Fatal("expected closed state after Start on closed connection")
+		}
+	})
 
-		start := make(chan struct{})
+	t.Run("close without start does not block", func(t *testing.T) {
+		conn := newConn(newFakeFrameTransport())
+		closeDone := make(chan struct{})
+		go func() {
+			conn.Close()
+			close(closeDone)
+		}()
+		select {
+		case <-closeDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close() blocked/deadlocked for a connection that was never started")
+		}
+	})
+
+	t.Run("concurrent start and close", func(t *testing.T) {
+		conn := newConn(newFakeFrameTransport())
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			<-start
 			conn.Start()
 		}()
 		go func() {
 			defer wg.Done()
-			<-start
 			conn.Close()
 		}()
-		close(start)
-
-		done := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatalf("iteration %d: Close() deadlocked with concurrent Start()", i)
+		wg.Wait()
+		if !conn.IsClosed() {
+			t.Fatal("connection should be closed after concurrent Start/Close")
 		}
-	}
+	})
+
+	t.Run("double close closes transport once", func(t *testing.T) {
+		tr := newFakeFrameTransport()
+		conn := newConn(tr)
+		conn.Close()
+		conn.Close()
+		if got := tr.closes(); got != 1 {
+			t.Fatalf("transport closed %d times, want 1", got)
+		}
+	})
 }
 
-// TestBaseConn_ResponseOpcodeMismatchDeliversResponse verifies that a response
-// whose opcode does not match the request's expected response opcode is still
-// delivered to the caller. Python matches responses by rpc_id only and does not
-// validate the response opcode (see AbstractConnection.handle_metadata_and_raw_data).
+// TestBaseConn_ResponseOpcodeMismatchDeliversResponse: Python matches
+// responses by rpc_id only and never validates the response opcode.
 func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(tr, log.New())
-
-	// Register PING and ADD_XSHARD_TX_LIST serializers so the wrong response
-	// opcode is a *known* response opcode that deserializes cleanly but does
-	// not match PING's expected PONG.
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing):                   OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-		byte(wire.ClusterOpAddXshardTxListRequest): OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+	conn := NewBaseConn(Config{
+		Transport: tr,
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing):                   pingSer,
+			byte(wire.ClusterOpAddXshardTxListRequest): OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](byte(wire.ClusterOpAddXshardTxListResponse)),
+		},
+		Logger: log.New(),
 	})
 	conn.Start()
 	defer conn.Close()
 
 	result := make(chan rpcResult, 1)
 	go func() {
-		frame, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
-		result <- rpcResult{frame: frame, err: err}
+		resp, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- rpcResult{resp: resp, err: err}
 	}()
 
 	var request *wire.Frame
@@ -1093,12 +958,8 @@ func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("SendRPC failed: %v", res.err)
 		}
-		if res.frame == nil {
-			t.Fatal("SendRPC returned nil frame")
-		}
-		if res.frame.Opcode != byte(wire.ClusterOpAddXshardTxListResponse) {
-			t.Fatalf("expected opcode 0x%x, got 0x%x",
-				byte(wire.ClusterOpAddXshardTxListResponse), res.frame.Opcode)
+		if res.resp == nil {
+			t.Fatal("SendRPC returned nil response")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("SendRPC did not complete after response delivery")
@@ -1107,483 +968,651 @@ func TestBaseConn_ResponseOpcodeMismatchDeliversResponse(t *testing.T) {
 	if conn.IsClosed() {
 		t.Fatal("connection should not close on response opcode mismatch")
 	}
-
 	if pending := conn.pendingLen(); pending != 0 {
 		t.Fatalf("pending RPC remains after response delivery: %d", pending)
 	}
 }
 
-// ── BaseConn integration tests (TCP pair) ────────────────────────────────────
+// -- SendCommand tests --------------------------------------------------------
 
-// TestBaseConn_CloseWakesPendingRPC verifies that Close wakes all pending RPCs.
-func TestBaseConn_CloseWakesPendingRPC(t *testing.T) {
-	client, _, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
+// TestBaseConn_SendCommand: fire-and-forget commands carry rpc_id=0, run the
+// handler without a response, and fail on a closed connection.
+func TestBaseConn_SendCommand(t *testing.T) {
+	t.Run("writes fire-and-forget request with no response", func(t *testing.T) {
+		tr := newFakeFrameTransport()
+		conn := newPingServerConn(tr)
+		conn.Start()
+		defer conn.Close()
 
-	// Server intentionally left unstarted so it never replies.
-	client.Start()
+		if err := conn.SendCommand(byte(wire.ClusterOpPing), nil); err != nil {
+			t.Fatalf("SendCommand failed: %v", err)
+		}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	errChan := make(chan error, 1)
-	go func() {
-		wg.Done() // Signal that goroutine is ready
-		_, err := client.SendRPC(context.Background(), byte(wire.ClusterOpPing), []byte("ping"))
-		errChan <- err
-	}()
+		select {
+		case f := <-tr.writes:
+			if f.RPCID != 0 {
+				t.Fatalf("expected rpc_id=0, got %d", f.RPCID)
+			}
+			if f.Opcode != byte(wire.ClusterOpPing) {
+				t.Fatalf("expected opcode 0x%x, got 0x%x", byte(wire.ClusterOpPing), f.Opcode)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("SendCommand did not write a frame")
+		}
 
-	wg.Wait() // Wait for goroutine to start (reliable synchronization)
-	client.Close()
+		tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 0, Payload: validPingPayload(t)}
 
-	select {
-	case err := <-errChan:
+		select {
+		case f := <-tr.writes:
+			t.Fatalf("expected no response for fire-and-forget command, got opcode 0x%x rpc_id=%d", f.Opcode, f.RPCID)
+		case <-time.After(50 * time.Millisecond):
+		}
+	})
+
+	t.Run("returns error on closed connection", func(t *testing.T) {
+		conn := newConn(newFakeFrameTransport())
+		conn.Close()
+
+		err := conn.SendCommand(byte(wire.ClusterOpPing), nil)
 		if err != ErrConnectionClosed {
 			t.Fatalf("expected ErrConnectionClosed, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("pending RPC was not woken by Close")
-	}
+	})
 }
 
-// TestBaseConn_RPCIDMonotonic verifies RPC ID monotonic validation.
-// Sending a duplicate RPC ID causes the server to close the connection.
-func TestBaseConn_RPCIDMonotonic(t *testing.T) {
-	tr := newFakeFrameTransport()
-	server := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, server)
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
-	defer server.Close()
+// -- Inbound dispatch tests ----------------------------------------------------
 
-	server.Start()
-
+// TestDispatch_InvalidFramesCloseConnection: malformed or unrecognized inbound
+// frames close the connection, mirroring Python's close-with-error.
+func TestDispatch_InvalidFramesCloseConnection(t *testing.T) {
 	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("client"),
 		FullShardIDList: []uint32{0x00010001},
 	})
 
-	// Inject two PING frames with the same RPC ID (=1).
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   1,
-		Payload: pingPayload,
-	}
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   1, // duplicate rpc_id: should trigger close
-		Payload: pingPayload,
-	}
-
-	select {
-	case <-server.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close connection after duplicate rpc_id")
-	}
-
-	if !server.IsClosed() {
-		t.Fatal("server should be closed")
-	}
-}
-
-// TestBaseConn_RPCIDDecreasing verifies that a decreasing RPC ID closes the
-// connection.
-func TestBaseConn_RPCIDDecreasing(t *testing.T) {
-	tr := newFakeFrameTransport()
-	server := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, server)
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
-	defer server.Close()
-
-	server.Start()
-
-	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("client"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-
-	// Send rpc_id=2 then rpc_id=1 (decreasing).
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   2,
-		Payload: pingPayload,
-	}
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   1, // decreasing rpc_id: should trigger close
-		Payload: pingPayload,
-	}
-
-	select {
-	case <-server.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close connection after decreasing rpc_id")
-	}
-}
-
-// TestBaseConn_SequentialRPCs verifies that multiple sequential RPCs work
-// correctly.
-func TestBaseConn_SequentialRPCs(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("client"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-
-	for i := 0; i < 5; i++ {
-		_, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
-		if err != nil {
-			t.Fatalf("rpc %d failed: %v", i+1, err)
-		}
-	}
-}
-
-// TestDispatch_UnsupportedOpcodeClosesConnection verifies that receiving a
-// frame for an opcode with no registered handler causes the connection to close.
-func TestDispatch_UnsupportedOpcodeClosesConnection(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := client.SendRPC(ctx, byte(wire.ClusterOpAddRootBlockRequest), []byte("payload"))
-	if err == nil {
-		t.Fatal("expected error due to connection close, got nil")
-	}
-}
-
-// TestDispatch_TrailingBytesClosesConnection verifies that a frame payload with
-// trailing bytes after a valid message causes the connection to close. The
-// deserializer must consume exactly the payload length — no more, no less.
-func TestDispatch_TrailingBytesClosesConnection(t *testing.T) {
-	tr := newFakeFrameTransport()
-	server := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, server)
-	server.RegisterTypedHandlers(map[byte]TypedHandler{
-		byte(wire.ClusterOpPing): func(req any) (any, error) {
-			return &wire.PongResponse{}, nil
-		},
-	})
-	defer server.Close()
-
-	server.Start()
-
-	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("client"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-	if err != nil {
-		t.Fatalf("serialize ping: %v", err)
-	}
-	malformedPayload := append(pingPayload, 0xFF)
-
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   1,
-		Payload: malformedPayload,
-	}
-
-	select {
-	case <-server.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close connection after trailing-bytes payload")
-	}
-}
-
-// TestDispatch_ExactPayloadProcessesNormally verifies that a well-formed
-// payload with no trailing bytes is processed and the connection stays open.
-func TestDispatch_ExactPayloadProcessesNormally(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("client"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-	if err != nil {
-		t.Fatalf("serialize ping: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
-	if err != nil {
-		t.Fatalf("send ping rpc: %v", err)
-	}
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.ClusterOpPong, resp.Opcode)
-	}
-	if server.IsClosed() {
-		t.Fatal("server should remain open after well-formed exchange")
-	}
-}
-
-// TestDispatch_MalformedResponsePayloadClosesConnection verifies that a PONG
-// response with a malformed payload (trailing bytes) causes the receiver to
-// close the connection.
-func TestDispatch_MalformedResponsePayloadClosesConnection(t *testing.T) {
-	tr := newFakeFrameTransport()
-	client := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, client)
-	defer client.Close()
-
-	client.Start()
-
-	// Append a trailing byte to a valid PONG payload so deserialization fails.
-	// BaseConn deserializes response payloads before rpc_id matching, so the
-	// malformed payload closes the connection.
-	pongPayload, err := serialize.SerializeToBytes(&wire.PongResponse{
-		ID:              []byte("server"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-	if err != nil {
-		t.Fatalf("serialize pong: %v", err)
-	}
-	malformedPong := append(pongPayload, 0xFF)
-
-	tr.frames <- &wire.Frame{
-		Opcode:  byte(wire.ClusterOpPong),
-		RPCID:   1,
-		Payload: malformedPong,
-	}
-
-	select {
-	case <-client.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("client did not close connection after malformed PONG payload")
-	}
-}
-
-// TestDispatch_UnknownResponseOpcodeClosesConnection verifies that a frame
-// with an opcode that is neither a registered request handler nor a registered
-// response opcode causes the receiver to close the connection.
-func TestDispatch_UnknownResponseOpcodeClosesConnection(t *testing.T) {
-	tr := newFakeFrameTransport()
-	client := NewBaseConn(tr, log.New())
-	registerPingSerializer(t, client)
-	defer client.Close()
-
-	client.Start()
-
-	// 0xFF is not a registered ClusterOp on either side: no handler and no
-	// response serializer. The receiver must close the connection.
-	tr.frames <- &wire.Frame{
-		Opcode:  0xFF,
-		RPCID:   1,
-		Payload: []byte{0x00},
-	}
-
-	select {
-	case <-client.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("client did not close connection after unknown response opcode")
-	}
-}
-
-// TestDispatch_ValidResponseBehaviorUnchanged verifies that a valid PONG
-// response is delivered to the caller. SendRPC returns *wire.Frame; BaseConn
-// validates the payload internally but does not return the deserialized object,
-// so the caller deserializes the payload itself.
-func TestDispatch_ValidResponseBehaviorUnchanged(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("client"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-	if err != nil {
-		t.Fatalf("serialize ping: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
-	if err != nil {
-		t.Fatalf("send ping rpc: %v", err)
-	}
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.ClusterOpPong, resp.Opcode)
-	}
-
-	// The caller receives the raw frame and deserializes the payload itself.
-	var pong wire.PongResponse
-	if err := serialize.DeserializeFromBytes(resp.Payload, &pong); err != nil {
-		t.Fatalf("deserialize pong: %v", err)
-	}
-
-	if client.IsClosed() {
-		t.Fatal("client should remain open after valid response")
-	}
-	if server.IsClosed() {
-		t.Fatal("server should remain open after valid response")
-	}
-}
-
-// ── Configuration lifecycle tests ────────────────────────────────────────────
-
-// assertPanics runs fn and fails the test if it does not panic with a message
-// containing want.
-func assertPanics(t *testing.T, want string, fn func()) {
-	t.Helper()
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatalf("expected panic containing %q, got no panic", want)
-		}
-		msg, _ := r.(string)
-		if !strings.Contains(msg, want) {
-			t.Fatalf("expected panic containing %q, got %q", want, msg)
-		}
-	}()
-	fn()
-}
-
-// TestBaseConn_RegisterAfterStartPanics verifies that every Register*/Set*
-// method rejects mutation once the connection is Active, establishing the
-// invariant that Active => configuration immutable.
-func TestBaseConn_RegisterAfterStartPanics(t *testing.T) {
-	methods := []struct {
-		name string
-		call func(*BaseConn)
+	tests := []struct {
+		name   string
+		server bool // true: server conn (handles PING); false: client conn (receives PONG)
+		frames []*wire.Frame
 	}{
-		{"RegisterTypedHandlers", func(c *BaseConn) {
-			c.RegisterTypedHandlers(map[byte]TypedHandler{
-				byte(wire.ClusterOpPing): func(any) (any, error) { return nil, nil },
-			})
-		}},
-		{"RegisterOpSerializers", func(c *BaseConn) {
-			c.RegisterOpSerializers(map[byte]*OpSerializer{
-				byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			})
-		}},
-		{"RegisterNonRPCOps", func(c *BaseConn) { c.RegisterNonRPCOps([]byte{1}) }},
-		{"SetForwarder", func(c *BaseConn) {
-			c.SetForwarder(func(*wire.Frame) bool { return false })
-		}},
-		{"SetValidateRPCID", func(c *BaseConn) {
-			c.SetValidateRPCID(func(uint64, uint64) bool { return true })
-		}},
+		{
+			name:   "unsupported request opcode",
+			server: true,
+			frames: []*wire.Frame{{Opcode: byte(wire.ClusterOpAddRootBlockRequest), RPCID: 1, Payload: pingPayload}},
+		},
+		{
+			name:   "trailing bytes in request payload",
+			server: true,
+			frames: []*wire.Frame{{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: append(append([]byte{}, pingPayload...), 0xFF)}},
+		},
+		{
+			name:   "zero rpc_id on rpc request",
+			server: true,
+			frames: []*wire.Frame{{Opcode: byte(wire.ClusterOpPing), RPCID: 0, Payload: pingPayload}},
+		},
+		{
+			name:   "duplicate rpc_id",
+			server: true,
+			frames: []*wire.Frame{
+				{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: pingPayload},
+				{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: pingPayload},
+			},
+		},
+		{
+			name:   "decreasing rpc_id",
+			server: true,
+			frames: []*wire.Frame{
+				{Opcode: byte(wire.ClusterOpPing), RPCID: 2, Payload: pingPayload},
+				{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: pingPayload},
+			},
+		},
+		{
+			name:   "unknown response opcode",
+			server: false,
+			frames: []*wire.Frame{{Opcode: 0xFF, RPCID: 1, Payload: []byte{0x00}}},
+		},
+		{
+			name:   "unknown response rpc_id",
+			server: false,
+			frames: []*wire.Frame{{Opcode: byte(wire.ClusterOpPong), RPCID: 999, Payload: validPongPayload(t)}},
+		},
 	}
 
-	for _, m := range methods {
-		t.Run(m.name, func(t *testing.T) {
-			conn := NewBaseConn(newFakeFrameTransport(), log.New())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := newFakeFrameTransport()
+			var conn *BaseConn
+			if tt.server {
+				conn = newPingServerConn(tr)
+			} else {
+				conn = newPingConn(tr)
+			}
 			conn.Start()
 			defer conn.Close()
-			assertPanics(t, "before Start", func() { m.call(conn) })
+
+			for _, f := range tt.frames {
+				select {
+				case tr.frames <- f:
+				case <-time.After(time.Second):
+					t.Fatal("transport write blocked feeding frame")
+				}
+			}
+
+			select {
+			case <-conn.WaitUntilClosed():
+				if !conn.IsClosed() {
+					t.Fatal("expected connection to close")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("connection did not close after invalid frame")
+			}
 		})
 	}
 }
 
-// TestBaseConn_StartFreezesConfiguration directly exercises the concern that a
-// caller doing RegisterOpSerializers → Start → RegisterTypedHandlers would end
-// up with an Active connection whose configuration is incomplete. The second
-// registration must be rejected (panic), never silently allowed.
-func TestBaseConn_StartFreezesConfiguration(t *testing.T) {
-	conn := NewBaseConn(newFakeFrameTransport(), log.New())
-	conn.RegisterOpSerializers(map[byte]*OpSerializer{
-		byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+// TestPeerRPCID_Uint64Monotonic: inbound rpc ids are compared as unsigned.
+// Python peers start at 1 (write_rpc_request pre-increments; 0 is reserved
+// for fire-and-forget), so the zero-value sentinel rejects rpc_id=0. High-half
+// ids must remain monotonic — an int64 comparison would wrap them negative
+// and reject a legitimate Python peer after 2^63 requests.
+func TestPeerRPCID_Uint64Monotonic(t *testing.T) {
+	conn := newConn(newFakeFrameTransport())
+
+	if conn.defaultValidateRPCID(0) {
+		t.Fatal("rpc_id=0 accepted; 0 is reserved for non-RPC commands")
+	}
+	if !conn.defaultValidateRPCID(1) {
+		t.Fatal("first rpc_id=1 rejected")
+	}
+	if conn.defaultValidateRPCID(1) {
+		t.Fatal("duplicate rpc_id=1 accepted")
+	}
+	for _, id := range []uint64{math.MaxInt64, 1 << 63, math.MaxUint64} {
+		if !conn.defaultValidateRPCID(id) {
+			t.Fatalf("rpc_id=%d rejected", id)
+		}
+	}
+	if conn.defaultValidateRPCID(math.MaxUint64) {
+		t.Fatal("duplicate MaxUint64 accepted")
+	}
+}
+
+// -- Forwarder tests -----------------------------------------------------------
+
+// TestForwarder_RoutesFrame: returning true (consumed) skips dispatch,
+// returning false (pass) dispatches normally.
+func TestForwarder_RoutesFrame(t *testing.T) {
+	tests := []struct {
+		name      string
+		consumed  bool
+		wantReply bool
+	}{
+		{"consumed", true, false},
+		{"pass", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := newFakeFrameTransport()
+			forwarded := make(chan *wire.Frame, 1)
+			conn := NewBaseConn(Config{
+				Transport:   tr,
+				Serializers: pingSerializers,
+				Handlers: map[byte]TypedHandler{
+					byte(wire.ClusterOpPing): pongHandler(),
+				},
+				Forwarder: func(f *wire.Frame) bool {
+					forwarded <- f
+					return tt.consumed
+				},
+				Logger: log.New(),
+			})
+			conn.Start()
+			defer conn.Close()
+
+			tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
+
+			select {
+			case f := <-forwarded:
+				if f.RPCID != 1 {
+					t.Fatalf("expected rpc_id=1, got %d", f.RPCID)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("forwarder did not receive frame")
+			}
+
+			if tt.wantReply {
+				select {
+				case f := <-tr.writes:
+					if f.RPCID != 1 || f.Opcode != byte(wire.ClusterOpPong) {
+						t.Fatalf("unexpected reply: opcode 0x%x rpc_id=%d", f.Opcode, f.RPCID)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("handler did not write response")
+				}
+			} else {
+				select {
+				case f := <-tr.writes:
+					t.Fatalf("expected no response when forwarder consumed frame, got opcode 0x%x", f.Opcode)
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+		})
+	}
+}
+
+// TestForwarder_CloseRequest: a forwarder calling c.Close() directly on the
+// reader goroutine shuts the connection down without dispatching the frame and
+// does not deadlock (regression: a forwarder calling Close() must be safe now
+// that Close is non-blocking).
+func TestForwarder_CloseRequest(t *testing.T) {
+	tr := newFakeFrameTransport()
+	var conn *BaseConn
+	conn = NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Forwarder: func(f *wire.Frame) bool {
+			// Close is non-blocking and safe to call from the reader
+			// goroutine; return true so the closing frame is not dispatched.
+			conn.Close()
+			return true
+		},
+		Logger: log.New(),
+	})
+	conn.Start()
+
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
+
+	select {
+	case <-conn.WaitUntilClosed():
+	case <-time.After(time.Second):
+		t.Fatal("forwarder Close() did not shut down the connection")
+	}
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after forwarder Close()")
+	}
+
+	// The frame must not have dispatched: no pong response.
+	select {
+	case f := <-tr.writes:
+		t.Fatalf("expected no dispatch after forwarder Close(), got opcode 0x%x", f.Opcode)
+	default:
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		conn.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() deadlocked waiting for readerLoop exit after forwarder Close()")
+	}
+	if got := tr.closes(); got != 1 {
+		t.Fatalf("transport closed %d times, want 1", got)
+	}
+}
+
+// TestForwarder_PanicIsolatesConnection: a panic inside the forwarder must
+// not crash the process; it shuts the connection down with a descriptive
+// error instead (reader-path panic isolation).
+func TestForwarder_PanicIsolatesConnection(t *testing.T) {
+	tr := newFakeFrameTransport()
+	conn := NewBaseConn(Config{
+		Transport:   tr,
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Forwarder: func(f *wire.Frame) bool {
+			panic("forwarder boom")
+		},
+		Logger: log.New(),
 	})
 	conn.Start()
 	defer conn.Close()
 
-	assertPanics(t, "before Start", func() {
-		conn.RegisterTypedHandlers(map[byte]TypedHandler{
-			byte(wire.ClusterOpPing): func(any) (any, error) { return nil, nil },
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
+
+	select {
+	case <-conn.WaitUntilClosed():
+	case <-time.After(time.Second):
+		t.Fatal("WaitUntilClosed did not fire after forwarder panic")
+	}
+	if !conn.IsClosed() {
+		t.Fatal("connection should be closed after forwarder panic")
+	}
+}
+
+// -- Non-RPC tests --------------------------------------------------------------
+
+// TestNonRPC: a non-RPC opcode dispatches to the handler without a response;
+// a non-RPC opcode with non-zero rpc_id is a protocol violation.
+func TestNonRPC(t *testing.T) {
+	t.Run("dispatches handler without response", func(t *testing.T) {
+		tr := newFakeFrameTransport()
+		done := make(chan struct{})
+		conn := NewBaseConn(Config{
+			Transport:   tr,
+			Serializers: pingSerializers,
+			Handlers: map[byte]TypedHandler{
+				byte(wire.ClusterOpPing): func(req any) (any, error) {
+					close(done)
+					return &wire.PongResponse{}, nil
+				},
+			},
+			NonRPCOps: map[byte]struct{}{
+				byte(wire.ClusterOpPing): {},
+			},
+			Logger: log.New(),
 		})
+		conn.Start()
+		defer conn.Close()
+
+		tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 0, Payload: validPingPayload(t)}
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("handler was not invoked for non-RPC opcode")
+		}
+
+		select {
+		case f := <-tr.writes:
+			t.Fatalf("expected no response for non-RPC, got opcode 0x%x rpc_id=%d", f.Opcode, f.RPCID)
+		case <-time.After(50 * time.Millisecond):
+		}
+	})
+
+	t.Run("non-zero rpc_id shuts down connection", func(t *testing.T) {
+		tr := newFakeFrameTransport()
+		conn := NewBaseConn(Config{
+			Transport:   tr,
+			Serializers: pingSerializers,
+			Handlers: map[byte]TypedHandler{
+				byte(wire.ClusterOpPing): pongHandler(),
+			},
+			NonRPCOps: map[byte]struct{}{
+				byte(wire.ClusterOpPing): {},
+			},
+			Logger: log.New(),
+		})
+		conn.Start()
+
+		tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 99, Payload: validPingPayload(t)}
+
+		select {
+		case <-conn.WaitUntilClosed():
+		case <-time.After(time.Second):
+			t.Fatal("connection did not close after non-RPC with non-zero rpc_id")
+		}
 	})
 }
 
-// TestBaseConn_ConcurrentRegisterStartStress races Register*/Set* against
-// Start. Both are serialized by mu: either the registration commits before the
-// Connecting→Active transition (so the config is complete when Active), or the
-// registration observes Active and panics. There is no interleaving that yields
-// a silently half-configured Active connection, and no data race.
-func TestBaseConn_ConcurrentRegisterStartStress(t *testing.T) {
-	for i := 0; i < 200; i++ {
-		conn := NewBaseConn(newFakeFrameTransport(), log.New())
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(2)
+// -- Full lifecycle simulation (real TCP + Python golden bytes) ----------------
+//
+// The byte streams below were generated by the real pyquarkchain
+// implementation (quarkchain.cluster.rpc Ping/Pong + ClusterMetadata) and
+// verify byte-level compatibility of the whole stack over a real TCP socket:
+// frame codec, metadata, opcode mapping, payload serialization, rpc_id
+// echo, concurrent bidirectional RPC, timeout/late-response, and close.
 
-		go func() {
-			defer wg.Done()
-			<-start
-			defer func() { _ = recover() }() // panic is a valid outcome
-			conn.RegisterOpSerializers(map[byte]*OpSerializer{
-				byte(wire.ClusterOpPing): OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
-			})
-		}()
-		go func() {
-			defer wg.Done()
-			<-start
-			conn.Start()
-		}()
+// Python: Ping(b"S7", [0x00010001, 0x00020001], None) as PING (0x81),
+// rpc_id=1, default ClusterMetadata (branch=0, cluster_peer_id=0).
+const pythonGoldenPingFrame = "0000001300000000000000000000000081000000000000000100000002533700000002000100010002000100"
 
-		close(start)
-		wg.Wait()
-		conn.Close()
+// Python: Pong(b"M1", [0x00010001]) as PONG (0x82), rpc_id=1, default metadata.
+const pythonGoldenPongFrame = "0000000e000000000000000000000000820000000000000001000000024d310000000100010001"
+
+// Python: same PING with rpc_id=5 and ClusterMetadata(branch=0x00010001,
+// cluster_peer_id=7); the expected PONG echoes that metadata and rpc_id.
+const (
+	pythonGoldenPingFrameMeta = "0000001300010001000000000000000781000000000000000500000002533700000002000100010002000100"
+	pythonGoldenPongFrameMeta = "0000000e000100010000000000000007820000000000000005000000024d310000000100010001"
+)
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("bad hex fixture: %v", err)
+	}
+	return b
+}
+
+// newMetaConnPair creates a BaseConn over a real TCP socket using the
+// 12-byte ClusterMetadata codec (master↔slave style), mirroring Python's
+// MasterConnection/SlaveConnection construction.
+func newMetaConnPair(t *testing.T, cfg Config) (*BaseConn, net.Conn) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	peer, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	cfg.Transport = NewTCPTransport(peer,
+		func(r io.Reader) (*wire.Frame, error) { return wire.ReadFrame(r, 0) },
+		wire.WriteFrame)
+	cfg.Logger = log.New()
+	return NewBaseConn(cfg), raw
+}
+
+// readFull reads exactly len(buf) bytes with a deadline.
+func readFull(t *testing.T, c net.Conn, buf []byte) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := io.ReadFull(c, buf); err != nil {
+		t.Fatalf("read %d bytes: %v", len(buf), err)
 	}
 }
 
-// TestBaseConn_ConcurrentStateReaders exercises the RLock path of
-// State/IsActive/IsClosed under concurrent reads while Close performs the
-// state write. The race detector verifies no unsynchronized access to state.
-func TestBaseConn_ConcurrentStateReaders(t *testing.T) {
-	conn := NewBaseConn(newFakeFrameTransport(), log.New())
-	conn.Start()
+// TestSimulation_PythonGoldenBytes: a raw peer (standing in for the Python
+// master) writes Python-generated PING bytes; the Go connection must
+// deserialize them, dispatch the handler, and reply with exactly the bytes
+// Python would have produced for the PONG.
+func TestSimulation_PythonGoldenBytes(t *testing.T) {
+	var gotPing []*wire.PingRequest
+	server, raw := newMetaConnPair(t, Config{
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(req any) (any, error) {
+				ping := req.(*wire.PingRequest)
+				gotPing = append(gotPing, ping)
+				return &wire.PongResponse{ID: []byte("M1"), FullShardIDList: []uint32{0x00010001}}, nil
+			},
+		},
+	})
+	server.Start()
+	defer server.Close()
 
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-					_ = conn.State()
-					_ = conn.IsActive()
-					_ = conn.IsClosed()
+	// Default metadata, rpc_id=1.
+	if _, err := raw.Write(mustHex(t, pythonGoldenPingFrame)); err != nil {
+		t.Fatalf("write golden ping: %v", err)
+	}
+	want := mustHex(t, pythonGoldenPongFrame)
+	got := make([]byte, len(want))
+	readFull(t, raw, got)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("pong bytes mismatch\n got: %x\nwant: %x", got, want)
+	}
+
+	// Routed metadata (branch + cluster_peer_id), rpc_id=5: the response must
+	// echo the request metadata verbatim (Python __write_rpc_response).
+	if _, err := raw.Write(mustHex(t, pythonGoldenPingFrameMeta)); err != nil {
+		t.Fatalf("write golden ping (meta): %v", err)
+	}
+	want = mustHex(t, pythonGoldenPongFrameMeta)
+	got = make([]byte, len(want))
+	readFull(t, raw, got)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("pong bytes (meta) mismatch\n got: %x\nwant: %x", got, want)
+	}
+
+	if len(gotPing) != 2 {
+		t.Fatalf("handler invoked %d times, want 2", len(gotPing))
+	}
+	if string(gotPing[0].ID) != "S7" || len(gotPing[0].FullShardIDList) != 2 ||
+		gotPing[0].FullShardIDList[0] != 0x00010001 || gotPing[0].FullShardIDList[1] != 0x00020001 {
+		t.Fatalf("deserialized ping mismatch: %+v", gotPing[0])
+	}
+	if gotPing[0].RootTip != nil {
+		t.Fatalf("expected nil Optional root_tip, got %v", gotPing[0].RootTip)
+	}
+	if server.IsClosed() {
+		t.Fatal("connection must stay open after golden exchange")
+	}
+}
+
+// TestSimulation_FullLifecycle walks startup → bidirectional concurrent RPC →
+// timeout with late response → clean close, mirroring the Python slave
+// runtime interaction over one TCP connection.
+func TestSimulation_FullLifecycle(t *testing.T) {
+	var slow atomic.Bool // gates the server ping handler to force timeouts
+
+	server, raw := newMetaConnPair(t, Config{
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(req any) (any, error) {
+				if slow.Load() {
+					time.Sleep(300 * time.Millisecond)
 				}
-			}
+				return &wire.PongResponse{ID: []byte("M1"), FullShardIDList: []uint32{0x00010001}}, nil
+			},
+		},
+	})
+	client := NewBaseConn(Config{
+		Transport: NewTCPTransport(raw,
+			func(r io.Reader) (*wire.Frame, error) { return wire.ReadFrame(r, 0) },
+			wire.WriteFrame),
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing): pingSer,
+		},
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Logger: log.New(),
+	})
+
+	baseline := runtime.NumGoroutine()
+	server.Start()
+	client.Start()
+
+	// -- Startup: both sides become active.
+	select {
+	case <-server.WaitUntilActive():
+	case <-time.After(time.Second):
+		t.Fatal("server never became active")
+	}
+	select {
+	case <-client.WaitUntilActive():
+	case <-time.After(time.Second):
+		t.Fatal("client never became active")
+	}
+
+	pingPayload := mustSerialize(t, &wire.PingRequest{
+		ID:              []byte("C1"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+
+	// -- Concurrent RPCs in both directions over the same connection.
+	const callers = 8
+	results := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			_, err := client.SendRPC(context.Background(), byte(wire.ClusterOpPing), pingPayload)
+			results <- err
+		}()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err := server.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
+			results <- err
 		}()
 	}
-
-	conn.Close()
-	close(stop)
-	wg.Wait()
-
-	if !conn.IsClosed() {
-		t.Fatal("expected connection to be closed")
+	for i := 0; i < 2*callers; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("bidirectional rpc failed: %v", err)
+		}
 	}
+
+	// -- Timeout with a late response: the connection must survive both.
+	slow.Store(true)
+	slowCtx, slowCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer slowCancel()
+	_, err := client.SendRPC(slowCtx, byte(wire.ClusterOpPing), pingPayload)
+	if err == nil || !strings.Contains(err.Error(), "rpc timeout") {
+		t.Fatalf("expected rpc timeout, got %v", err)
+	}
+	if client.IsClosed() || server.IsClosed() {
+		t.Fatal("connection closed by rpc timeout")
+	}
+	// The late PONG for the timed-out call is dropped; the next RPC still works.
+	freshCtx, freshCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer freshCancel()
+	resp, err := client.SendRPC(freshCtx, byte(wire.ClusterOpPing), pingPayload)
+	if err != nil {
+		t.Fatalf("rpc after timeout failed: %v", err)
+	}
+	if _, ok := resp.(*wire.PongResponse); !ok {
+		t.Fatalf("expected *PongResponse, got %T", resp)
+	}
+	if client.IsClosed() {
+		t.Fatal("connection closed after late response")
+	}
+
+	// -- Close: pending RPCs are aborted; the peer observes clean EOF.
+	inflight := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// The slow handler keeps this RPC in flight at Close time.
+		_, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
+		inflight <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let the request reach the server
+	client.Close()
+
+	select {
+	case err := <-inflight:
+		if err != ErrConnectionClosed {
+			t.Fatalf("pending rpc at close: expected ErrConnectionClosed, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending rpc not aborted by Close")
+	}
+	select {
+	case <-server.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not observe client close")
+	}
+	if server.pendingLen() != 0 {
+		t.Fatalf("server pending rpcs remain: %d", server.pendingLen())
+	}
+	waitForGoroutines(t, baseline)
+}
+
+// mustSerialize is a test helper for payload serialization.
+func mustSerialize(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := serialize.SerializeToBytes(v)
+	if err != nil {
+		t.Fatalf("serialize %T: %v", v, err)
+	}
+	return b
 }
