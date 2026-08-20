@@ -46,6 +46,7 @@ func TestCrossShardTransactionList(t *testing.T) {
 
 	d1, err := FromBytesToCrossShardTransactionList(data)
 	assert.NoError(t, err)
+	assert.Equal(t, crossShardTransactionListVersion, d1.Version())
 	for k, v := range c1.TXList {
 		assert.Equal(t, v.TxHash, d1.TXList[k].TxHash)
 		assert.Equal(t, v.From, d1.TXList[k].From)
@@ -72,6 +73,7 @@ func TestCrossShardTransactionListGolden(t *testing.T) {
 
 		decoded, err := FromBytesToCrossShardTransactionList(common.FromHex(expected))
 		assert.NoError(t, err)
+		assert.Equal(t, crossShardTransactionListVersion, decoded.version)
 		reencoded, err := serialize.SerializeToBytes(decoded)
 		assert.NoError(t, err)
 		assert.Equal(t, expected, common.Bytes2Hex(reencoded))
