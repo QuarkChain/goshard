@@ -9,25 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
 
-// ForwardResult is the routing decision returned by Config.Forwarder for an
-// inbound frame.
-type ForwardResult int
-
-const (
-	// ForwardPass leaves the frame to this connection's normal dispatch
-	// (request handler or RPC response matching).
-	ForwardPass ForwardResult = iota
-
-	// ForwardConsumed means the router handled the frame.
-	// Local dispatch is skipped.
-	ForwardConsumed
-
-	// ForwardClose means the router detected an unrecoverable condition.
-	// BaseConn performs the shutdown itself; the router must not directly
-	// close the connection.
-	ForwardClose
-)
-
 // Config holds immutable connection configuration.
 type Config struct {
 	// Transport is the frame I/O backend. Required.
@@ -53,12 +34,11 @@ type Config struct {
 	// connection's reader loop (for example, sending an RPC and waiting for its
 	// response).
 	//
-	// The callback must not directly close this connection. If it detects an
-	// unrecoverable routing or protocol condition, it should return ForwardClose
-	// and let BaseConn perform the shutdown.
+	// To close the connection, call c.Close() directly — it is non-blocking
+	// and safe to invoke from the reader goroutine.
 	//
 	// The callback is responsible for synchronizing any shared state it accesses.
-	Forwarder func(*wire.Frame) ForwardResult
+	Forwarder func(*wire.Frame) bool
 
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger

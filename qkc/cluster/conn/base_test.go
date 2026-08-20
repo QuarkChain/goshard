@@ -5,6 +5,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"math"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -195,59 +197,6 @@ func newPingServerConn(tr FrameTransport) *BaseConn {
 		},
 		Logger: log.New(),
 	})
-}
-
-// newTestBaseConnPair creates a pair of BaseConns over a local TCP socket with
-// PING/PONG on both sides and a PING handler on the server side.
-func newTestBaseConnPair(t *testing.T) (client, server *BaseConn, cleanup func()) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-
-	var serverConn net.Conn
-	var acceptErr error
-	accepted := make(chan struct{})
-	go func() {
-		defer close(accepted)
-		serverConn, acceptErr = ln.Accept()
-		ln.Close()
-	}()
-
-	clientConn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	<-accepted
-	if acceptErr != nil {
-		t.Fatalf("accept: %v", acceptErr)
-	}
-
-	readFrame := func(r io.Reader) (*wire.Frame, error) {
-		return wire.ReadFrameNoMeta(r, 0)
-	}
-
-	client = NewBaseConn(Config{
-		Transport:   NewTCPTransport(clientConn, readFrame, wire.WriteFrameNoMeta),
-		Serializers: pingSerializers,
-		Logger:      log.New(),
-	})
-	server = NewBaseConn(Config{
-		Transport:   NewTCPTransport(serverConn, readFrame, wire.WriteFrameNoMeta),
-		Serializers: pingSerializers,
-		Handlers: map[byte]TypedHandler{
-			byte(wire.ClusterOpPing): pongHandler(),
-		},
-		Logger: log.New(),
-	})
-
-	cleanup = func() {
-		client.Close()
-		server.Close()
-	}
-	return
 }
 
 // waitForGoroutines polls until the goroutine count drops back to the baseline.
@@ -718,6 +667,59 @@ func TestBaseConn_ResponseCancelRaceCleansPending(t *testing.T) {
 	}
 }
 
+// TestBaseConn_ResponseCancelCloseRaceCompletesOnce: response, cancel, and
+// close racing for the same rpc id must complete the RPC exactly once with
+// no pending leak and no deadlock (the third arbitration corner not covered
+// by TestBaseConn_ResponseCancelRaceCleansPending).
+func TestBaseConn_ResponseCancelCloseRaceCompletesOnce(t *testing.T) {
+	const iterations = 200
+	pongPayload := validPongPayload(t)
+	for i := 0; i < iterations; i++ {
+		tr := newFakeFrameTransport()
+		conn := newPingConn(tr)
+		conn.Start()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := conn.SendRPC(ctx, byte(wire.ClusterOpPing), nil)
+			result <- err
+		}()
+
+		var request *wire.Frame
+		select {
+		case request = <-tr.writes:
+		case <-time.After(time.Second):
+			t.Fatal("fake transport did not receive request")
+		}
+
+		start := make(chan struct{})
+		go func() { <-start; cancel() }()
+		go func() {
+			<-start
+			tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPong), RPCID: request.RPCID, Payload: pongPayload}
+		}()
+		go func() { <-start; conn.Close() }()
+		close(start)
+
+		select {
+		case err := <-result:
+			// Any of the three outcomes is valid; completion is what matters.
+			if err != nil && err != ErrConnectionClosed &&
+				!errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "rpc timeout") {
+				t.Fatalf("iteration %d: unexpected error: %v", i, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: SendRPC never completed (deadlock)", i)
+		}
+		if pending := conn.pendingLen(); pending != 0 {
+			t.Fatalf("iteration %d: pending RPCs remain: %d", i, pending)
+		}
+		cancel()
+		conn.Close()
+	}
+}
+
 func TestBaseConn_ReadFailureWakesPendingRPC(t *testing.T) {
 	tr := newFakeFrameTransport()
 	conn := newConn(tr)
@@ -859,7 +861,7 @@ func TestBaseConn_LateHandlerCompletedAfterClose(t *testing.T) {
 }
 
 // TestBaseConn_StartCloseLifecycle: Start on closed is a no-op, Close without
-// Start must not block on readerDone, double Close closes the transport once.
+// Start must not block, double Close closes the transport once.
 func TestBaseConn_StartCloseLifecycle(t *testing.T) {
 	t.Run("start on closed is no-op", func(t *testing.T) {
 		conn := newConn(newFakeFrameTransport())
@@ -880,7 +882,7 @@ func TestBaseConn_StartCloseLifecycle(t *testing.T) {
 		select {
 		case <-closeDone:
 		case <-time.After(2 * time.Second):
-			t.Fatal("Close() deadlocked waiting on readerDone for a readerLoop that never started")
+			t.Fatal("Close() blocked/deadlocked for a connection that was never started")
 		}
 	})
 
@@ -1135,54 +1137,18 @@ func TestPeerRPCID_Uint64Monotonic(t *testing.T) {
 	}
 }
 
-// -- BaseConn integration tests (TCP pair) ------------------------------------
-
-// TestDispatch_ValidExchange: a well-formed PING/PONG exchange over TCP
-// delivers the deserialized *PongResponse and leaves both sides open.
-func TestDispatch_ValidExchange(t *testing.T) {
-	client, server, cleanup := newTestBaseConnPair(t)
-	defer cleanup()
-
-	server.Start()
-	client.Start()
-
-	pingPayload, err := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("client"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-	if err != nil {
-		t.Fatalf("serialize ping: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
-	if err != nil {
-		t.Fatalf("send ping rpc: %v", err)
-	}
-	pong, ok := resp.(*wire.PongResponse)
-	if !ok || pong == nil {
-		t.Fatalf("expected *PongResponse, got %T", resp)
-	}
-
-	if client.IsClosed() || server.IsClosed() {
-		t.Fatal("connection closed after valid exchange")
-	}
-}
-
 // -- Forwarder tests -----------------------------------------------------------
 
-// TestForwarder_RoutesFrame: ForwardConsumed skips dispatch, ForwardPass
-// dispatches normally.
+// TestForwarder_RoutesFrame: returning true (consumed) skips dispatch,
+// returning false (pass) dispatches normally.
 func TestForwarder_RoutesFrame(t *testing.T) {
 	tests := []struct {
 		name      string
-		result    ForwardResult
+		consumed  bool
 		wantReply bool
 	}{
-		{"consumed", ForwardConsumed, false},
-		{"pass", ForwardPass, true},
+		{"consumed", true, false},
+		{"pass", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1194,9 +1160,9 @@ func TestForwarder_RoutesFrame(t *testing.T) {
 				Handlers: map[byte]TypedHandler{
 					byte(wire.ClusterOpPing): pongHandler(),
 				},
-				Forwarder: func(f *wire.Frame) ForwardResult {
+				Forwarder: func(f *wire.Frame) bool {
 					forwarded <- f
-					return tt.result
+					return tt.consumed
 				},
 				Logger: log.New(),
 			})
@@ -1234,20 +1200,24 @@ func TestForwarder_RoutesFrame(t *testing.T) {
 	}
 }
 
-// TestForwarder_CloseRequest: ForwardClose shuts the connection down on the
-// reader goroutine without dispatching the frame; the reader loop must exit so
-// a subsequent Close returns promptly (regression: a forwarder calling Close()
-// synchronously deadlocks on readerDone).
+// TestForwarder_CloseRequest: a forwarder calling c.Close() directly on the
+// reader goroutine shuts the connection down without dispatching the frame and
+// does not deadlock (regression: a forwarder calling Close() must be safe now
+// that Close is non-blocking).
 func TestForwarder_CloseRequest(t *testing.T) {
 	tr := newFakeFrameTransport()
-	conn := NewBaseConn(Config{
+	var conn *BaseConn
+	conn = NewBaseConn(Config{
 		Transport:   tr,
 		Serializers: pingSerializers,
 		Handlers: map[byte]TypedHandler{
 			byte(wire.ClusterOpPing): pongHandler(),
 		},
-		Forwarder: func(f *wire.Frame) ForwardResult {
-			return ForwardClose
+		Forwarder: func(f *wire.Frame) bool {
+			// Close is non-blocking and safe to call from the reader
+			// goroutine; return true so the closing frame is not dispatched.
+			conn.Close()
+			return true
 		},
 		Logger: log.New(),
 	})
@@ -1258,16 +1228,16 @@ func TestForwarder_CloseRequest(t *testing.T) {
 	select {
 	case <-conn.WaitUntilClosed():
 	case <-time.After(time.Second):
-		t.Fatal("ForwardClose did not shut down the connection")
+		t.Fatal("forwarder Close() did not shut down the connection")
 	}
 	if !conn.IsClosed() {
-		t.Fatal("connection should be closed after ForwardClose")
+		t.Fatal("connection should be closed after forwarder Close()")
 	}
 
 	// The frame must not have dispatched: no pong response.
 	select {
 	case f := <-tr.writes:
-		t.Fatalf("expected no dispatch after ForwardClose, got opcode 0x%x", f.Opcode)
+		t.Fatalf("expected no dispatch after forwarder Close(), got opcode 0x%x", f.Opcode)
 	default:
 	}
 
@@ -1279,7 +1249,7 @@ func TestForwarder_CloseRequest(t *testing.T) {
 	select {
 	case <-closeDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Close() deadlocked waiting for readerLoop exit after ForwardClose")
+		t.Fatal("Close() deadlocked waiting for readerLoop exit after forwarder Close()")
 	}
 	if got := tr.closes(); got != 1 {
 		t.Fatalf("transport closed %d times, want 1", got)
@@ -1297,7 +1267,7 @@ func TestForwarder_PanicIsolatesConnection(t *testing.T) {
 		Handlers: map[byte]TypedHandler{
 			byte(wire.ClusterOpPing): pongHandler(),
 		},
-		Forwarder: func(f *wire.Frame) ForwardResult {
+		Forwarder: func(f *wire.Frame) bool {
 			panic("forwarder boom")
 		},
 		Logger: log.New(),
@@ -1380,4 +1350,269 @@ func TestNonRPC(t *testing.T) {
 			t.Fatal("connection did not close after non-RPC with non-zero rpc_id")
 		}
 	})
+}
+
+// -- Full lifecycle simulation (real TCP + Python golden bytes) ----------------
+//
+// The byte streams below were generated by the real pyquarkchain
+// implementation (quarkchain.cluster.rpc Ping/Pong + ClusterMetadata) and
+// verify byte-level compatibility of the whole stack over a real TCP socket:
+// frame codec, metadata, opcode mapping, payload serialization, rpc_id
+// echo, concurrent bidirectional RPC, timeout/late-response, and close.
+
+// Python: Ping(b"S7", [0x00010001, 0x00020001], None) as PING (0x81),
+// rpc_id=1, default ClusterMetadata (branch=0, cluster_peer_id=0).
+const pythonGoldenPingFrame = "0000001300000000000000000000000081000000000000000100000002533700000002000100010002000100"
+
+// Python: Pong(b"M1", [0x00010001]) as PONG (0x82), rpc_id=1, default metadata.
+const pythonGoldenPongFrame = "0000000e000000000000000000000000820000000000000001000000024d310000000100010001"
+
+// Python: same PING with rpc_id=5 and ClusterMetadata(branch=0x00010001,
+// cluster_peer_id=7); the expected PONG echoes that metadata and rpc_id.
+const (
+	pythonGoldenPingFrameMeta = "0000001300010001000000000000000781000000000000000500000002533700000002000100010002000100"
+	pythonGoldenPongFrameMeta = "0000000e000100010000000000000007820000000000000005000000024d310000000100010001"
+)
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("bad hex fixture: %v", err)
+	}
+	return b
+}
+
+// newMetaConnPair creates a BaseConn over a real TCP socket using the
+// 12-byte ClusterMetadata codec (master↔slave style), mirroring Python's
+// MasterConnection/SlaveConnection construction.
+func newMetaConnPair(t *testing.T, cfg Config) (*BaseConn, net.Conn) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	peer, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	cfg.Transport = NewTCPTransport(peer,
+		func(r io.Reader) (*wire.Frame, error) { return wire.ReadFrame(r, 0) },
+		wire.WriteFrame)
+	cfg.Logger = log.New()
+	return NewBaseConn(cfg), raw
+}
+
+// readFull reads exactly len(buf) bytes with a deadline.
+func readFull(t *testing.T, c net.Conn, buf []byte) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := io.ReadFull(c, buf); err != nil {
+		t.Fatalf("read %d bytes: %v", len(buf), err)
+	}
+}
+
+// TestSimulation_PythonGoldenBytes: a raw peer (standing in for the Python
+// master) writes Python-generated PING bytes; the Go connection must
+// deserialize them, dispatch the handler, and reply with exactly the bytes
+// Python would have produced for the PONG.
+func TestSimulation_PythonGoldenBytes(t *testing.T) {
+	var gotPing []*wire.PingRequest
+	server, raw := newMetaConnPair(t, Config{
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(req any) (any, error) {
+				ping := req.(*wire.PingRequest)
+				gotPing = append(gotPing, ping)
+				return &wire.PongResponse{ID: []byte("M1"), FullShardIDList: []uint32{0x00010001}}, nil
+			},
+		},
+	})
+	server.Start()
+	defer server.Close()
+
+	// Default metadata, rpc_id=1.
+	if _, err := raw.Write(mustHex(t, pythonGoldenPingFrame)); err != nil {
+		t.Fatalf("write golden ping: %v", err)
+	}
+	want := mustHex(t, pythonGoldenPongFrame)
+	got := make([]byte, len(want))
+	readFull(t, raw, got)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("pong bytes mismatch\n got: %x\nwant: %x", got, want)
+	}
+
+	// Routed metadata (branch + cluster_peer_id), rpc_id=5: the response must
+	// echo the request metadata verbatim (Python __write_rpc_response).
+	if _, err := raw.Write(mustHex(t, pythonGoldenPingFrameMeta)); err != nil {
+		t.Fatalf("write golden ping (meta): %v", err)
+	}
+	want = mustHex(t, pythonGoldenPongFrameMeta)
+	got = make([]byte, len(want))
+	readFull(t, raw, got)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("pong bytes (meta) mismatch\n got: %x\nwant: %x", got, want)
+	}
+
+	if len(gotPing) != 2 {
+		t.Fatalf("handler invoked %d times, want 2", len(gotPing))
+	}
+	if string(gotPing[0].ID) != "S7" || len(gotPing[0].FullShardIDList) != 2 ||
+		gotPing[0].FullShardIDList[0] != 0x00010001 || gotPing[0].FullShardIDList[1] != 0x00020001 {
+		t.Fatalf("deserialized ping mismatch: %+v", gotPing[0])
+	}
+	if gotPing[0].RootTip != nil {
+		t.Fatalf("expected nil Optional root_tip, got %v", gotPing[0].RootTip)
+	}
+	if server.IsClosed() {
+		t.Fatal("connection must stay open after golden exchange")
+	}
+}
+
+// TestSimulation_FullLifecycle walks startup → bidirectional concurrent RPC →
+// timeout with late response → clean close, mirroring the Python slave
+// runtime interaction over one TCP connection.
+func TestSimulation_FullLifecycle(t *testing.T) {
+	var slow atomic.Bool // gates the server ping handler to force timeouts
+
+	server, raw := newMetaConnPair(t, Config{
+		Serializers: pingSerializers,
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): func(req any) (any, error) {
+				if slow.Load() {
+					time.Sleep(300 * time.Millisecond)
+				}
+				return &wire.PongResponse{ID: []byte("M1"), FullShardIDList: []uint32{0x00010001}}, nil
+			},
+		},
+	})
+	client := NewBaseConn(Config{
+		Transport: NewTCPTransport(raw,
+			func(r io.Reader) (*wire.Frame, error) { return wire.ReadFrame(r, 0) },
+			wire.WriteFrame),
+		Serializers: map[byte]*OpSerializer{
+			byte(wire.ClusterOpPing): pingSer,
+		},
+		Handlers: map[byte]TypedHandler{
+			byte(wire.ClusterOpPing): pongHandler(),
+		},
+		Logger: log.New(),
+	})
+
+	baseline := runtime.NumGoroutine()
+	server.Start()
+	client.Start()
+
+	// -- Startup: both sides become active.
+	select {
+	case <-server.WaitUntilActive():
+	case <-time.After(time.Second):
+		t.Fatal("server never became active")
+	}
+	select {
+	case <-client.WaitUntilActive():
+	case <-time.After(time.Second):
+		t.Fatal("client never became active")
+	}
+
+	pingPayload := mustSerialize(t, &wire.PingRequest{
+		ID:              []byte("C1"),
+		FullShardIDList: []uint32{0x00010001},
+	})
+
+	// -- Concurrent RPCs in both directions over the same connection.
+	const callers = 8
+	results := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			_, err := client.SendRPC(context.Background(), byte(wire.ClusterOpPing), pingPayload)
+			results <- err
+		}()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err := server.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
+			results <- err
+		}()
+	}
+	for i := 0; i < 2*callers; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("bidirectional rpc failed: %v", err)
+		}
+	}
+
+	// -- Timeout with a late response: the connection must survive both.
+	slow.Store(true)
+	slowCtx, slowCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer slowCancel()
+	_, err := client.SendRPC(slowCtx, byte(wire.ClusterOpPing), pingPayload)
+	if err == nil || !strings.Contains(err.Error(), "rpc timeout") {
+		t.Fatalf("expected rpc timeout, got %v", err)
+	}
+	if client.IsClosed() || server.IsClosed() {
+		t.Fatal("connection closed by rpc timeout")
+	}
+	// The late PONG for the timed-out call is dropped; the next RPC still works.
+	freshCtx, freshCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer freshCancel()
+	resp, err := client.SendRPC(freshCtx, byte(wire.ClusterOpPing), pingPayload)
+	if err != nil {
+		t.Fatalf("rpc after timeout failed: %v", err)
+	}
+	if _, ok := resp.(*wire.PongResponse); !ok {
+		t.Fatalf("expected *PongResponse, got %T", resp)
+	}
+	if client.IsClosed() {
+		t.Fatal("connection closed after late response")
+	}
+
+	// -- Close: pending RPCs are aborted; the peer observes clean EOF.
+	inflight := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// The slow handler keeps this RPC in flight at Close time.
+		_, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload)
+		inflight <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let the request reach the server
+	client.Close()
+
+	select {
+	case err := <-inflight:
+		if err != ErrConnectionClosed {
+			t.Fatalf("pending rpc at close: expected ErrConnectionClosed, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending rpc not aborted by Close")
+	}
+	select {
+	case <-server.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not observe client close")
+	}
+	if server.pendingLen() != 0 {
+		t.Fatalf("server pending rpcs remain: %d", server.pendingLen())
+	}
+	waitForGoroutines(t, baseline)
+}
+
+// mustSerialize is a test helper for payload serialization.
+func mustSerialize(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := serialize.SerializeToBytes(v)
+	if err != nil {
+		t.Fatalf("serialize %T: %v", v, err)
+	}
+	return b
 }

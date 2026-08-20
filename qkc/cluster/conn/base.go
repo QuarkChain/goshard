@@ -78,11 +78,6 @@ const (
 //
 //   - Protocol state (mu): mu protects mutable connection state shared across goroutines:
 //     state, nextRPCID, pending, and timedOut.
-//     readerDone is created in the constructor and closed exactly once —
-//     by readerLoop on exit, or by shutdown when the connection is closed
-//     before Start (readerLoop never runs). Close() waits on it with a
-//     plain channel receive; receive/close are concurrency-safe, so no mu
-//     is needed on the read side.
 //
 // Lock rules:
 //
@@ -104,7 +99,7 @@ type BaseConn struct {
 	serializers   map[byte]*OpSerializer
 	typedHandlers map[byte]TypedHandler
 	nonRPCOps     map[byte]struct{}
-	forwarder     func(*wire.Frame) ForwardResult
+	forwarder     func(*wire.Frame) bool
 
 	// -- Protocol state (mu) --
 	mu        sync.RWMutex
@@ -112,9 +107,6 @@ type BaseConn struct {
 	pending   map[uint64]*pendingRPC
 	timedOut  map[uint64]struct{}
 	nextRPCID uint64
-	// Closed when readerLoop exits; closed by shutdown instead when the
-	// connection is closed before Start (no readerLoop ever runs).
-	readerDone chan struct{}
 
 	// Owned by readerLoop. Zero value is the "no request seen yet" sentinel:
 	// rpc_id=0 is reserved for non-RPC (fire-and-forget) commands (see
@@ -174,7 +166,6 @@ func NewBaseConn(cfg Config) *BaseConn {
 		forwarder:     cfg.Forwarder,
 		activeChan:    make(chan struct{}),
 		closedChan:    make(chan struct{}),
-		readerDone:    make(chan struct{}),
 		pending:       make(map[uint64]*pendingRPC),
 		timedOut:      make(map[uint64]struct{}),
 		state:         ConnectionStateConnecting,
@@ -210,14 +201,9 @@ func (c *BaseConn) Start() {
 	go c.readerLoop()
 }
 
-// Close closes the connection and wakes all pending RPCs. It mirrors
-// Python's close(): no return value — the close cause, if any, is only
-// logged. It blocks until the readerLoop has exited; when the connection
-// is closed before Start, shutdown closes readerDone itself (no
-// readerLoop ever runs), so Close never blocks on a never-started loop.
+// Close closes the connection and wakes all pending RPCs.
 func (c *BaseConn) Close() {
 	c.shutdown(nil)
-	<-c.readerDone
 }
 
 // SendRPC sends a request without metadata and waits for its response.
@@ -392,7 +378,6 @@ func (c *BaseConn) writeFrame(f *wire.Frame) error {
 // readerLoop reads frames from the transport and dispatches them.
 // Read errors trigger shutdown.
 func (c *BaseConn) readerLoop() {
-	defer close(c.readerDone)
 	for {
 		frame, err := c.transport.ReadFrame()
 		if err != nil {
@@ -423,18 +408,12 @@ func (c *BaseConn) handleFrameSafely(frame *wire.Frame) {
 }
 
 func (c *BaseConn) handleFrame(frame *wire.Frame) {
-	if fwd := c.forwarder; fwd != nil {
-		switch fwd(frame) {
-		case ForwardConsumed:
-			return
-		case ForwardClose:
-			// Forwarder detected an unrecoverable routing or protocol condition.
-			// The BaseConn owns connection shutdown, so the router only requests
-			// closure here instead of closing the connection directly.
-			c.log.Warn("forwarder requested close", "opcode", frame.Opcode, "rpcid", frame.RPCID)
-			c.shutdown(fmt.Errorf("forwarder requested close (opcode 0x%x rpc_id %d)", frame.Opcode, frame.RPCID))
-			return
-		}
+	// Run the forwarder first. A true return means it consumed the frame, so
+	// normal dispatch is skipped. The forwarder may call c.Close() directly to
+	// shut the connection down; Close is non-blocking and safe to invoke from
+	// the reader goroutine.
+	if fwd := c.forwarder; fwd != nil && fwd(frame) {
+		return
 	}
 
 	handler, isRequest := c.typedHandlers[frame.Opcode]
@@ -616,17 +595,6 @@ func (c *BaseConn) shutdown(cause error) {
 			delete(c.timedOut, id)
 		}
 		c.mu.Unlock()
-
-		if wasConnecting {
-			// The connection was closed before Start: no readerLoop ever
-			// runs (state is now Closed, so Start is a no-op), so there is
-			// no goroutine to close readerDone on exit. Complete the signal
-			// here so Close()'s <-readerDone does not block. On the normal
-			// path (wasConnecting == false) readerLoop closes it exactly
-			// once when it returns; the two paths are mutually exclusive,
-			// so readerDone is closed exactly once overall.
-			close(c.readerDone)
-		}
 
 		for _, call := range pending {
 			call.stop()
