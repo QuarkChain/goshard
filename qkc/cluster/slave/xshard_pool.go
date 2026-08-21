@@ -172,7 +172,8 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 	p.log.Info("indexed inbound xshard connection", "remote_id", string(conn.remoteID()), "shards", conn.remoteFullShardIDList())
 }
 
-// Close closes all pool connections.
+// Close closes all pool connections, including ones still handshaking
+// (py close_all leaks those).
 func (p *XshardPool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -205,6 +206,9 @@ func (p *XshardPool) addSlaveConnectionLocked(conn *xshardConn) {
 	p.slaveIDs[string(conn.remoteID())] = struct{}{}
 
 	shardList := conn.remoteFullShardIDList()
+	// Shards come from the remote-declared list; Python intersects with the
+	// cluster config, but that filter is unobservable since queries only use
+	// config shards.
 	seen := make(map[uint32]struct{}, len(shardList))
 	for _, shardID := range shardList {
 		if _, dup := seen[shardID]; dup {

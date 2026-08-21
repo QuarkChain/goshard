@@ -18,6 +18,10 @@ import (
 
 // XshardHandler serves inbound xshard requests. It is implemented by the
 // business layer and injected at construction.
+//
+// The error return is reserved for connection-level failures. Returning an
+// error causes the connection to be closed by BaseConn. Business-level
+// failures must be encoded in the response ErrorCode field.
 type XshardHandler interface {
 	AddXshardTxList(req *wire.AddXshardTxListRequest) (*wire.AddXshardTxListResponse, error)
 
@@ -40,8 +44,10 @@ type xshardConn struct {
 	// constructor); recorded from the first PING for inbound connections.
 	peerID              []byte
 	peerFullShardIDList []uint32
-	pingReceived        chan struct{}
-	pingOnce            sync.Once
+	// pingReceived is closed on the first PING (py: ping_received_event);
+	// pingOnce makes the close exactly-once under concurrent PING dispatch.
+	pingReceived chan struct{}
+	pingOnce     sync.Once
 }
 
 // newXshardConn creates a slave-to-slave connection. Outbound callers inject
@@ -87,6 +93,9 @@ func (x *xshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 
 	x.stateMu.Lock()
+	// Identity is written only while unset (py: `if not self.id`): outbound
+	// is pre-filled at construction so a late PING cannot overwrite it, and
+	// an empty id does not lock identity.
 	if len(x.peerID) == 0 {
 		x.peerID = append([]byte(nil), ping.ID...)
 		x.peerFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
@@ -145,7 +154,7 @@ func (x *xshardConn) sendPing(ctx context.Context) ([]byte, []uint32, error) {
 	req := &wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
-		RootTip:         nil,
+		RootTip:         nil, // TODO: RootTip stays nil until the RootBlock wire type is ported.
 	}
 	resp, err := x.sendRPC(ctx, byte(wire.ClusterOpPing), req)
 	if err != nil {
