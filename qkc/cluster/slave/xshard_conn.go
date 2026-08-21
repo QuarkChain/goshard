@@ -19,6 +19,8 @@ import (
 // XshardHandler serves inbound xshard requests. It is implemented by the
 // business layer and injected at construction.
 //
+// Handler implementations must be safe for concurrent calls.
+//
 // The error return is reserved for connection-level failures. Returning an
 // error causes the connection to be closed by BaseConn. Business-level
 // failures must be encoded in the response ErrorCode field.
