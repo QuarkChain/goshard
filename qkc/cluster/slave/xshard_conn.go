@@ -4,6 +4,7 @@ package slave
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,11 +16,20 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// xshardConn is a direct TCP connection to another slave, using 0-byte metadata
-// (slave↔slave mode). It is package-private: callers reach it only through
-// XshardPool, which owns construction, handshake, and lifecycle.
+// XshardHandler serves inbound xshard requests. It is implemented by the
+// business layer and injected at construction.
+type XshardHandler interface {
+	AddXshardTxList(req *wire.AddXshardTxListRequest) (*wire.AddXshardTxListResponse, error)
+
+	BatchAddXshardTxList(req *wire.BatchAddXshardTxListRequest) (*wire.BatchAddXshardTxListResponse, error)
+}
+
+// xshardConn is a direct TCP connection to another slave, using 0-byte
+// metadata (slave↔slave mode). Callers reach it only through XshardPool.
 type xshardConn struct {
 	*conn.BaseConn
+
+	handler XshardHandler
 
 	localID              []byte // this slave's identity, sent in PING/PONG
 	localFullShardIDList []uint32
@@ -31,11 +41,14 @@ type xshardConn struct {
 	pingOnce            sync.Once
 }
 
-// newXshardConn wraps an established net.Conn as an xshardConn, registering the
-// serializers and handlers. It does not dial, accept, ping, or register with a
-// pool; net.Conn ownership belongs to the caller.
-func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *xshardConn {
+// newXshardConn wraps an established net.Conn as an xshardConn and registers
+// the serializers and handlers. handler must not be nil.
+func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, handler XshardHandler, logger log.Logger) (*xshardConn, error) {
+	if handler == nil {
+		return nil, errors.New("xshard handler must not be nil")
+	}
 	xc := &xshardConn{
+		handler:              handler,
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 		pingReceived:         make(chan struct{}),
@@ -52,15 +65,13 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 			byte(wire.ClusterOpBatchAddXshardTxListRequest): conn.OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](byte(wire.ClusterOpBatchAddXshardTxListResponse)),
 		},
 		Handlers: map[byte]conn.TypedHandler{
-			byte(wire.ClusterOpPing): xc.handlePing,
-
-			// Fail-fast stubs: invoking them closes the connection until migrated.
+			byte(wire.ClusterOpPing):                        xc.handlePing,
 			byte(wire.ClusterOpAddXshardTxListRequest):      xc.handleAddXshardTxList,
 			byte(wire.ClusterOpBatchAddXshardTxListRequest): xc.handleBatchAddXshardTxList,
 		},
 		Logger: logger,
 	})
-	return xc
+	return xc, nil
 }
 
 // handlePing records peer identity and replies with a PONG.
@@ -76,8 +87,7 @@ func (x *xshardConn) handlePing(req any) (any, error) {
 	emptyShardList := len(x.peerFullShardIDList) == 0
 	x.stateMu.Unlock()
 
-	// Matches Python's close_with_error: a handler error closes the connection
-	// and the pending PING completes with ErrConnectionClosed.
+	// A handler error closes the connection.
 	if emptyShardList {
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
@@ -90,22 +100,14 @@ func (x *xshardConn) handlePing(req any) (any, error) {
 	}, nil
 }
 
-// handleAddXshardTxList is a fail-fast stub until the business logic is migrated.
+// handleAddXshardTxList delegates to the business handler.
 func (x *xshardConn) handleAddXshardTxList(req any) (any, error) {
-	_ = req.(*wire.AddXshardTxListRequest)
-
-	// TODO(xshard): implement xshard transaction processing.
-	x.Logger().Warn("AddXshardTxList stub invoked — closing connection (not implemented)", "remote", x.RemoteAddr())
-	return nil, conn.ErrHandlerNotImplemented
+	return x.handler.AddXshardTxList(req.(*wire.AddXshardTxListRequest))
 }
 
-// handleBatchAddXshardTxList is a fail-fast stub until the business logic is migrated.
+// handleBatchAddXshardTxList delegates to the business handler.
 func (x *xshardConn) handleBatchAddXshardTxList(req any) (any, error) {
-	_ = req.(*wire.BatchAddXshardTxListRequest)
-
-	// TODO(xshard): implement batch xshard transaction processing.
-	x.Logger().Warn("BatchAddXshardTxList stub invoked — closing connection (not implemented)", "remote", x.RemoteAddr())
-	return nil, conn.ErrHandlerNotImplemented
+	return x.handler.BatchAddXshardTxList(req.(*wire.BatchAddXshardTxListRequest))
 }
 
 // setRemoteIdentity records the peer identity for outbound connections, which
@@ -131,9 +133,8 @@ func (x *xshardConn) remoteFullShardIDList() []uint32 {
 	return append([]uint32(nil), x.peerFullShardIDList...)
 }
 
-// waitUntilPingReceived blocks until the first PING or connection close. It
-// returns false on close (an intentional divergence from Python, which blocks
-// forever).
+// waitUntilPingReceived blocks until the first PING or connection close,
+// returning false on close.
 func (x *xshardConn) waitUntilPingReceived() bool {
 	select {
 	case <-x.pingReceived:
@@ -143,10 +144,8 @@ func (x *xshardConn) waitUntilPingReceived() bool {
 	}
 }
 
-// sendRPCAs serializes req, sends it as an RPC under opcode, and returns the
-// response decoded as S. The response is deserialized once by BaseConn; a wrong
-// response opcode surfaces as a type mismatch here and does not close the
-// connection.
+// sendRPCAs sends req as an RPC under opcode and returns the response decoded
+// as S.
 func sendRPCAs[S any](x *xshardConn, ctx context.Context, opcode byte, req any) (*S, error) {
 	payload, err := serialize.SerializeToBytes(req)
 	if err != nil {
@@ -168,8 +167,7 @@ func (x *xshardConn) sendPing(ctx context.Context) (id []byte, shardList []uint3
 	pong, err := sendRPCAs[wire.PongResponse](x, ctx, byte(wire.ClusterOpPing), &wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
-		// TODO: RootTip stays nil until the RootBlock wire type is ported; the
-		// handshake does not consume it.
+		// TODO: RootTip stays nil until the RootBlock wire type is ported.
 		RootTip: nil,
 	})
 	if err != nil {

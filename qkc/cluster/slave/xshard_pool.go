@@ -5,6 +5,7 @@ package slave
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -18,19 +19,15 @@ import (
 const defaultDialTimeout = 10 * time.Second
 
 // XshardPool manages slave-to-slave xshard connections, indexed by full shard
-// ID. It owns dial, handshake, identity bookkeeping, indexing, and cleanup;
-// connections never escape the pool. Closed connections are never evicted.
-//
-// The pool is add-only (matching Python's SlaveConnectionManager): conns and
-// slaveIDs only grow, and a closed or disconnected peer is never removed. The
-// only path that clears them is Close. As a result a peer is dialed at most
-// once, but also cannot be re-dialed after it drops.
+// ID. It is add-only (Python SlaveConnectionManager parity): connections and
+// slave IDs are never evicted; a peer is dialed at most once.
 type XshardPool struct {
 	mu                   sync.RWMutex
 	conns                map[uint32][]*xshardConn
 	inbound              []*xshardConn
 	slaveIDs             map[string]bool // Known peer identities; add-only, used for outbound dedup.
 	selfID               []byte          // This slave's identity.
+	handler              XshardHandler   // Serves inbound xshard requests.
 	localFullShardIDList []uint32
 	maxPayloadSize       uint32 // 0 disables the payload limit.
 	closed               bool
@@ -40,8 +37,12 @@ type XshardPool struct {
 // Public API
 
 // NewXshardPool creates a pool. selfID is this slave's identity (also the local
-// identity sent in PING/PONG). maxPayloadSize 0 disables the payload limit.
-func NewXshardPool(selfID []byte, localFullShardIDList []uint32, maxPayloadSize uint32, logger log.Logger) *XshardPool {
+// identity sent in PING/PONG). handler serves inbound xshard requests and must
+// not be nil. maxPayloadSize 0 disables the payload limit.
+func NewXshardPool(selfID []byte, localFullShardIDList []uint32, maxPayloadSize uint32, handler XshardHandler, logger log.Logger) (*XshardPool, error) {
+	if handler == nil {
+		return nil, errors.New("xshard handler must not be nil")
+	}
 	if logger == nil {
 		logger = log.Root()
 	}
@@ -49,14 +50,14 @@ func NewXshardPool(selfID []byte, localFullShardIDList []uint32, maxPayloadSize 
 		conns:                make(map[uint32][]*xshardConn),
 		slaveIDs:             make(map[string]bool),
 		selfID:               append([]byte(nil), selfID...),
+		handler:              handler,
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
 		maxPayloadSize:       maxPayloadSize,
 		log:                  logger,
-	}
+	}, nil
 }
 
 // DialToSlave establishes an outbound xshard connection to the given slave.
-// It matches Python's SlaveConnectionManager.connect_to_slave(slave_info).
 func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) error {
 	if p.knownRemote(slaveInfo.ID) {
 		p.log.Info("outbound xshard connection skipped: remote already known", "remote_id", string(slaveInfo.ID))
@@ -68,7 +69,11 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 	if err != nil {
 		return fmt.Errorf("dial xshard slave %s: %w", addr, err)
 	}
-	conn := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, p.log)
+	conn, err := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, p.handler, p.log)
+	if err != nil {
+		nc.Close()
+		return fmt.Errorf("create xshard conn to %s: %w", addr, err)
+	}
 	conn.Start()
 
 	id, shardList, err := conn.sendPing(ctx)
@@ -76,7 +81,7 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 		conn.Close()
 		return fmt.Errorf("ping failed for %s: %w", conn.RemoteAddr(), err)
 	}
-	// Close on mismatch instead of reproducing Python's leaked connection.
+	// Python leaks the connection on mismatch; close it instead.
 	if !bytes.Equal(id, slaveInfo.ID) {
 		conn.Close()
 		return fmt.Errorf("slave id mismatch for %s: expected %x, got %x", conn.RemoteAddr(), slaveInfo.ID, id)
@@ -95,12 +100,8 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 	// Outbound connections never receive a PING; set the identity explicitly.
 	conn.setRemoteIdentity(id, shardList)
 
-	// Index under the pool lock. The dedup re-check here (not just the
-	// pre-check above) is what makes concurrent dials to the same remote safe:
-	// two goroutines may both pass the pre-check, but only one wins the locked
-	// section and registers; the loser is closed. This matches Python's
-	// connect_to_slave, which both pre-checks and is naturally serialized by
-	// the event loop.
+	// Dedup is re-checked under the lock: concurrent dials to the same remote
+	// register at most one connection; the loser is closed.
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -126,7 +127,12 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 
 // HandleInbound takes ownership of an accepted xshard connection.
 func (p *XshardPool) HandleInbound(nc net.Conn) {
-	conn := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, p.log)
+	conn, err := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, p.handler, p.log)
+	if err != nil {
+		nc.Close()
+		p.log.Error("inbound xshard conn rejected", "err", err)
+		return
+	}
 
 	p.mu.Lock()
 	if p.closed {
@@ -143,9 +149,7 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 
 	if !conn.waitUntilPingReceived() {
 		p.log.Warn("inbound xshard connection closed before ping", "remote", conn.RemoteAddr())
-		// Evict the dead conn from the staging list — it will never be indexed.
-		// Safe: the conn is already closed and was never routed. Python has no
-		// equivalent cleanup because it never tracks pending conns at all.
+		// Evict the dead conn; it will never be indexed.
 		p.mu.Lock()
 		p.removeInbound(conn)
 		p.mu.Unlock()
@@ -229,9 +233,8 @@ func (p *XshardPool) Close() {
 
 // Internal implementation
 
-// removeInbound evicts conn from the inbound staging list. The caller must hold
-// p.mu. Eviction keeps dead (never-PINGed) connections from accumulating in the
-// staging list; Close is the only other path that clears it.
+// removeInbound evicts conn from the inbound staging list. The caller must
+// hold p.mu.
 func (p *XshardPool) removeInbound(conn *xshardConn) {
 	for i, c := range p.inbound {
 		if c == conn {
