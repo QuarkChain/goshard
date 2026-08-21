@@ -21,7 +21,8 @@ import (
 func (p *XshardPool) hasSlaveID(id []byte) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.slaveIDs[string(id)]
+	_, ok := p.slaveIDs[string(id)]
+	return ok
 }
 
 // outboundSize returns the number of unique outbound connections.
@@ -38,11 +39,12 @@ func (p *XshardPool) outboundSize() int {
 	return len(seen)
 }
 
-// inboundSize returns the number of tracked inbound connections.
-func (p *XshardPool) inboundSize() int {
+// connectionsSize returns the number of tracked connections (including conns
+// still in the PING handshake).
+func (p *XshardPool) connectionsSize() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return len(p.inbound)
+	return len(p.connections)
 }
 
 // targets returns all full shard IDs that have connections.
@@ -117,11 +119,11 @@ func newTestConnPairWithIdentity(t *testing.T, clientID []byte, clientShards []u
 	}
 
 	logger := log.New()
-	client, err = newXshardConn(clientConn, 0, clientID, clientShards, testXshardHandler{}, logger) // 0 = no limit (matches Python)
+	client, err = newXshardConn(clientConn, 0, clientID, clientShards, nil, nil, testXshardHandler{}, logger) // 0 = no limit (matches Python)
 	if err != nil {
 		t.Fatalf("new client conn: %v", err)
 	}
-	server, err = newXshardConn(serverConn, 0, serverID, serverShards, testXshardHandler{}, logger)
+	server, err = newXshardConn(serverConn, 0, serverID, serverShards, nil, nil, testXshardHandler{}, logger)
 	if err != nil {
 		t.Fatalf("new server conn: %v", err)
 	}
@@ -178,7 +180,7 @@ func establishInbound(t *testing.T, pool *XshardPool, remoteID []byte, remoteSha
 		close(done)
 	}()
 
-	client, err := newXshardConn(clientConn, 0, remoteID, remoteShards, testXshardHandler{}, log.New())
+	client, err := newXshardConn(clientConn, 0, remoteID, remoteShards, nil, nil, testXshardHandler{}, log.New())
 	if err != nil {
 		clientConn.Close()
 		t.Fatalf("new inbound client conn: %v", err)
@@ -259,11 +261,11 @@ func TestXshardConn_XshardTxListServedByHandler(t *testing.T) {
 	txList := wire.RawBytes{}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := client.sendXshardTxList(ctx, &wire.AddXshardTxListRequest{
+	if err := client.sendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{
 		Branch: 1,
 		TxList: &txList,
 	}); err != nil {
-		t.Fatalf("sendXshardTxList: %v", err)
+		t.Fatalf("sendAddXshardTxList: %v", err)
 	}
 	if client.IsClosed() || server.IsClosed() {
 		t.Fatal("connection should stay open after AddXshardTxList")
@@ -277,7 +279,7 @@ func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	client, err := newXshardConn(clientConn, 0, []byte("client"), []uint32{1}, testXshardHandler{}, log.New())
+	client, err := newXshardConn(clientConn, 0, []byte("client"), []uint32{1}, nil, nil, testXshardHandler{}, log.New())
 	if err != nil {
 		t.Fatalf("new conn: %v", err)
 	}
@@ -434,7 +436,7 @@ func TestXshardConn_AcceptEmptyPingID(t *testing.T) {
 	}
 }
 
-// ── XshardPool indexing / broadcast tests ─────────────────────────────────────
+// ── XshardPool indexing tests ─────────────────────────────────────────────────
 
 // TestXshardPool_ClosedConnectionStaysIndexed verifies Python parity: a CLOSED
 // connection is never evicted from the routing index or slave ID registry.
@@ -470,45 +472,6 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 	}
 	if len(pool.targets()) != 2 {
 		t.Fatalf("expected both shard targets to remain, got %v", pool.targets())
-	}
-}
-
-// TestXshardPool_SendXshardTxToClosedConnectionFails verifies broadcast attempts
-// a CLOSED connection (Python never filters it out) and fails.
-func TestXshardPool_SendXshardTxToClosedConnectionFails(t *testing.T) {
-	rs := startRemoteSlave(t, []byte("server-slave"), []uint32{0x00030004, 0x00030005})
-	defer rs.close()
-
-	pool := mustNewXshardPool(t, []byte("local-slave"), []uint32{0x00030004})
-	defer pool.Close()
-
-	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("server-slave"), []uint32{0x00030004, 0x00030005})); err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-
-	conns := pool.get(0x00030004)
-	if len(conns) != 1 {
-		t.Fatalf("expected 1 conn, got %d", len(conns))
-	}
-	conns[0].Close()
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
-	defer cancel2()
-	req := &wire.AddXshardTxListRequest{Branch: 0x00030004, TxList: &wire.RawBytes{}}
-	if err := pool.SendXshardTx(ctx2, 0x00030004, req); err == nil {
-		t.Fatal("expected SendXshardTx to fail on a CLOSED connection (Python parity)")
-	}
-}
-
-func TestXshardPool_SendXshardTxNoConnection(t *testing.T) {
-	pool := mustNewXshardPool(t, nil, nil)
-	defer pool.Close()
-
-	// Empty target set is a silent no-op (Python's broadcast succeeds on an
-	// empty future list).
-	req := &wire.AddXshardTxListRequest{Branch: 0x00010001, TxList: &wire.RawBytes{}}
-	if err := pool.SendXshardTx(context.Background(), 0x00010001, req); err != nil {
-		t.Fatalf("expected silent success on empty target, got error: %v", err)
 	}
 }
 
@@ -590,8 +553,8 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 }
 
 // TestXshardPool_HandleInboundDeadConnEvicted verifies that an inbound conn
-// which closes before sending PING is evicted from the staging list: p.inbound
-// must not accumulate dead connections (F3).
+// which closes before sending PING is evicted from the tracking set: dead
+// connections must not accumulate (F3).
 func TestXshardPool_HandleInboundDeadConnEvicted(t *testing.T) {
 	pool := mustNewXshardPool(t, []byte("local-slave"), []uint32{0x00030004})
 	defer pool.Close()
@@ -607,7 +570,7 @@ func TestXshardPool_HandleInboundDeadConnEvicted(t *testing.T) {
 
 	// Wait until HandleInbound registers the connection as pending inbound.
 	deadline := time.Now().Add(2 * time.Second)
-	for pool.inboundSize() == 0 {
+	for pool.connectionsSize() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("HandleInbound did not register pending inbound")
 		}
@@ -623,8 +586,8 @@ func TestXshardPool_HandleInboundDeadConnEvicted(t *testing.T) {
 		t.Fatal("HandleInbound did not return after remote close")
 	}
 
-	if pool.inboundSize() != 0 {
-		t.Fatalf("expected dead inbound conn to be evicted, inboundSize=%d", pool.inboundSize())
+	if pool.connectionsSize() != 0 {
+		t.Fatalf("expected dead inbound conn to be evicted, connectionsSize=%d", pool.connectionsSize())
 	}
 }
 
@@ -645,7 +608,7 @@ func TestXshardPool_HandleInboundPendingClose(t *testing.T) {
 
 	// Wait until HandleInbound registers the connection as pending inbound.
 	deadline := time.Now().Add(2 * time.Second)
-	for pool.inboundSize() == 0 {
+	for pool.connectionsSize() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("HandleInbound did not register pending inbound")
 		}
@@ -728,7 +691,7 @@ func TestXshardConn_SendXshardTxListErrorCode(t *testing.T) {
 			defer clientConn.Close()
 			defer serverConn.Close()
 
-			client, err := newXshardConn(clientConn, 0, []byte("client"), []uint32{1}, testXshardHandler{}, log.New())
+			client, err := newXshardConn(clientConn, 0, []byte("client"), []uint32{1}, nil, nil, testXshardHandler{}, log.New())
 			if err != nil {
 				t.Fatalf("new conn: %v", err)
 			}
@@ -737,7 +700,7 @@ func TestXshardConn_SendXshardTxListErrorCode(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			err = client.sendXshardTxList(ctx, &wire.AddXshardTxListRequest{Branch: 1, TxList: &wire.RawBytes{}})
+			err = client.sendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{Branch: 1, TxList: &wire.RawBytes{}})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error for non-zero error_code, got nil")
@@ -820,7 +783,7 @@ func (rs *remoteSlave) acceptLoop(remoteID []byte, remoteShards []uint32) {
 			return
 		}
 		atomic.AddInt32(&rs.accepted, 1)
-		conn, err := newXshardConn(c, 0, remoteID, remoteShards, testXshardHandler{}, log.New())
+		conn, err := newXshardConn(c, 0, remoteID, remoteShards, nil, nil, testXshardHandler{}, log.New())
 		if err != nil {
 			c.Close()
 			continue
