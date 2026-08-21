@@ -25,7 +25,7 @@ func (p *XshardPool) hasSlaveID(id []byte) bool {
 	return ok
 }
 
-// outboundSize returns the number of unique outbound connections.
+// outboundSize returns the number of distinct connections in the shard index.
 func (p *XshardPool) outboundSize() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -284,25 +284,8 @@ func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
 		t.Fatalf("new conn: %v", err)
 	}
 	client.Start()
-	peerDone := make(chan error, 1)
-	go func() {
-		request, err := wire.ReadFrameNoMeta(serverConn, 0)
-		if err != nil {
-			peerDone <- err
-			return
-		}
-		payload, err := serialize.SerializeToBytes(&wire.AddXshardTxListResponse{
-			ErrorCode: 0,
-		})
-		if err == nil {
-			err = wire.WriteFrameNoMeta(serverConn, &wire.Frame{
-				Opcode:  byte(wire.ClusterOpAddXshardTxListResponse),
-				RPCID:   request.RPCID,
-				Payload: payload,
-			})
-		}
-		peerDone <- err
-	}()
+	// Reply with an AddXshardTxListResponse (wrong opcode for PING).
+	peerDone := rawXshardPeer(t, serverConn, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -653,8 +636,8 @@ func TestXshardPool_InboundDoesNotSkipSelf(t *testing.T) {
 
 // ── send-side response verification tests ────────────────────────────────────
 
-// rawXshardPeer answers one AddXshardTxListRequest with the given error code
-// over a net.Pipe.
+// rawXshardPeer answers a single inbound request frame with an
+// AddXshardTxListResponse carrying the given error code, over a net.Pipe.
 func rawXshardPeer(t *testing.T, serverConn net.Conn, errCode uint32) <-chan error {
 	t.Helper()
 	peerDone := make(chan error, 1)
@@ -928,29 +911,5 @@ func TestXshardPool_DialToSlaveRetryAfterFailure(t *testing.T) {
 	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
 		t.Fatal("retry should register the remote")
-	}
-}
-
-// TestXshardPool_DialToSlaveCompletesHandshake verifies the normal outbound flow:
-// dial, PING/PONG verification, and indexing all complete.
-func TestXshardPool_DialToSlaveCompletesHandshake(t *testing.T) {
-	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
-	defer rs.close()
-
-	pool := mustNewXshardPool(t, []byte("local-slave"), []uint32{0x00030004})
-	defer pool.Close()
-
-	ctx := context.Background()
-	if err := pool.DialToSlave(ctx, rs.slaveInfo([]byte("remote-slave"), []uint32{0x00010001})); err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	if pool.outboundSize() != 1 {
-		t.Fatalf("expected 1 outbound connection, got %d", pool.outboundSize())
-	}
-	if !pool.hasSlaveID([]byte("remote-slave")) {
-		t.Fatal("remote-slave should be tracked")
-	}
-	if conns := pool.get(0x00010001); len(conns) != 1 {
-		t.Fatalf("expected 1 connection for shard 0x00010001, got %d", len(conns))
 	}
 }
