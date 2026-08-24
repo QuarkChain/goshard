@@ -151,8 +151,20 @@ func SlimAccountRLP(account StateAccount) []byte {
 	return data
 }
 
-// FullAccount decodes the data on the 'slim RLP' format and returns
-// the consensus format account.
+// FullAccount decodes snapshot data from slim RLP into a StateAccount.
+//
+// This conversion intentionally follows the semantics of StateAccount's
+// EncodeRLP and DecodeRLP methods instead of preserving the original account
+// bytes. An explicitly updated zero balance can initially encode as 00c0, but
+// decoding loses the zero entry because the serialized token list is empty.
+// Re-encoding the decoded account therefore produces an empty TokenBal. Doing
+// the same normalization here ensures that snapshot and trie reads return the
+// same StateAccount.
+//
+// This behavior supports snapshot reads, but it cannot preserve trie leaves
+// byte-for-byte as required by snap sync. If snap sync support is needed, the
+// raw []byte account encodings must be transferred to the remote node and
+// stored directly without decoding and re-encoding them through StateAccount.
 func FullAccount(data []byte) (*StateAccount, error) {
 	var slim SlimAccount
 	if err := rlp.DecodeBytes(data, &slim); err != nil {
@@ -165,16 +177,10 @@ func FullAccount(data []byte) (*StateAccount, error) {
 		if err != nil {
 			return nil, err
 		}
-		if tb.Len() == 0 {
-			// SlimAccount uses 00c0 to preserve a zero-balance update. Restore the
-			// update marker instead of creating an empty MNT balance set.
-			account.AddBalanceUpdate()
-		} else {
+		if tb.Len() != 0 {
 			account.MntBalances = tb
 		}
 	}
-
-	// Interpret the storage root and code hash in slim format.
 	if len(slim.Root) == 0 {
 		account.Root = EmptyRootHash
 	} else {

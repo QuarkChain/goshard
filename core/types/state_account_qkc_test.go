@@ -386,8 +386,6 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		// on the slim round-trip, forking the trie root when a snapshot-served account
 		// was re-committed.
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
-		{"nil QKC updated", StateAccount{Balance: nil, Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
-		{"zero QKC updated", StateAccount{Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
 		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
 		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
 		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
@@ -502,12 +500,12 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	decodedSlim, err = FullAccount(zeroSlim)
 	require.NoError(t, err)
 	assert.Nil(t, decodedSlim.MntBalances)
-	assert.True(t, decodedSlim.IsBalanceUpdated())
+	assert.False(t, decodedSlim.IsBalanceUpdated())
 	drained, err := rlp.EncodeToBytes(decodedSlim)
 	require.NoError(t, err)
 	var drainedWire qkcAccountRLP
 	require.NoError(t, rlp.DecodeBytes(drained, &drainedWire))
-	assert.Equal(t, []byte{0x00, 0xc0}, drainedWire.TokenBal)
+	assert.Empty(t, drainedWire.TokenBal)
 
 	decoded := StateAccount{MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{123: uint256.NewInt(456)})}
 	require.NoError(t, rlp.DecodeBytes(drained, &decoded))
@@ -520,10 +518,8 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	assert.Empty(t, reencodedWire.TokenBal)
 }
 
-// TestZeroBalanceUpdateRoundTrip distinguishes the consensus account codec
-// from the slim codec used to persist and transfer snapshot accounts. The
-// consensus codec intentionally normalizes an explicitly updated zero balance
-// away on decode, while slim encoding must preserve it across a sync roundtrip.
+// TestZeroBalanceUpdateRoundTrip verifies that both consensus and snapshot
+// reads normalize an explicitly present zero balance to the same account state.
 func TestZeroBalanceUpdateRoundTrip(t *testing.T) {
 	account := NewEmptyStateAccount()
 	account.AddBalanceUpdate()
@@ -548,14 +544,15 @@ func TestZeroBalanceUpdateRoundTrip(t *testing.T) {
 	require.Equal(t, []byte{0x00, 0xc0}, slimWire.MntBal)
 	slimDecoded, err := FullAccount(slimEncoded)
 	require.NoError(t, err)
-	require.True(t, slimDecoded.IsBalanceUpdated())
+	require.False(t, slimDecoded.IsBalanceUpdated())
 
 	slimReencoded := SlimAccountRLP(*slimDecoded)
 	require.NoError(t, rlp.DecodeBytes(slimReencoded, &slimWire))
-	assert.Equal(t, []byte{0x00, 0xc0}, slimWire.MntBal)
+	assert.Empty(t, slimWire.MntBal)
 
 	consensusAfterSync, err := rlp.EncodeToBytes(slimDecoded)
 	require.NoError(t, err)
 	require.NoError(t, rlp.DecodeBytes(consensusAfterSync, &consensusWire))
-	assert.Equal(t, []byte{0x00, 0xc0}, consensusWire.TokenBal)
+	assert.Empty(t, consensusWire.TokenBal)
+	assert.Equal(t, consensusReencoded, consensusAfterSync)
 }
