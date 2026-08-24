@@ -24,6 +24,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
@@ -229,6 +230,14 @@ func (j *journal) accessListAddSlot(addr common.Address, slot common.Hash) {
 	})
 }
 
+func (j *journal) mntBalanceChange(addr common.Address, prev *qkccommon.TokenBalances) {
+	var snap *qkccommon.TokenBalances
+	if prev != nil {
+		snap = prev.Copy()
+	}
+	j.append(mntBalanceChange{addr: addr, prev: snap})
+}
+
 type (
 	// Changes to the account trie.
 	createObjectChange struct {
@@ -288,6 +297,12 @@ type (
 	transientStorageChange struct {
 		account       common.Address
 		key, prevalue common.Hash
+	}
+
+	// mntBalanceChange records a snapshot of MNT balances for revert support.
+	mntBalanceChange struct {
+		addr common.Address
+		prev *qkccommon.TokenBalances
 	}
 )
 
@@ -352,7 +367,9 @@ func (ch touchChange) copy() journalEntry {
 }
 
 func (ch balanceChange) revert(s *StateDB) {
-	s.getStateObject(ch.account).setBalance(ch.prev)
+	obj := s.getStateObject(ch.account)
+	obj.setBalance(ch.prev)
+	obj.data.RevertBalanceUpdate()
 }
 
 func (ch balanceChange) dirtied() (common.Address, bool) {
@@ -498,5 +515,31 @@ func (ch accessListAddSlotChange) copy() journalEntry {
 	return accessListAddSlotChange{
 		address: ch.address,
 		slot:    ch.slot,
+	}
+}
+
+func (ch mntBalanceChange) revert(s *StateDB) {
+	obj := s.getStateObject(ch.addr)
+	if obj != nil {
+		if ch.prev == nil {
+			obj.data.MntBalances = nil
+		} else {
+			obj.data.MntBalances = ch.prev.Copy()
+		}
+	}
+}
+
+func (ch mntBalanceChange) dirtied() (common.Address, bool) {
+	return ch.addr, true
+}
+
+func (ch mntBalanceChange) copy() journalEntry {
+	var prev *qkccommon.TokenBalances
+	if ch.prev != nil {
+		prev = ch.prev.Copy()
+	}
+	return mntBalanceChange{
+		addr: ch.addr,
+		prev: prev,
 	}
 }
