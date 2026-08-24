@@ -14,6 +14,50 @@ make slave
 This installs the binary to `./build/bin/slave` (the same convention as `geth`).
 The commands below are run from the repo root so the relative config paths resolve.
 
+## Running a slave
+
+The default action boots every shard assigned to `--node_id` and runs until
+interrupted — a drop-in for how pyquarkchain's `cluster.py` starts a slave:
+
+```
+./build/bin/slave --cluster_config ./qkc/config/singularity/devnet.json --node_id S0
+```
+
+```
+INFO [..] slave booting               node_id=S0
+INFO [..] genesis committed           shard=0x00000001 genesis=661b12..792667
+INFO [..] shard started               shard=0x00000001 genesis=661b12..792667 head=0
+INFO [..] genesis committed           shard=0x00040001 genesis=c80ea9..5496d2
+INFO [..] shard started               shard=0x00040001 genesis=c80ea9..5496d2 head=0
+INFO [..] slave running               node_id=S0 shards=2
+```
+
+Each owned shard gets an isolated chaindb under
+`{DB_PATH_ROOT}/shard-0x{full_shard_id}/` (relative to the working directory),
+stands on its QuarkChain minor genesis block, and reports that block's hash and
+its head height. An empty `DB_PATH_ROOT` is pyquarkchain's mem-db mode
+(`use_mem_db`): every shard runs on an ephemeral in-memory database and nothing
+is written to disk.
+
+`^C` (or SIGTERM) shuts every shard down cleanly and exits 0; a second signal
+force-quits. The handler is installed before any resource opens, so a signal that
+lands mid-boot is honored as soon as boot settles.
+
+Rerunning against the same datadir revalidates each shard's stored genesis block
+against the config and logs `existing genesis validated` instead of
+`genesis committed`. A datadir initialized from a different config is refused
+rather than reused, and the process exits non-zero:
+
+```
+slave S0: shard 0x00000001: stored genesis 0x661b12…792667 does not match config
+genesis 0x04493a…8a7a0f (db ./qkc-data/devnet/shard-0x00000001) — cluster config
+changed since initialization
+```
+
+Only geth's logging and file-based profiling debug flags are exposed. The debug
+flags that would open a socket — the `--pprof` HTTP server and `--pyroscope.*`
+push — are deliberately not registered, keeping the process free of network I/O.
+
 ## Subcommands
 
 ### `slave config`
