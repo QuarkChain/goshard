@@ -47,18 +47,6 @@ func (p *XshardPool) connectionsSize() int {
 	return len(p.connections)
 }
 
-// targets returns all full shard IDs that have connections.
-func (p *XshardPool) targets() []uint32 {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	targets := make([]uint32, 0, len(p.conns))
-	for id := range p.conns {
-		targets = append(targets, id)
-	}
-	return targets
-}
-
 // ── business handler test hook ────────────────────────────────────────────────
 
 // testXshardHandler is a test hook standing in for the business handler: it
@@ -453,9 +441,6 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 	if !pool.hasSlaveID([]byte("server-slave")) {
 		t.Fatal("slave ID was removed after connection close")
 	}
-	if len(pool.targets()) != 2 {
-		t.Fatalf("expected both shard targets to remain, got %v", pool.targets())
-	}
 }
 
 // ── inbound tests ─────────────────────────────────────────────────────────────
@@ -840,9 +825,13 @@ func TestXshardPool_DialToSlaveSkipsSelf(t *testing.T) {
 	}
 }
 
-// TestXshardPool_DialToSlaveConcurrentDedup verifies the final dedup safety net:
-// concurrent dials to the same remote result in a single registered outbound.
-func TestXshardPool_DialToSlaveConcurrentDedup(t *testing.T) {
+// TestXshardPool_DialToSlaveConcurrentDialsBothRegister verifies Python
+// parity: dedup is an entry check only, so concurrent dials that both passed
+// it register two connections — Python's check-then-register is likewise not
+// atomic, and duplicates are tolerated by the idempotent business layer.
+// A registration-time re-check would close the losing outbound; with mutual
+// dials both sides would then kill their only live connections.
+func TestXshardPool_DialToSlaveConcurrentDialsBothRegister(t *testing.T) {
 	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
 	defer rs.close()
 
@@ -868,8 +857,8 @@ func TestXshardPool_DialToSlaveConcurrentDedup(t *testing.T) {
 		}
 	}
 
-	if got := pool.outboundSize(); got != 1 {
-		t.Fatalf("expected 1 outbound connection, got %d", got)
+	if got := pool.outboundSize(); got != 2 {
+		t.Fatalf("expected 2 outbound connections, got %d", got)
 	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
 		t.Fatal("remote-slave should be tracked")
@@ -912,4 +901,101 @@ func TestXshardPool_DialToSlaveRetryAfterFailure(t *testing.T) {
 	if !pool.hasSlaveID([]byte("remote-slave")) {
 		t.Fatal("retry should register the remote")
 	}
+}
+
+// TestXshardPool_MutualDialFormsTwoConnections verifies the Python steady
+// state: when master tells both slaves to connect, each dials the other and
+// each side ends up with an inbound plus an outbound connection, all alive.
+// This is the regression guard for a registration-time dedup re-check: it
+// would close both outbounds after the peer's inbound registered first,
+// leaving one dead zombie per side and permanently partitioning the pair
+// (slave IDs are add-only, so no redial is ever possible).
+func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
+	s0ID, s1ID := []byte("s0"), []byte("s1")
+	s0Shards := []uint32{1, 3, 5, 7}
+	s1Shards := []uint32{2, 4, 6, 8}
+
+	ln0, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen s0: %v", err)
+	}
+	defer ln0.Close()
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen s1: %v", err)
+	}
+	defer ln1.Close()
+
+	pool0 := mustNewXshardPool(t, s0ID, s0Shards)
+	defer pool0.Close()
+	pool1 := mustNewXshardPool(t, s1ID, s1Shards)
+	defer pool1.Close()
+
+	// Accept loops standing in for each slave's server port.
+	go func() {
+		for {
+			c, err := ln0.Accept()
+			if err != nil {
+				return
+			}
+			pool0.HandleInbound(c)
+		}
+	}()
+	go func() {
+		for {
+			c, err := ln1.Accept()
+			if err != nil {
+				return
+			}
+			pool1.HandleInbound(c)
+		}
+	}()
+
+	a0 := ln0.Addr().(*net.TCPAddr)
+	a1 := ln1.Addr().(*net.TCPAddr)
+	info0 := wire.SlaveInfo{ID: s0ID, Host: []byte(a0.IP.String()), Port: uint16(a0.Port), FullShardIDList: s0Shards}
+	info1 := wire.SlaveInfo{ID: s1ID, Host: []byte(a1.IP.String()), Port: uint16(a1.Port), FullShardIDList: s1Shards}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, pool := range []*XshardPool{pool0, pool1} {
+		info := info0 // pool1 dials s0
+		if i == 0 {
+			info = info1 // pool0 dials s1
+		}
+		wg.Add(1)
+		go func(pool *XshardPool, info wire.SlaveInfo, i int) {
+			defer wg.Done()
+			errs[i] = pool.DialToSlave(ctx, info)
+		}(pool, info, i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+	}
+
+	// Each side: the peer's shards hold two live connections; own shards none.
+	assertShardState := func(pool *XshardPool, peerShards []uint32, peerID []byte) {
+		t.Helper()
+		if !pool.hasSlaveID(peerID) {
+			t.Fatalf("peer %s should be tracked", peerID)
+		}
+		for _, shard := range peerShards {
+			conns := pool.get(shard)
+			if len(conns) != 2 {
+				t.Fatalf("shard %d: expected 2 connections (inbound+outbound), got %d", shard, len(conns))
+			}
+			for _, c := range conns {
+				if c.IsClosed() {
+					t.Fatalf("shard %d: indexed connection is closed (zombie)", shard)
+				}
+			}
+		}
+	}
+	assertShardState(pool0, s1Shards, s1ID)
+	assertShardState(pool1, s0Shards, s0ID)
 }

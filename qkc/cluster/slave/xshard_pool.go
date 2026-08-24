@@ -112,21 +112,16 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 		}
 	}
 
-	// Dedup is re-checked under the lock: concurrent dials to the same remote
-	// register at most one connection; the loser is closed. Python needs no
-	// re-check — its event loop serializes connect_to_slave.
+	// Registration is unconditional after a successful handshake, mirroring
+	// Python's connect_to_slave (entry check only). Re-checking slave IDs here
+	// would close the outbound when the peer's inbound registers during the
+	// handshake — with mutual dials both sides would close their outbound,
+	// killing the only live connections and permanently partitioning the pair.
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		conn.Close()
 		return fmt.Errorf("xshard pool closed")
-	}
-	if _, dup := p.slaveIDs[string(id)]; dup {
-		p.mu.Unlock()
-		conn.Close()
-		p.discardConnection(conn)
-		p.log.Info("xshard connection skipped: duplicate slave id", "remote_id", string(id), "remote", conn.RemoteAddr())
-		return nil
 	}
 	p.addSlaveConnectionLocked(conn)
 	p.mu.Unlock()
