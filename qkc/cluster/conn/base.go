@@ -206,21 +206,6 @@ func (c *BaseConn) Close() {
 	c.shutdown(nil)
 }
 
-// SetValidateRPCID installs a custom RPC request ID validation hook. It is
-// invoked by the owner goroutine for every inbound RPC request before
-// dispatch. The default validates a single monotonic sequence shared by all
-// peers; connections that route traffic for multiple cluster_peer_ids (e.g.
-// MasterConn with virtual PeerConns) can install a per-peer validator so each
-// peer keeps an independent rpc_id sequence.
-func (c *BaseConn) SetValidateRPCID(f func(clusterPeerID uint64, rpcID uint64) bool) {
-	c.configMu.Lock()
-	defer c.configMu.Unlock()
-	if c.State() != ConnectionStateConnecting {
-		panic("validateRPCID must be set before Start")
-	}
-	c.validateRPCID = f
-}
-
 // SendRPC sends a request without metadata and waits for its response.
 func (c *BaseConn) SendRPC(ctx context.Context, opcode byte, payload []byte) (any, error) {
 	return c.SendRPCMeta(ctx, opcode, payload, wire.ClusterMetadata{})
@@ -296,6 +281,18 @@ func (c *BaseConn) SendCommandMeta(opcode byte, payload []byte, meta wire.Cluste
 		Payload: payload,
 	}
 	return c.writeFrame(frame)
+}
+
+// WriteFrame writes a pre-built frame to the transport, serialized by writeMu
+// together with every other outbound frame on this connection. It is the
+// low-level "write a complete frame verbatim" entry: unlike SendRPC/SendCommand
+// it does not allocate an rpc_id or construct a new frame.
+//
+// It is exposed so connections that route already-constructed frames from other
+// connections can reuse this connection's writeMu for physical serialization
+// (e.g. the slave's MasterConn forwarding virtual PeerConn frames).
+func (c *BaseConn) WriteFrame(f *wire.Frame) error {
+	return c.writeFrame(f)
 }
 
 // -- Query methods -----------------------------------------------------------

@@ -58,8 +58,8 @@ type MasterHandler interface {
 	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
 }
 
-// MasterConnConfig configures a MasterConn. All fields except Logger are
-// required.
+// MasterConnConfig configures a MasterConn. Conn, Handler and PeerRuntime are
+// required; Logger defaults to log.Root().
 type MasterConnConfig struct {
 	// Conn is the accepted TCP connection from the master. The slave never
 	// dials the master (py: MasterServer connects, SlaveServer listens).
@@ -74,10 +74,14 @@ type MasterConnConfig struct {
 	LocalID              []byte
 	LocalFullShardIDList []uint32
 
-	// Handler serves inbound RPCs (required). ConnectToSlaves and the
-	// business RPCs are delegated here; the future SlaveService implements
-	// them with its own XshardPool.
+	// Handler serves inbound RPCs (required). Business RPCs are delegated here;
+	// the future SlaveService implements them with its own XshardPool.
 	Handler MasterHandler
+
+	// PeerRuntime is the required dependency on the runtime owning the shards
+	// and peer registry; "no shards yet" is an empty shard set inside it, never
+	// nil. The future SlaveService provides it; tests inject a fake.
+	PeerRuntime PeerRuntime
 
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger
@@ -96,6 +100,11 @@ type MasterConn struct {
 	handler              MasterHandler
 	localID              []byte
 	localFullShardIDList []uint32
+
+	// peerRuntime is the required dependency on the runtime owning the shards
+	// and peer registry (Python: MasterConnection.slave_server). Never nil on
+	// a started MasterConn.
+	peerRuntime PeerRuntime
 }
 
 // NewMasterConn wraps an accepted net.Conn from the master.
@@ -107,6 +116,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
+	if cfg.PeerRuntime == nil {
+		return nil, errors.New("master peer runtime must not be nil")
+	}
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
 	}
@@ -115,7 +127,14 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
+		peerRuntime:          cfg.PeerRuntime,
 	}
+
+	// Forwarder: route cluster_peer_id != 0 frames to virtual PeerConns.
+	// routeFrame returns false for master-local traffic so MasterConn handles
+	// it normally. The forwarder runs on the reader goroutine; it enqueues
+	// frames without blocking (the PeerConn inbound queue is unbounded).
+	forwarder := mc.routeFrame
 
 	mc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport: conn.NewTCPTransport(cfg.Conn, readFrame, wire.WriteFrame),
@@ -202,10 +221,16 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		NonRPCOps: map[byte]struct{}{
 			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): {},
 		},
-		// Forwarder stays nil: routing peer traffic (cluster_peer_id != 0)
-		// to virtual PeerConns is PR6 (Dispatcher as the frame consumer).
-		Logger: cfg.Logger,
+		Forwarder: forwarder,
+		Logger:    cfg.Logger,
 	})
+
+	// Cascade teardown: on any shutdown path delegate the peer cascade to the
+	// runtime (Python: MasterConnection.close, slave.py:155-162).
+	go func() {
+		<-mc.WaitUntilClosed()
+		mc.peerRuntime.CloseAllPeers()
+	}()
 	return mc, nil
 }
 
@@ -273,30 +298,51 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 	}, nil
 }
 
-// handleCreateClusterPeerConnection creates virtual peer connections.
-//
-// Not implemented before PR6 (PeerConn/Dispatcher) and PR7 (cluster_peer_id
-// registry on the SlaveService): returning error_code=0 here would be a false
-// success — the master ignores the error code (py master.py: "TODO: Check
-// result_list") and would immediately send peer frames this conn cannot
-// route. Fail honestly instead: the handler error closes the connection,
-// matching the BaseConn contract for unimplemented business logic.
+// handleCreateClusterPeerConnection parses CREATE and delegates PeerConn
+// creation to the runtime. An empty shard set in the runtime makes it a no-op
+// while still returning error_code=0 (Python: slave.py:329-370).
 func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
-	_ = req.(*wire.CreateClusterPeerConnectionRequest)
-	// TODO: create PeerShardConnection instances and wire with the dispatcher (PR6).
-	return nil, conn.ErrHandlerNotImplemented
+	create := req.(*wire.CreateClusterPeerConnectionRequest)
+	mc.peerRuntime.CreatePeerConns(create.ClusterPeerID)
+	return &wire.CreateClusterPeerConnectionResponse{ErrorCode: 0}, nil
 }
 
-// handleDestroyClusterPeerConnection is a fire-and-forget command to tear down
-// a virtual peer connection. No response is sent.
-//
-// Python's implementation (slave.py:321-327) is a complete no-op in this
-// conn's reachable state: remove_cluster_peer_id is a no-op when the id is
-// absent and there are no shard peers to close.
+// handleDestroyClusterPeerConnection is a fire-and-forget command delegating
+// peer teardown to the runtime (Python: slave.py:321-327).
 func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
-	_ = req.(*wire.DestroyClusterPeerConnectionCommand)
-	// TODO: notify dispatcher / close peer shard connections (PR6).
+	destroy := req.(*wire.DestroyClusterPeerConnectionCommand)
+	mc.peerRuntime.DestroyPeerConns(destroy.ClusterPeerID)
 	return nil, nil
+}
+
+// Close shuts down the connection and delegates the peer cascade to the
+// runtime. It shadows BaseConn.Close so teardown is synchronous.
+func (mc *MasterConn) Close() {
+	mc.peerRuntime.CloseAllPeers()
+	mc.BaseConn.Close()
+}
+
+// ── Frame routing ───────────────────────────────────────────────────────
+
+// routeFrame is the forwarder installed on BaseConn: cluster_peer_id == 0 is
+// master-local (dispatch normally); peer traffic is routed through the runtime
+// and handed to the matching PeerConn. A LookupPeer miss — including an empty
+// shard set — is Python's NULL_CONNECTION semantics (slave.py:131-146): the
+// frame is consumed and dropped, no new error is produced.
+func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
+	if frame.Meta.ClusterPeerID == 0 {
+		return false
+	}
+
+	pc := mc.peerRuntime.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
+	if pc == nil {
+		mc.Logger().Warn("dropping frame for unknown virtual peer connection",
+			"cluster_peer_id", frame.Meta.ClusterPeerID, "branch", frame.Meta.Branch)
+		return true
+	}
+
+	pc.HandleFrame(frame)
+	return true
 }
 
 // ── Delegated handler dispatch ─────────────────────────────────────────

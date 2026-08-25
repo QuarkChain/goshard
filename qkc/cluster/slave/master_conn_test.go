@@ -179,6 +179,7 @@ func newMasterTestConnPairWithIdentity(
 		LocalID:              clientID,
 		LocalFullShardIDList: clientShards,
 		Handler:              &fakeMasterHandler{},
+		PeerRuntime:          newFakePeerRuntime(nil, nil, nil),
 		Logger:               logger,
 	})
 	if err != nil {
@@ -189,6 +190,7 @@ func newMasterTestConnPairWithIdentity(
 		LocalID:              serverID,
 		LocalFullShardIDList: serverShards,
 		Handler:              &fakeMasterHandler{},
+		PeerRuntime:          newFakePeerRuntime(nil, nil, nil),
 		Logger:               logger,
 	})
 	if err != nil {
@@ -257,6 +259,7 @@ func newMasterConnWithPeer(t *testing.T, handler MasterHandler) (*MasterConn, *m
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
 		Handler:              handler,
+		PeerRuntime:          newFakePeerRuntime(nil, nil, nil),
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -283,6 +286,9 @@ func TestMasterConn_ConfigValidation(t *testing.T) {
 	}
 	if _, err := NewMasterConn(MasterConnConfig{Conn: &net.TCPConn{}}); err == nil {
 		t.Fatal("expected error for nil handler")
+	}
+	if _, err := NewMasterConn(MasterConnConfig{Conn: &net.TCPConn{}, Handler: &fakeMasterHandler{}}); err == nil {
+		t.Fatal("expected error for nil peer runtime")
 	}
 
 	// Identity getters return copies: source slices are stored by value and
@@ -358,39 +364,6 @@ func TestMasterConn_Ping(t *testing.T) {
 	select {
 	case <-server.WaitUntilClosed():
 		t.Fatal("connection closed by PING")
-	default:
-	}
-}
-
-// TestMasterConn_CreateClusterPeerConnectionNotImplemented verifies that
-// CreateClusterPeerConnection fails honestly before PR6: the handler returns
-// ErrHandlerNotImplemented (closes the connection, no response) instead of a
-// false error_code=0 success — the master ignores the error code and would
-// immediately send peer frames this conn cannot route.
-func TestMasterConn_CreateClusterPeerConnectionNotImplemented(t *testing.T) {
-	server, peer, cleanup := newMasterConnWithPeer(t, &fakeMasterHandler{})
-	defer cleanup()
-
-	payload, _ := serialize.SerializeToBytes(&wire.CreateClusterPeerConnectionRequest{ClusterPeerID: 7})
-	if err := peer.send(&wire.Frame{
-		Meta:    wire.ClusterMetadata{},
-		Opcode:  byte(wire.ClusterOpCreateClusterPeerConnectionRequest),
-		RPCID:   1,
-		Payload: payload,
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	select {
-	case <-server.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close after CreateClusterPeerConnection")
-	}
-
-	// No response frame may be written.
-	select {
-	case f := <-peer.frames:
-		t.Fatalf("unexpected response frame: opcode 0x%x", f.Opcode)
 	default:
 	}
 }
@@ -603,6 +576,7 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
+		PeerRuntime:          newFakePeerRuntime(nil, nil, nil),
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -686,6 +660,7 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
+		PeerRuntime:          newFakePeerRuntime(nil, nil, nil),
 		Logger:               log.New(),
 	})
 	if err != nil {
