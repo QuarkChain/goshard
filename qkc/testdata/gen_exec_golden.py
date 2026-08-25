@@ -25,7 +25,9 @@ installed; see qkc/config/singularity/README.md):
     python <path-to-goshard>/qkc/testdata/gen_exec_golden.py
 
 The pyquarkchain checkout is taken from $PYQUARKCHAIN, defaulting to the
-current directory.
+current directory. --log-level <level> raises pyquarkchain's own logging while
+the vectors are built; --allow-dirty records uncommitted oracle edits instead
+of refusing to run.
 """
 
 import asyncio
@@ -41,6 +43,34 @@ _OUT_DIR = os.path.join(_TESTDATA_DIR, "exec_golden")
 
 _PYQUARKCHAIN = os.path.abspath(os.environ.get("PYQUARKCHAIN", os.getcwd()))
 _ALLOW_DIRTY = "--allow-dirty" in sys.argv
+
+_LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
+
+
+def parse_log_level():
+    """Read --log-level from argv, defaulting to what pyquarkchain falls back to.
+
+    Nothing here reads a pyquarkchain log, so the level cannot reach the
+    vectors; raising it only exposes what the oracle is doing while it runs.
+    """
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith("--log-level="):
+            value = arg.split("=", 1)[1]
+        elif arg == "--log-level":
+            value = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        else:
+            continue
+        if value.lower() not in _LOG_LEVELS:
+            sys.exit(
+                "--log-level takes one of {}, got {!r}".format(
+                    ", ".join(_LOG_LEVELS), value
+                )
+            )
+        return value.lower()
+    return "warning"
+
+
+_LOG_LEVEL = parse_log_level()
 
 # The modules that decide what these vectors say. Their digests go into the
 # output so a vector can be traced back to the exact source that produced it:
@@ -90,12 +120,18 @@ try:
     from quarkchain.evm.transactions import Transaction as EvmTransaction
     from quarkchain.evm.utils import privtoaddr
     from quarkchain.genesis import GenesisManager
-    from quarkchain.utils import token_id_encode
+    from quarkchain.utils import Logger, token_id_encode
 except ImportError as exc:  # pragma: no cover - operator feedback only
     sys.exit(
         "cannot import quarkchain ({}); run from a pyquarkchain checkout or set "
         "PYQUARKCHAIN to one, inside a virtualenv with its requirements".format(exc)
     )
+
+# pyquarkchain latches its log level on the first Logger call and then refuses
+# to change it (utils.py:133-135), so this has to run before anything below
+# reaches the oracle. Setting it explicitly also silences the warning that the
+# latch emits when it has to pick the level itself.
+Logger.set_logging_level(_LOG_LEVEL)
 
 
 # ---------------------------------------------------------------------------
