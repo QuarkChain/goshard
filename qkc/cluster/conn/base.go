@@ -356,13 +356,13 @@ func rpcTimeoutError(err error) error {
 func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	c.writeMu.Lock()
 
-	c.mu.Lock()
+	c.mu.RLock()
 	if err := c.checkActiveLocked(); err != nil {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 		c.writeMu.Unlock()
 		return err
 	}
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	err := c.transport.WriteFrame(f)
 	c.writeMu.Unlock()
