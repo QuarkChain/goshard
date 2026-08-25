@@ -349,24 +349,22 @@ func rpcTimeoutError(err error) error {
 // -- Write path ---------------------------------------------------------------
 //
 // writeFrame serializes transport writes with writeMu. Write failures trigger
-// shutdown after the lock is released; shutdown acquires writeMu as a barrier,
-// so shutdown must never be entered while writeMu is held.
+// shutdown after the lock is released. Shutdown never acquires writeMu and
+// does not wait for an in-flight WriteFrame to return.
 
 // writeFrame writes a pre-built frame.
 func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	c.mu.RLock()
 	if err := c.checkActiveLocked(); err != nil {
 		c.mu.RUnlock()
-		c.writeMu.Unlock()
 		return err
 	}
 	c.mu.RUnlock()
 
 	err := c.transport.WriteFrame(f)
-	c.writeMu.Unlock()
-
 	if err != nil {
 		c.shutdown(fmt.Errorf("write frame: %w", err))
 	}

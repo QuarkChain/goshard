@@ -119,6 +119,22 @@ func (t *fakeFrameTransport) closes() int {
 	return t.closeCount
 }
 
+// panicWriteTransport parks inside WriteFrame — while the conn's writeMu is
+// held — and panics once released. It models an injected transport whose
+// WriteFrame faults mid-write on the response path.
+type panicWriteTransport struct {
+	*fakeFrameTransport
+	entered      chan struct{}
+	enterOnce    sync.Once
+	releaseWrite chan struct{}
+}
+
+func (t *panicWriteTransport) WriteFrame(*wire.Frame) error {
+	t.enterOnce.Do(func() { close(t.entered) })
+	<-t.releaseWrite
+	panic("injected WriteFrame panic")
+}
+
 // staticReaderTransport feeds wire.ReadFrame from a fixed byte stream (clean
 // EOF vs truncated frame semantics).
 type staticReaderTransport struct {
@@ -348,12 +364,11 @@ func TestConfig_NonRPCDummyResponseOpcode(t *testing.T) {
 
 // -- BaseConn unit tests (fake transport) --------------------------------------
 
-// TestBaseConn_CloseWithInFlightWrite: shutdown is interrupt-first — the writer
-// parked in WriteFrame is released by transport.Close, never by the writeMu
-// barrier (a barrier-first shutdown would hang on a real net.Conn with a full
-// send buffer).
+// TestBaseConn_CloseWithInFlightWrite verifies that shutdown does not wait for
+// an in-flight WriteFrame. Shutdown completes pending RPCs and closes the
+// transport, while a blocked write may still be in progress.
 func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
-	t.Run("barrier: Close waits for in-flight write", func(t *testing.T) {
+	t.Run("close does not wait for in-flight write", func(t *testing.T) {
 		tr := newFakeFrameTransport()
 		tr.writeStarted = make(chan struct{})
 		tr.releaseWrite = make(chan struct{})
@@ -372,6 +387,8 @@ func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
 			t.Fatal("fake transport did not start writing")
 		}
 
+		// Close must return while the write is still parked in WriteFrame:
+		// shutdown does not wait on writeMu or the in-flight write.
 		closeDone := make(chan struct{})
 		go func() {
 			conn.Close()
@@ -379,21 +396,23 @@ func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
 		}()
 		select {
 		case <-closeDone:
-			t.Fatal("Close returned while write was blocked")
-		case <-time.After(20 * time.Millisecond):
-		}
-
-		close(tr.releaseWrite)
-		select {
-		case <-closeDone:
 		case <-time.After(time.Second):
-			t.Fatal("Close did not finish after write completed")
+			t.Fatal("Close blocked waiting for in-flight write")
 		}
 		if !tr.closeWhileWriting {
 			t.Fatal("expected interrupt-first shutdown: transport.Close must run while the write is still in flight")
 		}
-		if err := <-result; err != ErrConnectionClosed {
-			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+
+		// The pending RPC is completed by shutdown, independently of the
+		// in-flight write. Release the fake write so the writer goroutine can exit.
+		close(tr.releaseWrite)
+		select {
+		case err := <-result:
+			if err != ErrConnectionClosed {
+				t.Fatalf("expected ErrConnectionClosed, got %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("RPC did not complete after write released")
 		}
 	})
 
@@ -590,6 +609,57 @@ func TestBaseConn_WriteFailureClosesConnection(t *testing.T) {
 	<-conn.WaitUntilClosed()
 	if !conn.IsClosed() {
 		t.Fatal("connection should be closed after write failure")
+	}
+}
+
+// TestBaseConn_WriteFramePanicReleasesWriteMu: a panic from the transport's
+// WriteFrame while dispatch is writing a response must not leave writeMu held
+// (the write path releases it via defer). Otherwise senders issued after the
+// panic block forever at writeMu.Lock() and never observe the Closed state.
+func TestBaseConn_WriteFramePanicReleasesWriteMu(t *testing.T) {
+	tr := &panicWriteTransport{
+		fakeFrameTransport: newFakeFrameTransport(),
+		entered:            make(chan struct{}),
+		releaseWrite:       make(chan struct{}),
+	}
+	conn := newPingServerConn(tr)
+	conn.Start()
+
+	// An inbound ping makes dispatch write a response frame; the injected
+	// transport parks inside WriteFrame while the conn's writeMu is held.
+	tr.frames <- &wire.Frame{Opcode: byte(wire.ClusterOpPing), RPCID: 1, Payload: validPingPayload(t)}
+	select {
+	case <-tr.entered:
+	case <-time.After(time.Second):
+		t.Fatal("response write did not enter transport.WriteFrame")
+	}
+
+	// Release the parked write: it panics, dispatch's recover shuts the
+	// connection down.
+	close(tr.releaseWrite)
+	select {
+	case <-conn.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection did not close after WriteFrame panic")
+	}
+
+	// Senders issued after the panic must observe the Closed state promptly;
+	// a stuck writeMu would block them forever.
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err != ErrConnectionClosed {
+			t.Fatalf("SendRPC after WriteFrame panic: expected ErrConnectionClosed, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendRPC blocked on writeMu after WriteFrame panic")
+	}
+	if err := conn.SendCommand(byte(wire.ClusterOpPing), nil); err != ErrConnectionClosed {
+		t.Fatalf("SendCommand after WriteFrame panic: expected ErrConnectionClosed, got %v", err)
 	}
 }
 
