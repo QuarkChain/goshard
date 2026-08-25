@@ -606,9 +606,6 @@ func (c *BaseConn) shutdown(cause error) {
 		if err := c.transport.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			c.log.Warn("transport close failed", "err", err)
 		}
-
-		c.writeMu.Lock()
-		c.writeMu.Unlock()
 	})
 }
 
