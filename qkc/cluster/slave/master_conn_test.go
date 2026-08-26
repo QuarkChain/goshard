@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,17 @@ import (
 type fakeMasterHandler struct {
 	// errGenTx, if set, is returned by GenTx to simulate a handler failure.
 	errGenTx error
+	// createPeerCalls counts CreateClusterPeerConnection invocations.
+	createPeerCalls atomic.Int32
+}
+
+func (h *fakeMasterHandler) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
+	h.createPeerCalls.Add(1)
+	return &wire.CreateClusterPeerConnectionResponse{}, nil
+}
+
+func (h *fakeMasterHandler) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
+	return nil
 }
 
 func (h *fakeMasterHandler) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
@@ -362,13 +374,13 @@ func TestMasterConn_Ping(t *testing.T) {
 	}
 }
 
-// TestMasterConn_CreateClusterPeerConnectionNotImplemented verifies that
-// CreateClusterPeerConnection fails honestly before PR6: the handler returns
-// ErrHandlerNotImplemented (closes the connection, no response) instead of a
-// false error_code=0 success — the master ignores the error code and would
-// immediately send peer frames this conn cannot route.
-func TestMasterConn_CreateClusterPeerConnectionNotImplemented(t *testing.T) {
-	server, peer, cleanup := newMasterConnWithPeer(t, &fakeMasterHandler{})
+// TestMasterConn_CreateClusterPeerConnectionDelegated verifies that CREATE is
+// dispatched to the MasterHandler (service layer) and its response is written
+// back; the connection stays alive. The peer-connection business itself is
+// owned by the handler's runtime, not by MasterConn.
+func TestMasterConn_CreateClusterPeerConnectionDelegated(t *testing.T) {
+	handler := &fakeMasterHandler{}
+	server, peer, cleanup := newMasterConnWithPeer(t, handler)
 	defer cleanup()
 
 	payload, _ := serialize.SerializeToBytes(&wire.CreateClusterPeerConnectionRequest{ClusterPeerID: 7})
@@ -381,16 +393,18 @@ func TestMasterConn_CreateClusterPeerConnectionNotImplemented(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	select {
-	case <-server.WaitUntilClosed():
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close after CreateClusterPeerConnection")
+	resp := peer.nextFrame(t, 2*time.Second)
+	if resp.Opcode != byte(wire.ClusterOpCreateClusterPeerConnectionResponse) {
+		t.Fatalf("expected create response opcode 0x%x, got 0x%x", wire.ClusterOpCreateClusterPeerConnectionResponse, resp.Opcode)
+	}
+	if got := handler.createPeerCalls.Load(); got != 1 {
+		t.Fatalf("handler.CreateClusterPeerConnection called %d times, want 1", got)
 	}
 
-	// No response frame may be written.
+	// The connection stays alive after CREATE.
 	select {
-	case f := <-peer.frames:
-		t.Fatalf("unexpected response frame: opcode 0x%x", f.Opcode)
+	case <-server.WaitUntilClosed():
+		t.Fatal("connection closed by CREATE")
 	default:
 	}
 }
