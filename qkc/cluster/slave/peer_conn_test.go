@@ -16,36 +16,48 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// fakePeerRuntime is a PeerRuntime test double owning a peer registry built via
-// NewPeerConn. masterConn is late-bound after NewMasterConn returns.
-type fakePeerRuntime struct {
+// fakeSlaveService is a test double for the future SlaveService: it embeds
+// fakeMasterHandler for the business RPC stubs, implements the cluster-peer
+// CREATE/DESTROY business with a peer registry built via NewPeerConn, and
+// implements PeerRouter.LookupPeer. masterConn is late-bound after
+// NewMasterConn returns.
+type fakeSlaveService struct {
+	*fakeMasterHandler
 	mu         sync.Mutex
 	peers      map[uint64]map[uint32]*PeerConn
 	masterConn *MasterConn
 	handler    PeerHandler
-	branches   []uint32 // default expansion set for the interface CreatePeerConns
+	branches   []uint32 // default shard set for CREATE
 }
 
-func newFakePeerRuntime(mc *MasterConn, handler PeerHandler, branches []uint32) *fakePeerRuntime {
-	return &fakePeerRuntime{
-		peers:      make(map[uint64]map[uint32]*PeerConn),
-		masterConn: mc,
-		handler:    handler,
-		branches:   branches,
+func newFakeSlaveService(mc *MasterConn, handler PeerHandler, branches []uint32) *fakeSlaveService {
+	return &fakeSlaveService{
+		fakeMasterHandler: &fakeMasterHandler{},
+		peers:             make(map[uint64]map[uint32]*PeerConn),
+		masterConn:        mc,
+		handler:           handler,
+		branches:          branches,
 	}
 }
 
-func (f *fakePeerRuntime) CreatePeerConns(clusterPeerID uint64) {
-	f.createPeerConns(clusterPeerID, f.branches)
+// CreateClusterPeerConnection implements MasterHandler: creates PeerConns on
+// every configured branch and registers them (py: slave.py:329-370).
+func (f *fakeSlaveService) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
+	f.createPeerConns(req.ClusterPeerID, f.branches)
+	return &wire.CreateClusterPeerConnectionResponse{ErrorCode: 0}, nil
+}
+
+// DestroyClusterPeerConnection implements MasterHandler: removes and closes
+// every PeerConn of the given cluster_peer_id (py: slave.py:321-327).
+func (f *fakeSlaveService) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
+	f.DestroyPeerConns(req.ClusterPeerID)
+	return nil
 }
 
 // createPeerConns is a test helper (not an interface method): creates PeerConns
 // for explicit branches. Empty branches registers nothing (Python: empty
 // self.shards.values() -> CREATE is a no-op).
-func (f *fakePeerRuntime) createPeerConns(clusterPeerID uint64, branches []uint32) {
-	if clusterPeerID == ReservedClusterPeerID {
-		return
-	}
+func (f *fakeSlaveService) createPeerConns(clusterPeerID uint64, branches []uint32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	bm, ok := f.peers[clusterPeerID]
@@ -65,7 +77,7 @@ func (f *fakePeerRuntime) createPeerConns(clusterPeerID uint64, branches []uint3
 	}
 }
 
-func (f *fakePeerRuntime) DestroyPeerConns(clusterPeerID uint64) {
+func (f *fakeSlaveService) DestroyPeerConns(clusterPeerID uint64) {
 	f.mu.Lock()
 	bm, ok := f.peers[clusterPeerID]
 	if ok {
@@ -80,7 +92,8 @@ func (f *fakePeerRuntime) DestroyPeerConns(clusterPeerID uint64) {
 	}
 }
 
-func (f *fakePeerRuntime) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
+// LookupPeer implements PeerRouter: (cluster_peer_id, branch) -> PeerConn.
+func (f *fakeSlaveService) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	bm, ok := f.peers[clusterPeerID]
@@ -90,7 +103,9 @@ func (f *fakePeerRuntime) LookupPeer(clusterPeerID uint64, branch uint32) *PeerC
 	return bm[branch]
 }
 
-func (f *fakePeerRuntime) CloseAllPeers() {
+// closeAll closes every registered PeerConn (test cleanup helper; the
+// production counterpart is SlaveService shutdown, not MasterConn close).
+func (f *fakeSlaveService) closeAll() {
 	f.mu.Lock()
 	var all []*PeerConn
 	for _, bm := range f.peers {
@@ -105,14 +120,14 @@ func (f *fakePeerRuntime) CloseAllPeers() {
 	}
 }
 
-func (f *fakePeerRuntime) peerCount() int {
+func (f *fakeSlaveService) peerCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.peers)
 }
 
 // registerPeer inserts an already-constructed PeerConn into the fake registry.
-func (f *fakePeerRuntime) registerPeer(pc *PeerConn) {
+func (f *fakeSlaveService) registerPeer(pc *PeerConn) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	bm, ok := f.peers[pc.ClusterPeerID()]
@@ -124,14 +139,15 @@ func (f *fakePeerRuntime) registerPeer(pc *PeerConn) {
 }
 
 // newMasterConn creates a MasterConn over a local TCP pair with a fake
-// PeerRuntime injected (reachable via client.peerRuntime.(*fakePeerRuntime)).
+// SlaveService injected as both Handler and Router (reachable via
+// client.router.(*fakeSlaveService)).
 func newMasterConn(t *testing.T) (client *MasterConn, serverConn net.Conn, cleanup func()) {
 	t.Helper()
 	return newMasterConnWithBranches(t, []uint32{0x00010001, 0x00020001})
 }
 
 // newMasterConnWithBranches is newMasterConn with an explicit default shard set
-// for the fake runtime; empty branches models a runtime with no shards yet.
+// for the fake service; empty branches models a runtime with no shards yet.
 func newMasterConnWithBranches(t *testing.T, branches []uint32) (client *MasterConn, serverConn net.Conn, cleanup func()) {
 	t.Helper()
 
@@ -159,13 +175,13 @@ func newMasterConnWithBranches(t *testing.T, branches []uint32) (client *MasterC
 	}
 
 	logger := log.New()
-	fake := newFakePeerRuntime(nil, nil, branches)
+	fake := newFakeSlaveService(nil, nil, branches)
 	client, err = NewMasterConn(MasterConnConfig{
 		Conn:                 clientConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001, 0x00020001},
-		Handler:              &fakeMasterHandler{},
-		PeerRuntime:          fake,
+		Handler:              fake,
+		Router:               fake,
 		Logger:               logger,
 	})
 	if err != nil {
@@ -176,6 +192,7 @@ func newMasterConnWithBranches(t *testing.T, branches []uint32) (client *MasterC
 	serverConn = srvConn
 
 	cleanup = func() {
+		fake.closeAll()
 		client.Close()
 		if serverConn != nil {
 			serverConn.Close()
@@ -275,7 +292,7 @@ func TestMasterConn_RouteToPeerConn(t *testing.T) {
 	const clusterPeerID uint64 = 7
 	const branch uint32 = 0x00010001
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -407,7 +424,7 @@ func TestMasterConn_CreateWithEmptyShardSet(t *testing.T) {
 	}
 
 	// Empty shard set in the runtime: no PeerConns were created.
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	if len(fake.peers) != 0 {
 		t.Fatalf("expected no peer conns with empty shard set, got %d", len(fake.peers))
 	}
@@ -462,7 +479,7 @@ func TestPeerConn_RPCIDIsolation(t *testing.T) {
 	client, serverConn, cleanup := newMasterConn(t)
 	defer cleanup()
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(7, []uint32{0x00010001})
 	fake.createPeerConns(9, []uint32{0x00020001})
 
@@ -527,8 +544,9 @@ func TestPeerConn_RPCIDIsolation(t *testing.T) {
 	}
 }
 
-// TestMasterConn_CreateDestroyPeerConnection verifies that the master commands
-// create and destroy virtual peer connections through the MasterConn registry.
+// TestMasterConn_CreateDestroyPeerConnection verifies that the CREATE/DESTROY
+// master commands are dispatched to the service layer (the fake), which
+// creates and destroys the virtual peer connections.
 func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 	client, serverConn, cleanup := newMasterConn(t)
 	defer cleanup()
@@ -561,7 +579,7 @@ func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 
 	// Capture PeerConn pointers before destroy; the expansion scope is decided
 	// by the runtime (fake), not by MasterConn.
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	branchMap := fake.peers[clusterPeerID]
 	if len(branchMap) != len(fake.branches) {
 		t.Fatalf("expected %d peer conns, got %d", len(fake.branches), len(branchMap))
@@ -618,17 +636,19 @@ func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 	}
 }
 
-// TestMasterConn_CloseClosesPeerConns verifies that closing MasterConn closes
-// all associated PeerConns and clears the peer registry.
-func TestMasterConn_CloseClosesPeerConns(t *testing.T) {
+// TestMasterConn_CloseDoesNotClosePeerConns verifies that closing MasterConn
+// is a connection event only: PeerConns are owned by the SlaveService (here
+// the fake's registry), not by MasterConn, and survive the MasterConn close.
+// Peer cleanup belongs to the service shutdown path (fake.closeAll).
+func TestMasterConn_CloseDoesNotClosePeerConns(t *testing.T) {
 	client, _, cleanup := newMasterConn(t)
 	defer cleanup()
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(7, []uint32{0x00010001, 0x00020001})
 	fake.createPeerConns(9, []uint32{0x00010001})
 
-	// Keep references before Close clears the map.
+	// Keep references before closeAll clears the map.
 	var peerConns []*PeerConn
 	for _, branchMap := range fake.peers {
 		for _, pc := range branchMap {
@@ -641,14 +661,22 @@ func TestMasterConn_CloseClosesPeerConns(t *testing.T) {
 
 	client.Close()
 
+	// MasterConn close does not cascade to PeerConns.
 	for _, pc := range peerConns {
-		if !pc.IsClosed() {
-			t.Fatalf("peer conn %d/%d was not closed by MasterConn.Close", pc.ClusterPeerID(), pc.Branch())
+		if pc.IsClosed() {
+			t.Fatalf("peer conn %d/%d closed by MasterConn.Close; peer lifecycle is owned by the service", pc.ClusterPeerID(), pc.Branch())
 		}
 	}
+	if got := fake.peerCount(); got != 2 {
+		t.Fatalf("peer registry mutated by MasterConn.Close: got %d cluster_peer_id entries", got)
+	}
 
-	if got := fake.peerCount(); got != 0 {
-		t.Fatalf("peer registry not cleared: got %d cluster_peer_id entries", got)
+	// The service-side shutdown path (fake.closeAll) closes them all.
+	fake.closeAll()
+	for _, pc := range peerConns {
+		if !pc.IsClosed() {
+			t.Fatalf("peer conn %d/%d was not closed by service closeAll", pc.ClusterPeerID(), pc.Branch())
+		}
 	}
 }
 
@@ -662,7 +690,7 @@ func TestPeerConn_OutboundRPCThroughMasterConn(t *testing.T) {
 	const clusterPeerID uint64 = 31
 	const branch uint32 = 0x00010001
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -717,7 +745,7 @@ func TestMasterConn_DuplicateCreatePeerConn(t *testing.T) {
 	const branch uint32 = 0x00010001
 
 	// First create.
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	original := fake.peers[clusterPeerID][branch]
 	if original == nil {
@@ -763,7 +791,7 @@ func TestMasterConn_NonRPCCommandRouted(t *testing.T) {
 	const clusterPeerID uint64 = 42
 	const branch uint32 = 0x00010001
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 
 	cmdPayload, err := serialize.SerializeToBytes(&wire.NewMinorBlockHeaderListCommand{
@@ -817,7 +845,7 @@ func TestPeerConn_CloseStopsReadLoop(t *testing.T) {
 	const clusterPeerID uint64 = 43
 	const branch uint32 = 0x00010001
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -843,48 +871,6 @@ func TestPeerConn_CloseStopsReadLoop(t *testing.T) {
 	// HandleFrame after close should return an error.
 	if err := pc.HandleFrame(&wire.Frame{}); err == nil {
 		t.Fatal("expected error from HandleFrame after Close")
-	}
-}
-
-// TestMasterConn_DestroyNonexistentPeer verifies that destroying a non-existent
-// cluster_peer_id is a no-op and does not affect MasterConn.
-// Python: slave.py#L321-L327 (pop with default None)
-func TestMasterConn_DestroyNonexistentPeer(t *testing.T) {
-	client, serverConn, cleanup := newMasterConn(t)
-	defer cleanup()
-
-	// Destroy a cluster_peer_id that was never created.
-	fake := client.peerRuntime.(*fakePeerRuntime)
-	fake.DestroyPeerConns(9999)
-
-	// MasterConn must still be alive.
-	pingPayload, _ := serialize.SerializeToBytes(&wire.PingRequest{
-		ID:              []byte("master"),
-		FullShardIDList: []uint32{0x00010001},
-	})
-	writeMasterFrame(t, serverConn, &wire.Frame{
-		Meta:    wire.ClusterMetadata{Branch: 0x00010001},
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   1,
-		Payload: pingPayload,
-	})
-	resp := readMasterFrame(t, serverConn)
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected PONG after destroying nonexistent peer, got opcode 0x%x", resp.Opcode)
-	}
-
-	// Destroy the same ID again — should still be idempotent.
-	fake.DestroyPeerConns(9999)
-
-	writeMasterFrame(t, serverConn, &wire.Frame{
-		Meta:    wire.ClusterMetadata{Branch: 0x00010001},
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   2,
-		Payload: pingPayload,
-	})
-	resp = readMasterFrame(t, serverConn)
-	if resp.Opcode != byte(wire.ClusterOpPong) {
-		t.Fatalf("expected PONG after second destroy, got opcode 0x%x", resp.Opcode)
 	}
 }
 
@@ -921,7 +907,7 @@ func TestPeerConn_OutboundCommand(t *testing.T) {
 
 	const clusterPeerID uint64 = 71
 	const branch uint32 = 0x00010001
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -962,7 +948,7 @@ func TestPeerConn_InboundRPCResponseViaMaster(t *testing.T) {
 	const branch uint32 = 0x00010001
 	const rpcID uint64 = 42
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	pc := newTestResponderPeer(clusterPeerID, branch, client, log.New())
 	fake.registerPeer(pc)
 	pc.Start()
@@ -1012,7 +998,7 @@ func TestPeerConn_ConcurrentWrites(t *testing.T) {
 	const numPeers = 8
 	const reqPerPeer = 16
 
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	peers := make([]*PeerConn, numPeers)
 	for i := 0; i < numPeers; i++ {
 		cid := uint64(100 + i)
@@ -1094,7 +1080,7 @@ func TestMasterConn_ReaderNotBlockedBySlowPeer(t *testing.T) {
 
 	// Register a peer but deliberately never Start() it: its reader loop is not
 	// consuming the inbound queue, simulating a stalled consumer.
-	fake := client.peerRuntime.(*fakePeerRuntime)
+	fake := client.router.(*fakeSlaveService)
 	pc := newTestResponderPeer(clusterPeerID, branch, client, log.New())
 	fake.registerPeer(pc)
 
@@ -1139,4 +1125,160 @@ func TestMasterConn_ReaderNotBlockedBySlowPeer(t *testing.T) {
 		t.Fatalf("expected PONG, got opcode 0x%x", resp.Opcode)
 	}
 	_ = pc
+}
+
+// ── Typed outbound wrapper tests ────────────────────────────────────────
+//
+// These verify the connection-layer API surface (opcode, rpc_id, payload
+// round-trip, and stamped Meta) only. They intentionally do not exercise
+// business logic such as when to broadcast or what to construct from shard
+// state.
+
+// TestPeerConn_SendNewBlock verifies the typed SendNewBlock wrapper writes a
+// NEW_BLOCK_MINOR fire-and-forget command with rpc_id 0 and the peer's
+// branch + cluster_peer_id metadata. Python: PeerShardConnection.send_new_block.
+func TestPeerConn_SendNewBlock(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 91
+	const branch uint32 = 0x00010001
+	fake := client.router.(*fakeSlaveService)
+	fake.createPeerConns(clusterPeerID, []uint32{branch})
+	pc := fake.peers[clusterPeerID][branch]
+
+	if err := pc.SendNewBlock(&wire.NewBlockMinorCommand{Block: &wire.RawBytes{}}); err != nil {
+		t.Fatalf("SendNewBlock: %v", err)
+	}
+
+	req := readMasterFrame(t, serverConn)
+	if req.Opcode != byte(wire.CommandOpNewBlockMinor) {
+		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.CommandOpNewBlockMinor, req.Opcode)
+	}
+	if req.RPCID != 0 {
+		t.Fatalf("expected rpc_id 0 for command, got %d", req.RPCID)
+	}
+	if req.Meta.ClusterPeerID != clusterPeerID || req.Meta.Branch != branch {
+		t.Fatalf("meta mismatch: got %+v, want cid=%d branch=0x%x", req.Meta, clusterPeerID, branch)
+	}
+	var out wire.NewBlockMinorCommand
+	if err := serialize.Deserialize(serialize.NewByteBuffer(req.Payload), &out); err != nil {
+		t.Fatalf("deserialize payload: %v", err)
+	}
+}
+
+// TestPeerConn_SendNewMinorBlockHeaderList verifies the typed
+// SendNewMinorBlockHeaderList wrapper writes a NEW_MINOR_BLOCK_HEADER_LIST
+// fire-and-forget command with rpc_id 0 and the peer's branch +
+// cluster_peer_id metadata.
+// Python: PeerShardConnection.broadcast_new_tip (outbound primitive only).
+func TestPeerConn_SendNewMinorBlockHeaderList(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 92
+	const branch uint32 = 0x00010001
+	fake := client.router.(*fakeSlaveService)
+	fake.createPeerConns(clusterPeerID, []uint32{branch})
+	pc := fake.peers[clusterPeerID][branch]
+
+	cmd := &wire.NewMinorBlockHeaderListCommand{
+		RootBlockHeader:      &wire.RawBytes{},
+		MinorBlockHeaderList: []*wire.RawBytes{{}},
+	}
+	if err := pc.SendNewMinorBlockHeaderList(cmd); err != nil {
+		t.Fatalf("SendNewMinorBlockHeaderList: %v", err)
+	}
+
+	req := readMasterFrame(t, serverConn)
+	if req.Opcode != byte(wire.CommandOpNewMinorBlockHeaderList) {
+		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.CommandOpNewMinorBlockHeaderList, req.Opcode)
+	}
+	if req.RPCID != 0 {
+		t.Fatalf("expected rpc_id 0 for command, got %d", req.RPCID)
+	}
+	if req.Meta.ClusterPeerID != clusterPeerID || req.Meta.Branch != branch {
+		t.Fatalf("meta mismatch: got %+v, want cid=%d branch=0x%x", req.Meta, clusterPeerID, branch)
+	}
+	var out wire.NewMinorBlockHeaderListCommand
+	if err := serialize.Deserialize(serialize.NewByteBuffer(req.Payload), &out); err != nil {
+		t.Fatalf("deserialize payload: %v", err)
+	}
+}
+
+// TestPeerConn_SendTransactionList verifies the typed SendTransactionList
+// wrapper writes a NEW_TRANSACTION_LIST fire-and-forget command with rpc_id 0
+// and the peer's branch + cluster_peer_id metadata.
+// Python: PeerShardConnection.broadcast_tx_list.
+func TestPeerConn_SendTransactionList(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 93
+	const branch uint32 = 0x00010001
+	fake := client.router.(*fakeSlaveService)
+	fake.createPeerConns(clusterPeerID, []uint32{branch})
+	pc := fake.peers[clusterPeerID][branch]
+
+	cmd := &wire.NewTransactionListCommand{TransactionList: []*wire.RawBytes{{}}}
+	if err := pc.SendTransactionList(cmd); err != nil {
+		t.Fatalf("SendTransactionList: %v", err)
+	}
+
+	req := readMasterFrame(t, serverConn)
+	if req.Opcode != byte(wire.CommandOpNewTransactionList) {
+		t.Fatalf("expected opcode 0x%x, got 0x%x", wire.CommandOpNewTransactionList, req.Opcode)
+	}
+	if req.RPCID != 0 {
+		t.Fatalf("expected rpc_id 0 for command, got %d", req.RPCID)
+	}
+	if req.Meta.ClusterPeerID != clusterPeerID || req.Meta.Branch != branch {
+		t.Fatalf("meta mismatch: got %+v, want cid=%d branch=0x%x", req.Meta, clusterPeerID, branch)
+	}
+	var out wire.NewTransactionListCommand
+	if err := serialize.Deserialize(serialize.NewByteBuffer(req.Payload), &out); err != nil {
+		t.Fatalf("deserialize payload: %v", err)
+	}
+}
+
+// TestPeerConn_GetMinorBlockList verifies the typed GetMinorBlockList wrapper
+// issues a GET_MINOR_BLOCK_LIST_REQUEST RPC and parses the echoed response,
+// with the peer's branch + cluster_peer_id metadata stamped on the wire.
+// Python: PeerShardConnection.write_rpc_request(GET_MINOR_BLOCK_LIST_REQUEST).
+func TestPeerConn_GetMinorBlockList(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 101
+	const branch uint32 = 0x00010001
+	fake := client.router.(*fakeSlaveService)
+	fake.createPeerConns(clusterPeerID, []uint32{branch})
+	pc := fake.peers[clusterPeerID][branch]
+
+	req := &wire.GetMinorBlockListRequest{MinorBlockHashList: [][wire.HashLength]byte{}}
+
+	go func() {
+		frame := readMasterFrame(t, serverConn)
+		if frame.Meta.ClusterPeerID != clusterPeerID || frame.Meta.Branch != branch {
+			t.Errorf("outbound request meta mismatch: got cid=%d branch=0x%x, want cid=%d branch=0x%x",
+				frame.Meta.ClusterPeerID, frame.Meta.Branch, clusterPeerID, branch)
+		}
+		writeMasterFrame(t, serverConn, &wire.Frame{
+			Meta:    frame.Meta,
+			Opcode:  frame.Opcode + 1,
+			RPCID:   frame.RPCID,
+			Payload: frame.Payload,
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := pc.GetMinorBlockList(ctx, req)
+	if err != nil {
+		t.Fatalf("GetMinorBlockList: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("expected non-nil GetMinorBlockListResponse")
+	}
 }

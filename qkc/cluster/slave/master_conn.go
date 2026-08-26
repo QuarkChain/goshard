@@ -61,8 +61,8 @@ type MasterHandler interface {
 	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
 }
 
-// MasterConnConfig configures a MasterConn. Conn and Handler are required;
-// Logger defaults to log.Root().
+// MasterConnConfig configures a MasterConn. Conn, Handler and Router are
+// required; Logger defaults to log.Root().
 type MasterConnConfig struct {
 	// Conn is the accepted TCP connection from the master. The slave never
 	// dials the master (py: MasterServer connects, SlaveServer listens).
@@ -82,6 +82,12 @@ type MasterConnConfig struct {
 	// here; the runtime/service layer implements them.
 	Handler MasterHandler
 
+	// Router resolves virtual peer frames to their PeerConn. It is the minimal
+	// routing capability required for forwarding frames received from the master.
+	// The registry and lookup implementation are owned by the upper runtime/service
+	// layer and are not part of the communication layer.
+	Router PeerRouter
+
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger
 }
@@ -91,13 +97,19 @@ type MasterConnConfig struct {
 // 12-byte ClusterMetadata framing.
 //
 // MasterConn is the slave's single connection to the master: it dispatches
-// master commands, delegating business operations to MasterHandler.
+// master commands (business operations delegated to MasterHandler) and routes
+// virtual peer frames through PeerRouter.
 type MasterConn struct {
 	*conn.BaseConn
 
 	handler              MasterHandler
 	localID              []byte
 	localFullShardIDList []uint32
+
+	// router resolves virtual peer frames to their PeerConn (Python:
+	// MasterConnection.get_connection_to_forward, slave.py:116-148). Never nil
+	// on a started MasterConn.
+	router PeerRouter
 }
 
 // NewMasterConn wraps an accepted net.Conn from the master.
@@ -109,6 +121,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
+	if cfg.Router == nil {
+		return nil, errors.New("master peer router must not be nil")
+	}
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
 	}
@@ -117,7 +132,14 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
+		router:               cfg.Router,
 	}
+
+	// Forwarder: route cluster_peer_id != 0 frames to virtual PeerConns.
+	// routeFrame returns false for master-local traffic so MasterConn handles
+	// it normally. The forwarder runs on the reader goroutine; it enqueues
+	// frames without blocking (the PeerConn inbound queue is unbounded).
+	forwarder := mc.routeFrame
 
 	mc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport: conn.NewTCPTransport(cfg.Conn, readFrame, wire.WriteFrame),
@@ -204,9 +226,8 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		NonRPCOps: map[byte]struct{}{
 			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): {},
 		},
-		// Forwarder stays nil: routing peer traffic (cluster_peer_id != 0)
-		// to virtual PeerConns is PR6 (Dispatcher as the frame consumer).
-		Logger: cfg.Logger,
+		Forwarder: forwarder,
+		Logger:    cfg.Logger,
 	})
 	return mc, nil
 }
@@ -273,6 +294,29 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 		ID:              append([]byte(nil), mc.localID...),
 		FullShardIDList: append([]uint32(nil), mc.localFullShardIDList...),
 	}, nil
+}
+
+// ── Frame routing ───────────────────────────────────────────────────────
+
+// routeFrame is the forwarder installed on BaseConn: cluster_peer_id == 0 is
+// master-local (dispatch normally); peer traffic is routed through the router
+// and handed to the matching PeerConn. A LookupPeer miss is Python's
+// NULL_CONNECTION semantics (slave.py:131-146): the frame is consumed and
+// dropped, no new error is produced.
+func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
+	if frame.Meta.ClusterPeerID == 0 {
+		return false
+	}
+
+	pc := mc.router.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
+	if pc == nil {
+		mc.Logger().Warn("dropping frame for unknown virtual peer connection",
+			"cluster_peer_id", frame.Meta.ClusterPeerID, "branch", frame.Meta.Branch)
+		return true
+	}
+
+	pc.HandleFrame(frame)
+	return true
 }
 
 // ── Inbound handler dispatch (delegated to MasterHandler) ───────────────
