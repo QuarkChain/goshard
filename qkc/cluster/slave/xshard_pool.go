@@ -10,13 +10,10 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
-
-const defaultDialTimeout = 10 * time.Second
 
 // XshardPool manages slave-to-slave xshard connections, indexed by full shard
 // ID. Connections and slave IDs are add-only: a closed connection stays
@@ -66,7 +63,9 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 	}
 
 	addr := net.JoinHostPort(string(slaveInfo.Host), strconv.Itoa(int(slaveInfo.Port)))
-	nc, err := net.DialTimeout("tcp", addr, defaultDialTimeout)
+	// DialContext honors ctx cancellation while Dialer.Timeout still bounds the
+	// dial duration when ctx is never cancelled (keeps defaultDialTimeout's role).
+	nc, err := (&net.Dialer{Timeout: defaultDialTimeout}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial xshard slave %s: %w", addr, err)
 	}
@@ -130,6 +129,10 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 }
 
 // HandleInbound takes ownership of an accepted xshard connection.
+//
+// waitUntilPingReceived blocks until the peer's first PING, connection close,
+// or the handshake timeout. It returns false if the connection closes or the
+// handshake times out.
 func (p *XshardPool) HandleInbound(nc net.Conn) {
 	// Inbound identity arrives with the first PING (py:845-846 pass None).
 	conn, err := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, nil, nil, p.handler, p.log)

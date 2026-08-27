@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
@@ -40,10 +41,10 @@ type xshardConn struct {
 	localID              []byte // this slave's identity, sent in PING/PONG
 	localFullShardIDList []uint32
 
-	stateMu sync.RWMutex // guards peerID / peerFullShardIDList
-	// Peer identity: injected at construction for outbound connections
-	// (master-advertised SlaveInfo, mirroring Python's SlaveConnection
-	// constructor); recorded from the first PING for inbound connections.
+	// Peer identity. Immutable: injected at construction for outbound
+	// connections (master-advertised SlaveInfo), and for inbound set exactly
+	// once by the first PING inside pingOnce.Do. Read via remoteID()/... with
+	// no lock; pingOnce close(pingReceived) publishes the initialization.
 	peerID              []byte
 	peerFullShardIDList []uint32
 	// pingReceived is closed on the first PING (py: ping_received_event);
@@ -90,27 +91,40 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 	return xc, nil
 }
 
-// handlePing performs slave identity handshake.
+// handlePing performs the slave identity handshake.
+//
+// peer metadata is initialized at most once by pingOnce and is immutable
+// afterwards. Outbound connections have metadata pre-filled at construction;
+// inbound connections initialize it from the first PING with a non-empty shard
+// list. An empty inbound PING does not publish metadata or complete the
+// handshake and causes the connection to be rejected below. The Once
+// synchronization makes the published metadata safe for subsequent lock-free
+// reads.
 func (x *xshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 
-	x.stateMu.Lock()
-	// Identity is written only while unset (py: `if not self.id`): outbound
-	// is pre-filled at construction so a late PING cannot overwrite it, and
-	// an empty id does not lock identity.
-	if len(x.peerID) == 0 {
-		x.peerID = append([]byte(nil), ping.ID...)
-		x.peerFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
-	}
-	emptyShardList := len(x.peerFullShardIDList) == 0
-	x.stateMu.Unlock()
+	x.pingOnce.Do(func() {
+		// Outbound connections already have peer metadata from construction.
+		// Inbound connections initialize it from the first valid PING.
+		if len(x.peerID) == 0 {
+			if len(ping.FullShardIDList) == 0 {
+				// Do not publish an invalid inbound identity or complete the
+				// handshake. The handler error below will close the connection.
+				return
+			}
 
-	// A handler error closes the connection.
-	if emptyShardList {
+			x.peerID = append([]byte(nil), ping.ID...)
+			x.peerFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
+		}
+
+		close(x.pingReceived)
+	})
+
+	// sync.Once.Do provides the synchronization boundary for inbound
+	// metadata initialization. After Do returns, peer metadata is immutable.
+	if len(x.peerFullShardIDList) == 0 {
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
-
-	x.pingOnce.Do(func() { close(x.pingReceived) })
 
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), x.localID...),
@@ -128,25 +142,32 @@ func (x *xshardConn) handleBatchAddXshardTxList(req any) (any, error) {
 	return x.handler.BatchAddXshardTxList(req.(*wire.BatchAddXshardTxListRequest))
 }
 
+// remoteID returns a copy of the peer's id. Metadata is immutable after its
+// one-time publication (construction for outbound; the first PING inside
+// pingOnce for inbound), so the read needs no lock.
 func (x *xshardConn) remoteID() []byte {
-	x.stateMu.RLock()
-	defer x.stateMu.RUnlock()
 	return append([]byte(nil), x.peerID...)
 }
 
 func (x *xshardConn) remoteFullShardIDList() []uint32 {
-	x.stateMu.RLock()
-	defer x.stateMu.RUnlock()
 	return append([]uint32(nil), x.peerFullShardIDList...)
 }
 
-// waitUntilPingReceived blocks until the first PING or connection close,
-// returning false on close.
+// waitUntilPingReceived blocks until the first PING, connection close, or
+// handshake timeout, returning false on close or timeout.
 func (x *xshardConn) waitUntilPingReceived() bool {
+	timer := time.NewTimer(xshardHandshakeTimeout)
+	defer timer.Stop()
+
 	select {
 	case <-x.pingReceived:
 		return !x.IsClosed()
 	case <-x.WaitUntilClosed():
+		return false
+	case <-timer.C:
+		// Close is non-blocking; it shuts the connection down and drains
+		// any pending RPCs, so the peer cannot hold resources hostage.
+		x.Close()
 		return false
 	}
 }

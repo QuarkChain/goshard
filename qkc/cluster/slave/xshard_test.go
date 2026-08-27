@@ -3,7 +3,9 @@
 package slave
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -331,8 +333,16 @@ func TestXshardConn_RejectEmptyShardList(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error due to connection close, got nil")
 	}
-	if string(server.remoteID()) != "bad-slave" {
-		t.Fatalf("expected remote ID 'bad-slave', got %v", server.remoteID())
+	// An illegal empty first PING publishes nothing (Python parity for the
+	// observable protocol): the handshake never completes and no identity is
+	// recorded, so a getter can never race a partial initialization.
+	if got := server.remoteID(); len(got) != 0 {
+		t.Fatalf("expected no recorded identity for empty shard list, got %q", got)
+	}
+	select {
+	case <-server.pingReceived:
+		t.Fatal("empty shard list must not complete the handshake")
+	default:
 	}
 }
 
@@ -404,6 +414,74 @@ func TestXshardConn_AcceptEmptyPingID(t *testing.T) {
 	}
 	if server.IsClosed() {
 		t.Fatal("server connection should remain open after empty-ID PING")
+	}
+}
+
+// TestXshardConn_ConcurrentPingPublishesOnce drives several PINGs through
+// BaseConn's per-request goroutine dispatch at once, verifying the handshake
+// publishes peer metadata exactly once (via pingOnce) and that the result is
+// immutable afterward. Run under -race this guards the lock-free peer metadata
+// read model against the concurrent handler execution.
+func TestXshardConn_ConcurrentPingPublishesOnce(t *testing.T) {
+	client, server, cleanup := newTestConnPair(t)
+	defer cleanup()
+
+	server.Start()
+	client.Start()
+
+	const count = 8
+	ids := make([][]byte, count)
+	shards := make([][]uint32, count)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		i := i
+		ids[i] = []byte(fmt.Sprintf("peer-%d", i))
+		shards[i] = []uint32{uint32(0x00010000 + i)}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			payload, err := serialize.SerializeToBytes(&wire.PingRequest{
+				ID:              ids[i],
+				FullShardIDList: shards[i],
+			})
+			if err != nil {
+				t.Errorf("serialize ping %d: %v", i, err)
+				return
+			}
+			if _, err := client.SendRPC(ctx, byte(wire.ClusterOpPing), payload); err != nil {
+				t.Errorf("ping %d: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Exactly one of the concurrent PINGs records its identity.
+	found := 0
+	for i := 0; i < count; i++ {
+		if bytes.Equal(server.remoteID(), ids[i]) {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly one recorded identity, got %d", found)
+	}
+
+	// After publication the metadata is immutable across reads.
+	firstID := server.remoteID()
+	firstShards := server.remoteFullShardIDList()
+	if len(firstShards) != 1 {
+		t.Fatalf("expected a single shard, got %v", firstShards)
+	}
+	for i := 0; i < 100; i++ {
+		if !bytes.Equal(server.remoteID(), firstID) {
+			t.Fatal("remote ID changed after publication")
+		}
+		if len(server.remoteFullShardIDList()) != 1 || server.remoteFullShardIDList()[0] != firstShards[0] {
+			t.Fatal("remote shard list changed after publication")
+		}
 	}
 }
 
