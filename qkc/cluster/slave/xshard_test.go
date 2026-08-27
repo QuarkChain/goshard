@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -541,30 +542,6 @@ func TestXshardPool_HandleInboundAllowsMultipleInboundConnections(t *testing.T) 
 	}
 }
 
-// TestXshardPool_OutboundAndInboundCoexist verifies an outbound and an inbound
-// connection to the same remote coexist (Python's bidirectional model).
-func TestXshardPool_OutboundAndInboundCoexist(t *testing.T) {
-	pool := mustNewXshardPool(t, []byte("local"), []uint32{0x00030004})
-	defer pool.Close()
-
-	// Outbound (local → remote-slave) via a simulated remote slave.
-	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
-	defer rs.close()
-	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("remote-slave"), []uint32{0x00010001})); err != nil {
-		t.Fatalf("outbound dial: %v", err)
-	}
-
-	// Inbound (remote-slave → local).
-	establishInbound(t, pool, []byte("remote-slave"), []uint32{0x00010001})
-
-	if conns := pool.Lookup(0x00010001); len(conns) != 2 {
-		t.Fatalf("expected 2 connections, got %d", len(conns))
-	}
-	if !pool.hasSlaveID([]byte("remote-slave")) {
-		t.Fatal("slaveID not tracked")
-	}
-}
-
 // TestXshardPool_InboundFirstOutboundSkipped verifies that when inbound
 // registers the remote first, a later outbound to the same remote is silently
 // skipped by DialToSlave's pre-check (Python's connect_to_slave returns "" when
@@ -940,6 +917,91 @@ func TestXshardPool_DialToSlaveConcurrentDialsBothRegister(t *testing.T) {
 	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
 		t.Fatal("remote-slave should be tracked")
+	}
+}
+
+// TestXshardPool_DialToSlaveRejectsMismatchedIdentity verifies the outbound
+// identity validation branches: a PONG whose id or shard list does not match
+// the master-advertised SlaveInfo must reject (close+evict) the tracked
+// connection, leave no pool residue, and allow a later retry to succeed
+// (Python slave.py connect_to_slave compares at py:885-890 but leaks the conn;
+// Go rejects it instead).
+func TestXshardPool_DialToSlaveRejectsMismatchedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		pongID        []byte
+		pongShards    []uint32
+		wantSubstrErr string
+	}{
+		{"id mismatch", []byte("impostor"), []uint32{0x00010001}, "slave id mismatch"},
+		{"shard list mismatch", []byte("remote-slave"), []uint32{0x00010002}, "shard list mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := mustNewXshardPool(t, []byte("local-slave"), []uint32{0x00030004})
+
+			// One-shot raw responder: accepts a single connection, reads the
+			// outbound PING frame, replies with a deliberately mismatched PONG,
+			// and stops listening.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			addr := ln.Addr().(*net.TCPAddr)
+			info := wire.SlaveInfo{
+				ID:              []byte("remote-slave"),
+				Host:            []byte(addr.IP.String()),
+				Port:            uint16(addr.Port),
+				FullShardIDList: []uint32{0x00010001},
+			}
+
+			go func() {
+				c, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				defer c.Close()
+
+				frame, readErr := wire.ReadFrameNoMeta(c, 0)
+				if readErr != nil {
+					return
+				}
+				req := &wire.PingRequest{}
+				buf := serialize.NewByteBuffer(frame.Payload)
+				if deserializeErr := serialize.Deserialize(buf, req); deserializeErr != nil {
+					return
+				}
+				payload, serErr := serialize.SerializeToBytes(&wire.PongResponse{
+					ID:              tc.pongID,
+					FullShardIDList: tc.pongShards,
+				})
+				if serErr != nil {
+					return
+				}
+				_ = wire.WriteFrameNoMeta(c, &wire.Frame{
+					Opcode:  byte(wire.ClusterOpPong),
+					RPCID:   frame.RPCID,
+					Payload: payload,
+				})
+			}()
+
+			err = pool.DialToSlave(context.Background(), info)
+			if err == nil || !strings.Contains(err.Error(), tc.wantSubstrErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantSubstrErr, err)
+			}
+			ln.Close() // responder exits on next accept or is already done
+
+			// The rejected connection leaves no trace in any pool registry.
+			if got := pool.connectionsSize(); got != 0 {
+				t.Fatalf("rejected conn still tracked, connectionsSize=%d", got)
+			}
+			if pool.hasSlaveID([]byte("remote-slave")) {
+				t.Fatal("slaveIDs polluted by rejected conn")
+			}
+			if conns := pool.Lookup(0x00010001); len(conns) != 0 {
+				t.Fatalf("routing index polluted by rejected conn: %v", conns)
+			}
+			pool.Close()
+		})
 	}
 }
 

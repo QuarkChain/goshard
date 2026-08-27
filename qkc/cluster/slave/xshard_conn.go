@@ -54,9 +54,8 @@ type XshardConn struct {
 	pingOnce            sync.Once     // keeps the close exactly-once under concurrent PINGs
 }
 
-// newXshardConn creates a slave-to-slave connection. Outbound callers inject
-// the master-advertised peer identity (peerID/peerShardList); inbound callers
-// pass nil and identity is recorded from the first PING.
+// newXshardConn creates a slave-to-slave connection. Inbound callers pass nil
+// peer identity; it is then recorded from the first PING.
 func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, peerID []byte, peerShardList []uint32, handler XshardHandler, logger log.Logger) (*XshardConn, error) {
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
@@ -152,11 +151,9 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 
 	x.pingOnce.Do(func() {
-		// Outbound conns carry peer metadata from construction; inbound
-		// records it here from the first valid PING.
 		if len(x.peerID) == 0 {
 			if len(ping.FullShardIDList) == 0 {
-				// Publish nothing; the rejection below closes the connection.
+				// An invalid inbound identity must not complete the handshake.
 				return
 			}
 
@@ -199,8 +196,6 @@ func (x *XshardConn) waitUntilPingReceived() bool {
 	case <-x.WaitUntilClosed():
 		return false
 	case <-timer.C:
-		// Close wakes pending RPCs instead of blocking, so a silent peer
-		// cannot hold resources hostage.
 		x.Close()
 		return false
 	}
@@ -228,8 +223,7 @@ func (x *XshardConn) sendPing(ctx context.Context) ([]byte, []uint32, error) {
 	return pong.ID, pong.FullShardIDList, nil
 }
 
-// sendRPC serializes req before delegating to BaseConn.SendRPC, which stays
-// payload-oriented.
+// sendRPC serializes req and delegates to BaseConn.SendRPC.
 func (x *XshardConn) sendRPC(ctx context.Context, opcode byte, req any) (any, error) {
 	payload, err := serialize.SerializeToBytes(req)
 	if err != nil {
