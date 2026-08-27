@@ -9,13 +9,10 @@
 package types
 
 import (
-	"crypto/ecdsa"
 	"math/big"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
@@ -51,13 +48,6 @@ func (h *RootBlockHeader) SealHash() common.Hash {
 	return serHash(*h, map[string]bool{"Signature": true, "MixDigest": true, "Nonce": true})
 }
 
-// Size returns the approximate memory used by all internal contents. It is used
-// to approximate and limit the memory consumption of various caches.
-func (h *RootBlockHeader) Size() common.StorageSize {
-	return common.StorageSize(unsafe.Sizeof(*h)) + common.StorageSize(len(h.Signature)) +
-		common.StorageSize(len(h.Extra)+(h.Difficulty.BitLen())/8)
-}
-
 func (h *RootBlockHeader) GetParentHash() common.Hash   { return h.ParentHash }
 func (h *RootBlockHeader) GetCoinbase() account.Address { return h.Coinbase }
 
@@ -77,17 +67,6 @@ func (b *RootBlockHeader) GetCoinbaseAmount() *qkcCommon.TokenBalances {
 		return qkcCommon.NewTokenBalancesWithMap(b.CoinbaseAmount.GetBalanceMap())
 	}
 	return qkcCommon.NewEmptyTokenBalances()
-}
-
-func (b *RootBlockHeader) VerifySignature(key ecdsa.PublicKey) bool {
-
-	isSigned := crypto.VerifySignature(crypto.CompressPubkey(&key), b.SealHash().Bytes(), b.Signature[:64])
-	if isSigned {
-		return true
-	} else {
-		return false
-	}
-
 }
 
 func (h *RootBlockHeader) GetMixDigest() common.Hash { return h.MixDigest }
@@ -185,15 +164,17 @@ func (b *RootBlock) Deserialize(bb *serialize.ByteBuffer) error {
 // Serialize serialize the QKC root block.
 func (b *RootBlock) Serialize(w *[]byte) error {
 	offset := len(*w)
-	err := serialize.Serialize(w, extrootblock{
+	if err := serialize.Serialize(w, extrootblock{
 		Header:            b.header,
 		MinorBlockHeaders: b.minorBlockHeaders,
 		Trackingdata:      b.trackingdata,
-	})
+	}); err != nil {
+		return err
+	}
 
 	size := common.StorageSize(len(*w) - offset)
 	b.size.Store(&size)
-	return err
+	return nil
 }
 
 func (b *RootBlock) MinorBlockHeaders() MinorBlockHeaders {

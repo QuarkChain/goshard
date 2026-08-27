@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
@@ -179,34 +178,6 @@ func TestDataSize(t *testing.T) {
 	check("RootBlockHeader", len(rootBlockHeaderBytes), 249)
 	check("MinorBlockHeader", len(minorBlockHeaderBytes), 479)
 	check("MinorBlockMeta", len(minorBlockMetaBytes), 216)
-}
-
-func TestRootBlockHeaderSignature(t *testing.T) {
-	check := func(f string, got, want interface{}) {
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s mismatch: got %v, want %v", f, got, want)
-		}
-	}
-	checkErr := func(f string, got, want interface{}) {
-		if reflect.DeepEqual(got, want) {
-			t.Errorf("%s mismatch: got %v, want %v", f, got, want)
-		}
-	}
-	privateKey, err := crypto.GenerateKey()
-	if err != nil {
-		t.Errorf("GenerateKey err:%v", err)
-	}
-
-	var rootBlockHeader RootBlockHeader
-	check("rootBlockHeader Signature ", rootBlockHeader.Signature, [65]byte{})
-	checkErr("", rootBlockHeader.VerifySignature(privateKey.PublicKey), true)
-	signature, err := crypto.Sign(rootBlockHeader.SealHash().Bytes(), privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	copy(rootBlockHeader.Signature[:], signature)
-	check("", rootBlockHeader.VerifySignature(privateKey.PublicKey), true)
-
 }
 
 /*

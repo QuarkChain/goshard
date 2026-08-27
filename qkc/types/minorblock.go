@@ -2,24 +2,17 @@
 
 // Minor blocks follow pyquarkchain-compatible QKC wire encoding.
 // Modified from go-ethereum under GNU Lesser General Public License
-// Adaptation: comtypes.Header.Time is uint64 in modern geth (was *big.Int).
 package types
 
 import (
 	"math/big"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
-	comtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/params"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
-)
-
-var (
-	EmptyUncleHash = rlpHash([]*comtypes.Header(nil))
 )
 
 // MinorBlockHeaderList represents a minor block header in the QuarkChain.
@@ -68,13 +61,6 @@ func (h *MinorBlockHeader) SealHash() common.Hash {
 	return serHash(*h, excludeList)
 }
 
-// Size returns the approximate memory used by all internal contents. It is used
-// to approximate and limit the memory consumption of various caches.
-func (h *MinorBlockHeader) Size() common.StorageSize {
-	return common.StorageSize(unsafe.Sizeof(*h)) +
-		common.StorageSize(len(h.Extra)+(h.Difficulty.BitLen())/8)
-}
-
 func (h *MinorBlockHeader) GetParentHash() common.Hash        { return h.ParentHash }
 func (h *MinorBlockHeader) GetPrevRootBlockHash() common.Hash { return h.PrevRootBlockHash }
 func (h *MinorBlockHeader) GetCoinbase() account.Address      { return h.Coinbase }
@@ -103,10 +89,9 @@ func (h *MinorBlockHeader) GetCoinbaseAmount() *qkcCommon.TokenBalances {
 	return qkcCommon.NewEmptyTokenBalances()
 }
 
-func (h *MinorBlockHeader) SetExtra(data []byte)              { h.Extra = common.CopyBytes(data) }
-func (h *MinorBlockHeader) SetDifficulty(difficulty *big.Int) { h.Difficulty = difficulty }
-func (h *MinorBlockHeader) SetNonce(nonce uint64)             { h.Nonce = nonce }
-func (h *MinorBlockHeader) SetCoinbase(addr account.Address)  { h.Coinbase = addr }
+func (h *MinorBlockHeader) SetExtra(data []byte)             { h.Extra = common.CopyBytes(data) }
+func (h *MinorBlockHeader) SetNonce(nonce uint64)            { h.Nonce = nonce }
+func (h *MinorBlockHeader) SetCoinbase(addr account.Address) { h.Coinbase = addr }
 
 // MinorBlockHeaders is a MinorBlockHeaderList slice type for basic sorting.
 type MinorBlockHeaders []*MinorBlockHeader
@@ -270,16 +255,18 @@ func (b *MinorBlock) Deserialize(bb *serialize.ByteBuffer) error {
 // Serialize serialize the QKC minor block.
 func (b *MinorBlock) Serialize(w *[]byte) error {
 	offset := len(*w)
-	err := serialize.Serialize(w, extminorblock{
+	if err := serialize.Serialize(w, extminorblock{
 		Header:       b.header,
 		Meta:         b.meta,
 		Txs:          b.transactions,
 		Trackingdata: b.trackingdata,
-	})
+	}); err != nil {
+		return err
+	}
 
 	size := common.StorageSize(len(*w) - offset)
 	b.size.Store(&size)
-	return err
+	return nil
 }
 
 func (b *MinorBlock) Transactions() Transactions { return copyTransactions(b.transactions) }
@@ -501,14 +488,14 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 		Number:            h.Number() + 1,
 		Branch:            h.Branch(),
 		Coinbase:          *address,
-		CoinbaseAmount:    coinbaseAmount,
+		CoinbaseAmount:    coinbaseAmount.Copy(),
 		ParentHash:        h.Hash(),
 		PrevRootBlockHash: *prevRootHash,
-		GasLimit:          &serialize.Uint256{Value: gasLimit},
+		GasLimit:          &serialize.Uint256{Value: new(big.Int).Set(gasLimit)},
 		Time:              *createTime,
-		Difficulty:        difficulty,
+		Difficulty:        new(big.Int).Set(difficulty),
 		Nonce:             *nonce,
-		Extra:             extraData,
+		Extra:             common.CopyBytes(extraData),
 	}
 	var cursor *XShardTxCursorInfo
 	if h.meta.XShardTxCursorInfo != nil {
@@ -553,6 +540,8 @@ func getDefaultMinorBlockHeader() *MinorBlockHeader {
 
 func getDefaultMinorBlockMeta() *MinorBlockMeta {
 	return &MinorBlockMeta{
-		XShardGasLimit: &serialize.Uint256{Value: params.DefaultBlockGasLimit},
+		GasUsed:           &serialize.Uint256{Value: new(big.Int)},
+		CrossShardGasUsed: &serialize.Uint256{Value: new(big.Int)},
+		XShardGasLimit:    &serialize.Uint256{Value: params.DefaultBlockGasLimit},
 	}
 }

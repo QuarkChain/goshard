@@ -233,14 +233,44 @@ func TestMinorBlockMutableDataIsCopied(t *testing.T) {
 	}
 }
 
-func TestCreateBlockToAppendCopiesCursor(t *testing.T) {
+func TestCreateBlockToAppendCopiesInputs(t *testing.T) {
 	header, meta := testMinorBlockHeader()
 	parent := NewMinorBlockWithHeader(header, meta)
-	child := parent.CreateBlockToAppend(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	difficulty := big.NewInt(2)
+	gasLimit := big.NewInt(3)
+	extraData := []byte{4}
+	coinbaseAmount := qkcCommon.NewEmptyTokenBalances()
+	coinbaseAmount.SetValue(uint256.NewInt(5), 1)
+	child := parent.CreateBlockToAppend(nil, difficulty, nil, nil, gasLimit, nil, extraData, coinbaseAmount, nil)
+	wantHash := child.Hash()
+
+	difficulty.SetInt64(6)
+	gasLimit.SetInt64(7)
+	extraData[0] = 8
+	coinbaseAmount.SetValue(uint256.NewInt(9), 1)
+	if child.Difficulty().Cmp(big.NewInt(2)) != 0 || child.GasLimit().Cmp(big.NewInt(3)) != 0 {
+		t.Fatal("child block retained caller-owned big integers")
+	}
+	if got := child.Extra()[0]; got != 4 {
+		t.Fatalf("child block retained caller-owned extra data: got %d, want 4", got)
+	}
+	if got := child.CoinbaseAmount().GetBalanceMap()[1]; got.Cmp(uint256.NewInt(5)) != 0 {
+		t.Fatalf("child block retained caller-owned coinbase amount: got %v, want 5", got)
+	}
+	if child.Hash() != wantHash || child.Header().Hash() != wantHash {
+		t.Fatal("caller input mutation changed the child header")
+	}
 
 	child.meta.XShardTxCursorInfo.RootBlockHeight = 9
 	if got, want := parent.meta.XShardTxCursorInfo.RootBlockHeight, uint64(1); got != want {
 		t.Fatalf("child block cursor mutated parent: got height %d, want %d", got, want)
+	}
+}
+
+func TestEmptyMinorBlockGasUsed(t *testing.T) {
+	block := GetEmptyMinorBlock()
+	if block.GasUsed().Sign() != 0 || block.CrossShardGasUsed().Sign() != 0 {
+		t.Fatalf("empty block gas used = %v/%v, want 0/0", block.GasUsed(), block.CrossShardGasUsed())
 	}
 }
 
