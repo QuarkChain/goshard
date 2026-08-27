@@ -32,7 +32,7 @@ func (p *XshardPool) outboundSize() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	seen := make(map[*xshardConn]struct{})
+	seen := make(map[*XshardConn]struct{})
 	for _, conns := range p.conns {
 		for _, conn := range conns {
 			seen[conn] = struct{}{}
@@ -75,14 +75,14 @@ func mustNewXshardPool(t *testing.T, selfID []byte, shards []uint32) *XshardPool
 
 // ── TCP test pair helpers ─────────────────────────────────────────────────────
 
-// newTestConnPair creates a pair of xshardConns connected over a local TCP
+// newTestConnPair creates a pair of XshardConn connected over a local TCP
 // socket. The caller is responsible for calling cleanup.
-func newTestConnPair(t *testing.T) (client, server *xshardConn, cleanup func()) {
+func newTestConnPair(t *testing.T) (client, server *XshardConn, cleanup func()) {
 	t.Helper()
 	return newTestConnPairWithIdentity(t, []byte("client-slave"), []uint32{0x00010001}, []byte("server-slave"), []uint32{0x00030004})
 }
 
-func newTestConnPairWithIdentity(t *testing.T, clientID []byte, clientShards []uint32, serverID []byte, serverShards []uint32) (client, server *xshardConn, cleanup func()) {
+func newTestConnPairWithIdentity(t *testing.T, clientID []byte, clientShards []uint32, serverID []byte, serverShards []uint32) (client, server *XshardConn, cleanup func()) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -191,7 +191,7 @@ func establishInbound(t *testing.T, pool *XshardPool, remoteID []byte, remoteSha
 	client.Close()
 }
 
-// ── xshardConn layer tests ────────────────────────────────────────────────────
+// ── XshardConn layer tests ───────────────────────────────────────────────────
 
 func TestXshardConn_RPCRoundTrip(t *testing.T) {
 	client, server, cleanup := newTestConnPair(t)
@@ -232,11 +232,11 @@ func TestXshardConn_RPCRoundTrip(t *testing.T) {
 	if !server.waitUntilPingReceived() {
 		t.Fatal("server did not receive ping")
 	}
-	if string(server.remoteID()) != string(clientID) {
-		t.Fatalf("server remote id mismatch: got %s", server.remoteID())
+	if string(server.RemoteID()) != string(clientID) {
+		t.Fatalf("server remote id mismatch: got %s", server.RemoteID())
 	}
-	if len(server.remoteFullShardIDList()) != len(clientShards) {
-		t.Fatalf("server remote shard list mismatch: got %v", server.remoteFullShardIDList())
+	if len(server.RemoteFullShardIDList()) != len(clientShards) {
+		t.Fatalf("server remote shard list mismatch: got %v", server.RemoteFullShardIDList())
 	}
 }
 
@@ -251,7 +251,7 @@ func TestXshardConn_XshardTxListServedByHandler(t *testing.T) {
 	txList := wire.RawBytes{}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := client.sendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{
+	if err := client.SendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{
 		Branch: 1,
 		TxList: &txList,
 	}); err != nil {
@@ -336,7 +336,7 @@ func TestXshardConn_RejectEmptyShardList(t *testing.T) {
 	// An illegal empty first PING publishes nothing (Python parity for the
 	// observable protocol): the handshake never completes and no identity is
 	// recorded, so a getter can never race a partial initialization.
-	if got := server.remoteID(); len(got) != 0 {
+	if got := server.RemoteID(); len(got) != 0 {
 		t.Fatalf("expected no recorded identity for empty shard list, got %q", got)
 	}
 	select {
@@ -366,8 +366,8 @@ func TestXshardConn_RecordPingOnlyOnce(t *testing.T) {
 		t.Fatalf("first ping failed: %v", err)
 	}
 
-	firstID := server.remoteID()
-	firstShards := server.remoteFullShardIDList()
+	firstID := server.RemoteID()
+	firstShards := server.RemoteFullShardIDList()
 
 	ping2, _ := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("client2"),
@@ -377,11 +377,11 @@ func TestXshardConn_RecordPingOnlyOnce(t *testing.T) {
 		t.Fatalf("second ping failed: %v", err)
 	}
 
-	if string(server.remoteID()) != string(firstID) {
-		t.Fatalf("remote ID changed: got %s, expected %s", server.remoteID(), firstID)
+	if string(server.RemoteID()) != string(firstID) {
+		t.Fatalf("remote ID changed: got %s, expected %s", server.RemoteID(), firstID)
 	}
-	if len(server.remoteFullShardIDList()) != len(firstShards) {
-		t.Fatalf("remote shard list changed: got %v, expected %v", server.remoteFullShardIDList(), firstShards)
+	if len(server.RemoteFullShardIDList()) != len(firstShards) {
+		t.Fatalf("remote shard list changed: got %v, expected %v", server.RemoteFullShardIDList(), firstShards)
 	}
 }
 
@@ -409,8 +409,8 @@ func TestXshardConn_AcceptEmptyPingID(t *testing.T) {
 	if _, err = client.SendRPC(ctx, byte(wire.ClusterOpPing), pingPayload); err != nil {
 		t.Fatalf("expected PING with empty ID to be accepted, got %v", err)
 	}
-	if len(server.remoteID()) != 0 {
-		t.Fatalf("expected empty remote ID, got %s", server.remoteID())
+	if len(server.RemoteID()) != 0 {
+		t.Fatalf("expected empty remote ID, got %s", server.RemoteID())
 	}
 	if server.IsClosed() {
 		t.Fatal("server connection should remain open after empty-ID PING")
@@ -461,7 +461,7 @@ func TestXshardConn_ConcurrentPingPublishesOnce(t *testing.T) {
 	// Exactly one of the concurrent PINGs records its identity.
 	found := 0
 	for i := 0; i < count; i++ {
-		if bytes.Equal(server.remoteID(), ids[i]) {
+		if bytes.Equal(server.RemoteID(), ids[i]) {
 			found++
 		}
 	}
@@ -470,16 +470,16 @@ func TestXshardConn_ConcurrentPingPublishesOnce(t *testing.T) {
 	}
 
 	// After publication the metadata is immutable across reads.
-	firstID := server.remoteID()
-	firstShards := server.remoteFullShardIDList()
+	firstID := server.RemoteID()
+	firstShards := server.RemoteFullShardIDList()
 	if len(firstShards) != 1 {
 		t.Fatalf("expected a single shard, got %v", firstShards)
 	}
 	for i := 0; i < 100; i++ {
-		if !bytes.Equal(server.remoteID(), firstID) {
+		if !bytes.Equal(server.RemoteID(), firstID) {
 			t.Fatal("remote ID changed after publication")
 		}
-		if len(server.remoteFullShardIDList()) != 1 || server.remoteFullShardIDList()[0] != firstShards[0] {
+		if len(server.RemoteFullShardIDList()) != 1 || server.RemoteFullShardIDList()[0] != firstShards[0] {
 			t.Fatal("remote shard list changed after publication")
 		}
 	}
@@ -501,9 +501,9 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 	}
 
 	// Grab the indexed outbound connection and close it directly.
-	var target *xshardConn
+	var target *XshardConn
 	for _, shardID := range []uint32{0x00030004, 0x00030005} {
-		conns := pool.get(shardID)
+		conns := pool.Lookup(shardID)
 		if len(conns) != 1 {
 			t.Fatalf("expected 1 conn for shard 0x%x, got %d", shardID, len(conns))
 		}
@@ -512,7 +512,7 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 	target.Close()
 
 	for _, shardID := range []uint32{0x00030004, 0x00030005} {
-		if conns := pool.get(shardID); len(conns) != 1 || conns[0] != target {
+		if conns := pool.Lookup(shardID); len(conns) != 1 || conns[0] != target {
 			t.Fatalf("route 0x%x no longer contains the closed connection: %v", shardID, conns)
 		}
 	}
@@ -533,7 +533,7 @@ func TestXshardPool_HandleInboundAllowsMultipleInboundConnections(t *testing.T) 
 	establishInbound(t, pool, []byte("same-slave"), []uint32{0x00010001})
 	establishInbound(t, pool, []byte("same-slave"), []uint32{0x00010001})
 
-	if conns := pool.get(0x00010001); len(conns) != 2 {
+	if conns := pool.Lookup(0x00010001); len(conns) != 2 {
 		t.Fatalf("expected 2 connections for shard, got %d", len(conns))
 	}
 	if !pool.hasSlaveID([]byte("same-slave")) {
@@ -557,7 +557,7 @@ func TestXshardPool_OutboundAndInboundCoexist(t *testing.T) {
 	// Inbound (remote-slave → local).
 	establishInbound(t, pool, []byte("remote-slave"), []uint32{0x00010001})
 
-	if conns := pool.get(0x00010001); len(conns) != 2 {
+	if conns := pool.Lookup(0x00010001); len(conns) != 2 {
 		t.Fatalf("expected 2 connections, got %d", len(conns))
 	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
@@ -590,7 +590,7 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 	}
 
 	// Only the original inbound connection remains indexed.
-	if conns := pool.get(0x00010001); len(conns) != 1 {
+	if conns := pool.Lookup(0x00010001); len(conns) != 1 {
 		t.Fatalf("expected 1 connection (inbound only), got %d", len(conns))
 	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
@@ -689,7 +689,7 @@ func TestXshardPool_InboundDoesNotSkipSelf(t *testing.T) {
 	// Inbound connection claiming to be self must still be indexed.
 	establishInbound(t, pool, []byte("local-slave"), []uint32{0x00030004})
 
-	if conns := pool.get(0x00030004); len(conns) != 1 {
+	if conns := pool.Lookup(0x00030004); len(conns) != 1 {
 		t.Fatalf("expected self inbound connection to be indexed, got %d", len(conns))
 	}
 	if !pool.hasSlaveID([]byte("local-slave")) {
@@ -746,7 +746,7 @@ func TestXshardConn_SendXshardTxListErrorCode(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			err = client.sendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{Branch: 1, TxList: &wire.RawBytes{}})
+			err = client.SendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{Branch: 1, TxList: &wire.RawBytes{}})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error for non-zero error_code, got nil")
@@ -794,7 +794,7 @@ type remoteSlave struct {
 	accepted int32 // atomic
 
 	mu    sync.Mutex
-	conns []*xshardConn
+	conns []*XshardConn
 	wg    sync.WaitGroup
 }
 
@@ -1063,7 +1063,7 @@ func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
 			t.Fatalf("peer %s should be tracked", peerID)
 		}
 		for _, shard := range peerShards {
-			conns := pool.get(shard)
+			conns := pool.Lookup(shard)
 			if len(conns) != 2 {
 				t.Fatalf("shard %d: expected 2 connections (inbound+outbound), got %d", shard, len(conns))
 			}
