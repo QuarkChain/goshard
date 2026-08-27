@@ -364,8 +364,10 @@ func rpcTimeoutError(err error) error {
 // -- Write path ---------------------------------------------------------------
 //
 // writeFrame serializes transport writes with writeMu. Write failures trigger
-// shutdown only after writeMu is released, because shutdown acquires writeMu
-// as a barrier.
+// shutdown only after writeMu is released: shutdown never acquires writeMu
+// and does not wait for an in-flight write. Releasing writeMu first ensures
+// senders queued behind it can proceed and observe the Closed state once
+// shutdown marks the connection closed.
 
 // writeFrame writes a pre-built frame. It holds writeMu while checking the
 // connection state and performing the transport write. Transport panics are

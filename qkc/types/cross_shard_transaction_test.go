@@ -44,37 +44,37 @@ func TestCrossShardTransactionList(t *testing.T) {
 	data, err := serialize.SerializeToBytes(c1)
 	assert.NoError(t, err)
 
-	d1 := NewCrossShardTransactionList(nil)
-	err = serialize.DeserializeFromBytes(data, d1)
+	d1, err := FromBytesToCrossShardTransactionList(data)
 	assert.NoError(t, err)
+	assert.Equal(t, crossShardTransactionListVersion, d1.Version())
 	for k, v := range c1.TXList {
-		assert.Equal(t, v.TxHash, (*d1).TXList[k].TxHash)
-		assert.Equal(t, v.From, (*d1).TXList[k].From)
-		assert.Equal(t, v.To, (*d1).TXList[k].To)
-		assert.Equal(t, v.Value.Value.Uint64(), (*d1).TXList[k].Value.Value.Uint64())
-		assert.Equal(t, v.GasPrice.Value.Uint64(), (*d1).TXList[k].GasPrice.Value.Uint64())
-		assert.Equal(t, v.GasTokenID, (*d1).TXList[k].GasTokenID)
-		assert.Equal(t, v.TransferTokenID, (*d1).TXList[k].TransferTokenID)
-		assert.Equal(t, v.IsFromRootChain, (*d1).TXList[k].IsFromRootChain)
-		assert.Equal(t, v.GasRemained.Value.Uint64(), (*d1).TXList[k].GasRemained.Value.Uint64())
-		assert.Equal(t, v.MessageData, (*d1).TXList[k].MessageData)
-		assert.Equal(t, v.CreateContract, (*d1).TXList[k].CreateContract)
-		assert.Equal(t, uint8(k), (*d1).TXList[k].RefundRate)
+		assert.Equal(t, v.TxHash, d1.TXList[k].TxHash)
+		assert.Equal(t, v.From, d1.TXList[k].From)
+		assert.Equal(t, v.To, d1.TXList[k].To)
+		assert.Equal(t, v.Value.Value.Uint64(), d1.TXList[k].Value.Value.Uint64())
+		assert.Equal(t, v.GasPrice.Value.Uint64(), d1.TXList[k].GasPrice.Value.Uint64())
+		assert.Equal(t, v.GasTokenID, d1.TXList[k].GasTokenID)
+		assert.Equal(t, v.TransferTokenID, d1.TXList[k].TransferTokenID)
+		assert.Equal(t, v.IsFromRootChain, d1.TXList[k].IsFromRootChain)
+		assert.Equal(t, v.GasRemained.Value.Uint64(), d1.TXList[k].GasRemained.Value.Uint64())
+		assert.Equal(t, v.MessageData, d1.TXList[k].MessageData)
+		assert.Equal(t, v.CreateContract, d1.TXList[k].CreateContract)
+		assert.Equal(t, uint8(k), d1.TXList[k].RefundRate)
 	}
 
 }
 
-func TestCrossShardTransactionListPyquarkchainGolden(t *testing.T) {
+func TestCrossShardTransactionListGolden(t *testing.T) {
 	assertSerialized := func(t *testing.T, list *CrossShardTransactionList, expected string) {
 		t.Helper()
 		encoded, err := serialize.SerializeToBytes(list)
 		assert.NoError(t, err)
 		assert.Equal(t, expected, common.Bytes2Hex(encoded))
 
-		var decoded CrossShardTransactionList
-		err = serialize.DeserializeFromBytes(common.FromHex(expected), &decoded)
+		decoded, err := FromBytesToCrossShardTransactionList(common.FromHex(expected))
 		assert.NoError(t, err)
-		reencoded, err := serialize.SerializeToBytes(&decoded)
+		assert.Equal(t, crossShardTransactionListVersion, decoded.version)
+		reencoded, err := serialize.SerializeToBytes(decoded)
 		assert.NoError(t, err)
 		assert.Equal(t, expected, common.Bytes2Hex(reencoded))
 	}
@@ -100,7 +100,30 @@ func TestCrossShardTransactionListPyquarkchainGolden(t *testing.T) {
 }
 
 func TestCrossShardTransactionListRejectsUnsupportedVersion(t *testing.T) {
-	var list CrossShardTransactionList
-	err := serialize.DeserializeFromBytes(common.FromHex("0000000000000000"), &list)
+	_, err := FromBytesToCrossShardTransactionList(common.FromHex("0000000000000000"))
 	assert.Error(t, err)
+}
+
+func TestCrossShardTransactionListDeserializePreservesStreamBoundary(t *testing.T) {
+	first := NewCrossShardTransactionList(nil)
+	second := NewCrossShardTransactionList([]*CrossShardTransactionDeposit{{
+		Value:       &serialize.Uint256{Value: new(big.Int)},
+		GasPrice:    &serialize.Uint256{Value: new(big.Int)},
+		GasRemained: &serialize.Uint256{Value: new(big.Int)},
+		RefundRate:  7,
+	}})
+
+	var encoded []byte
+	assert.NoError(t, first.Serialize(&encoded))
+	assert.NoError(t, second.Serialize(&encoded))
+
+	bb := serialize.NewByteBuffer(encoded)
+	var decodedFirst, decodedSecond CrossShardTransactionList
+	assert.NoError(t, decodedFirst.Deserialize(bb))
+	assert.Empty(t, decodedFirst.TXList)
+	assert.NoError(t, decodedSecond.Deserialize(bb))
+	if assert.Len(t, decodedSecond.TXList, 1) {
+		assert.Equal(t, uint8(7), decodedSecond.TXList[0].RefundRate)
+	}
+	assert.Equal(t, len(encoded), bb.GetOffset())
 }
