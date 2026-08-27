@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ type fakeFrameTransport struct {
 	writeOnce         sync.Once
 	releaseWrite      chan struct{}
 	writeErr          error
+	writePanic        bool
 }
 
 // interruptibleFakeFrameTransport models a real net.Conn: Close releases a
@@ -75,6 +77,9 @@ func (t *fakeFrameTransport) ReadFrame() (*wire.Frame, error) {
 }
 
 func (t *fakeFrameTransport) WriteFrame(frame *wire.Frame) error {
+	if t.writePanic {
+		panic("fake transport write panic")
+	}
 	if t.writeErr != nil {
 		return t.writeErr
 	}
@@ -348,12 +353,11 @@ func TestConfig_NonRPCDummyResponseOpcode(t *testing.T) {
 
 // -- BaseConn unit tests (fake transport) --------------------------------------
 
-// TestBaseConn_CloseWithInFlightWrite: shutdown is interrupt-first — the writer
-// parked in WriteFrame is released by transport.Close, never by the writeMu
-// barrier (a barrier-first shutdown would hang on a real net.Conn with a full
-// send buffer).
+// TestBaseConn_CloseWithInFlightWrite verifies that shutdown does not wait for
+// an in-flight WriteFrame. Shutdown completes pending RPCs and closes the
+// transport (interrupt-first) while a blocked write may still be in progress.
 func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
-	t.Run("barrier: Close waits for in-flight write", func(t *testing.T) {
+	t.Run("close does not wait for in-flight write", func(t *testing.T) {
 		tr := newFakeFrameTransport()
 		tr.writeStarted = make(chan struct{})
 		tr.releaseWrite = make(chan struct{})
@@ -379,21 +383,21 @@ func TestBaseConn_CloseWithInFlightWrite(t *testing.T) {
 		}()
 		select {
 		case <-closeDone:
-			t.Fatal("Close returned while write was blocked")
-		case <-time.After(20 * time.Millisecond):
-		}
-
-		close(tr.releaseWrite)
-		select {
-		case <-closeDone:
 		case <-time.After(time.Second):
-			t.Fatal("Close did not finish after write completed")
+			t.Fatal("Close blocked waiting for in-flight write")
 		}
 		if !tr.closeWhileWriting {
 			t.Fatal("expected interrupt-first shutdown: transport.Close must run while the write is still in flight")
 		}
-		if err := <-result; err != ErrConnectionClosed {
-			t.Fatalf("expected ErrConnectionClosed, got %v", err)
+
+		close(tr.releaseWrite)
+		select {
+		case err := <-result:
+			if err != ErrConnectionClosed {
+				t.Fatalf("expected ErrConnectionClosed, got %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("RPC did not complete after write released")
 		}
 	})
 
@@ -591,6 +595,40 @@ func TestBaseConn_WriteFailureClosesConnection(t *testing.T) {
 	if !conn.IsClosed() {
 		t.Fatal("connection should be closed after write failure")
 	}
+}
+
+// TestBaseConn_WriteFramePanicReleasesWriteMu: a panic from the transport's
+// WriteFrame is caught by writeFrameLocked (SendRPCMeta/writeFrame release
+// writeMu via the returned error, not a defer). If writeMu were leaked, senders
+// issued after the panic would block forever at writeMu.Lock() instead of
+// observing the Closed state.
+func TestBaseConn_WriteFramePanicReleasesWriteMu(t *testing.T) {
+	tr := newFakeFrameTransport()
+	tr.writePanic = true
+	conn := newConn(tr)
+	conn.Start()
+
+	// The panic surfaces as an error from the write path, which triggers
+	// shutdown rather than leaving writeMu held.
+	result := make(chan error, 1)
+	go func() {
+		_, err := conn.SendRPC(context.Background(), byte(wire.ClusterOpPing), nil)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err != ErrConnectionClosed {
+			t.Fatalf("SendRPC after WriteFrame panic: expected ErrConnectionClosed, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendRPC blocked on writeMu after WriteFrame panic")
+	}
+	// A later sender (blocking on writeMu) must observe the Closed state, not
+	// wait forever: proves writeMu was released.
+	if err := conn.SendCommand(byte(wire.ClusterOpPing), nil); err != ErrConnectionClosed {
+		t.Fatalf("SendCommand after WriteFrame panic: expected ErrConnectionClosed, got %v", err)
+	}
+	<-conn.WaitUntilClosed()
 }
 
 func TestBaseConn_HandlerPanicShutsDownConnection(t *testing.T) {
@@ -1615,4 +1653,73 @@ func mustSerialize(t *testing.T, v any) []byte {
 		t.Fatalf("serialize %T: %v", v, err)
 	}
 	return b
+}
+
+// -- TCP transport write deadline ----------------------------------------------
+//
+// geth bounded-write model: every WriteFrame arms a per-frame write deadline
+// so a peer that stops reading cannot block the writer (and writeMu) forever.
+
+// newPipeTransport returns a TCP transport over net.Pipe, which honors
+// deadlines and is unbuffered: a write with no reader blocks until deadline.
+func newPipeTransport(t *testing.T, c net.Conn) FrameTransport {
+	t.Helper()
+	return NewTCPTransport(c,
+		func(r io.Reader) (*wire.Frame, error) { return wire.ReadFrame(r, 0) },
+		wire.WriteFrame)
+}
+
+// TestTCPTransport_WriteFrameStalledPeer: with nobody reading the peer end,
+// WriteFrame must return a deadline error within a bounded time instead of
+// blocking indefinitely.
+func TestTCPTransport_WriteFrameStalledPeer(t *testing.T) {
+	orig := frameWriteTimeout
+	frameWriteTimeout = 50 * time.Millisecond
+	defer func() { frameWriteTimeout = orig }()
+
+	local, peer := net.Pipe()
+	defer local.Close()
+	defer peer.Close()
+	tr := newPipeTransport(t, local)
+
+	start := time.Now()
+	err := tr.WriteFrame(&wire.Frame{Opcode: 1, RPCID: 1, Payload: []byte("ping")})
+	if err == nil {
+		t.Fatal("expected deadline error, got nil")
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("expected deadline-exceeded error, got %v", err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("write unblocked too late: %v", elapsed)
+	}
+}
+
+// TestTCPTransport_WriteFrameClearsDeadline: a successful WriteFrame clears
+// the write deadline, so it must not stay armed on the conn and break later
+// raw writes once it expires.
+func TestTCPTransport_WriteFrameClearsDeadline(t *testing.T) {
+	orig := frameWriteTimeout
+	frameWriteTimeout = 50 * time.Millisecond
+	defer func() { frameWriteTimeout = orig }()
+
+	local, peer := net.Pipe()
+	defer local.Close()
+	defer peer.Close()
+	go io.Copy(io.Discard, peer) // drain so writes complete
+	tr := newPipeTransport(t, local)
+
+	if err := tr.WriteFrame(&wire.Frame{Opcode: 1, RPCID: 1, Payload: []byte("ping")}); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // the armed deadline would be past due now
+
+	// If the deadline were still armed, this raw write would fail with a
+	// timeout; with it cleared it must succeed.
+	if _, err := local.Write([]byte("raw")); err != nil {
+		t.Fatalf("raw write after deadline expiry (deadline not cleared?): %v", err)
+	}
 }
