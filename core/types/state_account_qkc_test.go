@@ -386,7 +386,7 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		// on the slim round-trip, forking the trie root when a snapshot-served account
 		// was re-committed.
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
-		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdated: true}},
 		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
 		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
 	}
@@ -452,13 +452,13 @@ func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			account := StateAccount{
-				Nonce:              1,
-				Balance:            tc.bal,
-				Root:               EmptyRootHash,
-				CodeHash:           EmptyCodeHash.Bytes(),
-				MntBalances:        tc.mnt,
-				FullShardKey:       7,
-				balanceUpdateCount: map[bool]uint64{true: 1}[tc.updated],
+				Nonce:          1,
+				Balance:        tc.bal,
+				Root:           EmptyRootHash,
+				CodeHash:       EmptyCodeHash.Bytes(),
+				MntBalances:    tc.mnt,
+				FullShardKey:   7,
+				balanceUpdated: tc.updated,
 			}
 			encoded, err := rlp.EncodeToBytes(&account)
 			require.NoError(t, err)
@@ -491,7 +491,7 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, decodedSlim.MntBalances)
 	assert.False(t, decodedSlim.IsBalanceUpdated())
-	decodedSlim.AddBalanceUpdate()
+	decodedSlim.MarkBalanceUpdated()
 	decodedSlim.Balance.Clear()
 	zeroSlim := SlimAccountRLP(*decodedSlim)
 	var zeroSlimAccount SlimAccount
@@ -518,11 +518,20 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	assert.Empty(t, reencodedWire.TokenBal)
 }
 
+func TestBalanceUpdatedIsPresenceMarker(t *testing.T) {
+	account := NewEmptyStateAccount()
+	account.MarkBalanceUpdated()
+	account.MarkBalanceUpdated()
+
+	assert.True(t, account.IsBalanceUpdated())
+	assert.True(t, account.Copy().IsBalanceUpdated())
+}
+
 // TestZeroBalanceUpdateRoundTrip verifies that both consensus and snapshot
 // reads normalize an explicitly present zero balance to the same account state.
 func TestZeroBalanceUpdateRoundTrip(t *testing.T) {
 	account := NewEmptyStateAccount()
-	account.AddBalanceUpdate()
+	account.MarkBalanceUpdated()
 
 	consensusEncoded, err := rlp.EncodeToBytes(&account)
 	require.NoError(t, err)

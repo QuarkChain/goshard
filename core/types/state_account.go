@@ -39,9 +39,10 @@ type StateAccount struct {
 	CodeHash     []byte
 	MntBalances  *qkccommon.TokenBalances // Non-QKC balances.
 	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
-	// balanceUpdateCount keeps a changed zero QKC balance encoded as 00c0. Using
-	// a counter ensures that reverting one update does not clear earlier updates.
-	balanceUpdateCount uint64
+	// balanceUpdated keeps a changed zero QKC balance encoded as 00c0. It remains
+	// set after a revert because pyquarkchain restores the previous value by
+	// writing it back, preserving the zero-valued token entry.
+	balanceUpdated bool
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -64,45 +65,24 @@ func (acct *StateAccount) Copy() *StateAccount {
 		mnt = acct.MntBalances.Copy()
 	}
 	return &StateAccount{
-		Nonce:              acct.Nonce,
-		Balance:            balance,
-		Root:               acct.Root,
-		CodeHash:           common.CopyBytes(acct.CodeHash),
-		MntBalances:        mnt,
-		FullShardKey:       acct.FullShardKey,
-		balanceUpdateCount: acct.balanceUpdateCount,
+		Nonce:          acct.Nonce,
+		Balance:        balance,
+		Root:           acct.Root,
+		CodeHash:       common.CopyBytes(acct.CodeHash),
+		MntBalances:    mnt,
+		FullShardKey:   acct.FullShardKey,
+		balanceUpdated: acct.balanceUpdated,
 	}
 }
 
 // IsBalanceUpdated reports whether the QKC balance has been explicitly updated.
 func (acct *StateAccount) IsBalanceUpdated() bool {
-	return acct.balanceUpdateCount > 0
+	return acct.balanceUpdated
 }
 
-// AddBalanceUpdate records a QKC balance update.
-func (acct *StateAccount) AddBalanceUpdate() {
-	acct.balanceUpdateCount++
-}
-
-// RevertBalanceUpdate removes a reverted QKC balance update.
-func (acct *StateAccount) RevertBalanceUpdate() {
-	if acct.balanceUpdateCount == 0 {
-		panic("reverting untracked QKC balance update")
-	}
-	acct.balanceUpdateCount--
-}
-
-// FinaliseBalanceUpdates is called at the transaction boundary before the
-// journal is cleared. It collapses committed balance updates to a single
-// presence marker: their individual counts are no longer needed for reverts,
-// but the marker must remain so an explicitly updated zero balance continues
-// to encode as 00c0 in snapshots and consensus state. The compaction is
-// required to keep the counter bounded; without it, successful transactions
-// would accumulate counts indefinitely and could eventually overflow.
-func (acct *StateAccount) FinaliseBalanceUpdates() {
-	if acct.balanceUpdateCount > 0 {
-		acct.balanceUpdateCount = 1
-	}
+// MarkBalanceUpdated records that the QKC balance entry has been written.
+func (acct *StateAccount) MarkBalanceUpdated() {
+	acct.balanceUpdated = true
 }
 
 // SlimAccount is the compact RLP account format used by state snapshots,
