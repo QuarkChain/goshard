@@ -81,7 +81,7 @@ func (h *MinorBlockHeader) GetCoinbase() account.Address      { return h.Coinbas
 func (h *MinorBlockHeader) GetTime() uint64                   { return h.Time }
 func (h *MinorBlockHeader) GetDifficulty() *big.Int           { return new(big.Int).Set(h.Difficulty) }
 func (h *MinorBlockHeader) GetNonce() uint64                  { return h.Nonce }
-func (h *MinorBlockHeader) GetGasLimit() *big.Int             { return h.GasLimit.Value }
+func (h *MinorBlockHeader) GetGasLimit() *big.Int             { return new(big.Int).Set(h.GasLimit.Value) }
 func (h *MinorBlockHeader) GetBranch() account.Branch         { return h.Branch }
 func (h *MinorBlockHeader) GetMetaHash() common.Hash          { return h.MetaHash }
 func (h *MinorBlockHeader) GetBloom() Bloom                   { return h.Bloom }
@@ -152,8 +152,8 @@ type MinorBlock struct {
 	trackingdata []byte
 
 	// caches
-	hash atomic.Value
-	size atomic.Value
+	hash atomic.Pointer[common.Hash]
+	size atomic.Pointer[common.StorageSize]
 }
 
 // "external" block encoding. used for qkc protocol, etc.
@@ -245,8 +245,9 @@ func (b *MinorBlock) Deserialize(bb *serialize.ByteBuffer) error {
 		return err
 	}
 	b.header, b.meta, b.transactions, b.trackingdata = eb.Header, eb.Meta, eb.Txs, eb.Trackingdata
-	b.hash = atomic.Value{}
-	b.size.Store(common.StorageSize(bb.GetOffset() - startIndex))
+	b.hash.Store(nil)
+	size := common.StorageSize(bb.GetOffset() - startIndex)
+	b.size.Store(&size)
 	return nil
 }
 
@@ -260,7 +261,8 @@ func (b *MinorBlock) Serialize(w *[]byte) error {
 		Trackingdata: b.trackingdata,
 	})
 
-	b.size.Store(common.StorageSize(len(*w) - offset))
+	size := common.StorageSize(len(*w) - offset)
+	b.size.Store(&size)
 	return err
 }
 
@@ -277,7 +279,7 @@ func (b *MinorBlock) Transaction(hash common.Hash) *Transaction {
 	return nil
 }
 
-func (b *MinorBlock) TrackingData() []byte { return b.trackingdata }
+func (b *MinorBlock) TrackingData() []byte { return common.CopyBytes(b.trackingdata) }
 
 // header properties
 func (b *MinorBlock) GetXShardGasLimit() *big.Int {
@@ -336,15 +338,16 @@ func (b *MinorBlock) EthHeader() *comtypes.Header {
 // and returning it, or returning a previsouly cached value.
 func (b *MinorBlock) Size() common.StorageSize {
 	if size := b.size.Load(); size != nil {
-		return size.(common.StorageSize)
+		return *size
 	}
 
 	bytes, err := serialize.SerializeToBytes(b)
 	if err != nil {
 		panic(err)
 	}
-	b.size.Store(common.StorageSize(len(bytes)))
-	return common.StorageSize(len(bytes))
+	size := common.StorageSize(len(bytes))
+	b.size.Store(&size)
+	return size
 }
 
 // WithSeal returns a new block with the data from b but the header replaced with
@@ -375,10 +378,10 @@ func (b *MinorBlock) WithBody(transactions []*Transaction, trackingData []byte) 
 // The hash is computed on the first call and cached thereafter.
 func (b *MinorBlock) Hash() common.Hash {
 	if hash := b.hash.Load(); hash != nil {
-		return hash.(common.Hash)
+		return *hash
 	}
 	v := b.header.Hash()
-	b.hash.Store(v)
+	b.hash.Store(&v)
 	return v
 }
 
@@ -404,7 +407,9 @@ func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signa
 func (b *MinorBlock) Content() []IHashable {
 	items := make([]IHashable, len(b.transactions))
 	for i, item := range b.transactions {
-		items[i] = item
+		if item != nil {
+			items[i] = NewTransaction(item.inner)
+		}
 	}
 	return items
 }
@@ -414,7 +419,7 @@ func (b *MinorBlock) GetMetaData() *MinorBlockMeta {
 }
 
 func (b *MinorBlock) GetTrackingData() []byte {
-	return b.trackingdata
+	return b.TrackingData()
 }
 
 func (b *MinorBlock) GetTransactions() Transactions {
@@ -451,8 +456,9 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 	m.meta.ReceiptHash = DeriveSha(receipts)
 	m.header.MetaHash = m.meta.Hash()
 	m.header.Bloom = CreateBloom(receipts)
-	m.hash.Store(m.header.Hash())
-	m.size = atomic.Value{}
+	hash := m.header.Hash()
+	m.hash.Store(&hash)
+	m.size.Store(nil)
 }
 
 func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int, address *account.Address, nonce *uint64, gasLimit *big.Int, xShardGasLimit *big.Int, extraData []byte, coinbaseAmount *qkcCommon.TokenBalances, prevRootHash *common.Hash) *MinorBlock {
@@ -509,10 +515,15 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 		Nonce:             *nonce,
 		Extra:             extraData,
 	}
+	var cursor *XShardTxCursorInfo
+	if h.meta.XShardTxCursorInfo != nil {
+		cpy := *h.meta.XShardTxCursorInfo
+		cursor = &cpy
+	}
 	meta := MinorBlockMeta{
 		GasUsed:            &serialize.Uint256{Value: new(big.Int)},
 		CrossShardGasUsed:  &serialize.Uint256{Value: new(big.Int)},
-		XShardTxCursorInfo: h.meta.XShardTxCursorInfo,
+		XShardTxCursorInfo: cursor,
 		XShardGasLimit:     &serialize.Uint256{Value: new(big.Int).Set(xShardGasLimit)},
 	}
 	return &MinorBlock{
@@ -528,8 +539,8 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 // refreshes the cache.
 func (h *MinorBlock) AddTx(tx *Transaction) {
 	h.transactions = append(h.transactions, tx)
-	h.hash = atomic.Value{}
-	h.size = atomic.Value{}
+	h.hash.Store(nil)
+	h.size.Store(nil)
 }
 
 func GetEmptyMinorBlock() *MinorBlock {

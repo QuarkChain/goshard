@@ -168,6 +168,49 @@ func TestMinorBlockMetaCopyDoesNotAliasCursor(t *testing.T) {
 	}
 }
 
+func TestMinorBlockHeaderGetGasLimitReturnsCopy(t *testing.T) {
+	header, _ := testMinorBlockHeader()
+	gasLimit := header.GetGasLimit()
+	gasLimit.SetUint64(1)
+	if got, want := header.GasLimit.Value.Uint64(), uint64(12_000_000); got != want {
+		t.Fatalf("GetGasLimit exposed the header value: got %d, want %d", got, want)
+	}
+}
+
+func TestMinorBlockReadMethodsReturnCopies(t *testing.T) {
+	header, meta := testMinorBlockHeader()
+	block := NewMinorBlock(header, meta, goldenTxs()[:1], nil, []byte{1, 2, 3})
+
+	trackingData := block.TrackingData()
+	trackingData[0] = 9
+	if got := block.TrackingData()[0]; got != 1 {
+		t.Fatalf("TrackingData exposed internal data: got %d, want 1", got)
+	}
+	trackingData = block.GetTrackingData()
+	trackingData[0] = 9
+	if got := block.GetTrackingData()[0]; got != 1 {
+		t.Fatalf("GetTrackingData exposed internal data: got %d, want 1", got)
+	}
+
+	originalNonce := block.transactions[0].Nonce()
+	transaction := block.Content()[0].(*Transaction)
+	transaction.SetNonce(originalNonce + 1)
+	if got := block.transactions[0].Nonce(); got != originalNonce {
+		t.Fatalf("Content exposed internal transaction: got nonce %d, want %d", got, originalNonce)
+	}
+}
+
+func TestCreateBlockToAppendCopiesCursor(t *testing.T) {
+	header, meta := testMinorBlockHeader()
+	parent := NewMinorBlockWithHeader(header, meta)
+	child := parent.CreateBlockToAppend(nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	child.meta.XShardTxCursorInfo.RootBlockHeight = 9
+	if got, want := parent.meta.XShardTxCursorInfo.RootBlockHeight, uint64(1); got != want {
+		t.Fatalf("child block cursor mutated parent: got height %d, want %d", got, want)
+	}
+}
+
 func TestCalculateMerkleRoot(t *testing.T) {
 	encList := [][]byte{
 		common.FromHex("00000001000000010000000000000002d3f86deb4a2bbf85048b3e790460c40dbab1f621000003ff00000002010101010102010200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000030000000000000005010600000000000000070000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100030102030000000000000000000000000000000000000000000000000000000000000004"),

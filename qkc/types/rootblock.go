@@ -103,8 +103,8 @@ type RootBlock struct {
 	trackingdata      []byte
 
 	// caches
-	hash atomic.Value
-	size atomic.Value
+	hash atomic.Pointer[common.Hash]
+	size atomic.Pointer[common.StorageSize]
 }
 
 func (b *RootBlock) IHeader() IHeader {
@@ -176,8 +176,9 @@ func (b *RootBlock) Deserialize(bb *serialize.ByteBuffer) error {
 		return err
 	}
 	b.header, b.minorBlockHeaders, b.trackingdata = eb.Header, eb.MinorBlockHeaders, eb.Trackingdata
-	b.hash = atomic.Value{}
-	b.size.Store(common.StorageSize(bb.GetOffset() - startIndex))
+	b.hash.Store(nil)
+	size := common.StorageSize(bb.GetOffset() - startIndex)
+	b.size.Store(&size)
 	return nil
 }
 
@@ -190,7 +191,8 @@ func (b *RootBlock) Serialize(w *[]byte) error {
 		Trackingdata:      b.trackingdata,
 	})
 
-	b.size.Store(common.StorageSize(len(*w) - offset))
+	size := common.StorageSize(len(*w) - offset)
+	b.size.Store(&size)
 	return err
 }
 
@@ -240,25 +242,26 @@ func (b *RootBlock) Content() []IHashable {
 
 func (b *RootBlock) Size() common.StorageSize {
 	if size := b.size.Load(); size != nil {
-		return size.(common.StorageSize)
+		return *size
 	}
 
 	bytes, err := serialize.SerializeToBytes(b)
 	if err != nil {
 		panic(err)
 	}
-	b.size.Store(common.StorageSize(len(bytes)))
-	return common.StorageSize(len(bytes))
+	size := common.StorageSize(len(bytes))
+	b.size.Store(&size)
+	return size
 }
 
 // Hash returns the keccak256 hash of b's header.
 // The hash is computed on the first call and cached thereafter.
 func (b *RootBlock) Hash() common.Hash {
 	if hash := b.hash.Load(); hash != nil {
-		return hash.(common.Hash)
+		return *hash
 	}
 	v := b.header.Hash()
-	b.hash.Store(v)
+	b.hash.Store(&v)
 	return v
 }
 

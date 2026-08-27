@@ -31,7 +31,6 @@ type IBlock interface {
 	Hash() common.Hash
 	NumberU64() uint64
 	IHeader() IHeader
-	WithMiningResult(nonce uint64, mixDigest common.Hash, signature *[65]byte) IBlock
 	Content() []IHashable
 	GetTrackingData() []byte
 	GetSize() common.StorageSize
@@ -44,3 +43,10 @@ type IBlock interface {
 type IHashable interface {
 	Hash() common.Hash
 }
+
+var (
+	_ IHeader = (*MinorBlockHeader)(nil)
+	_ IHeader = (*RootBlockHeader)(nil)
+	_ IBlock  = (*MinorBlock)(nil)
+	_ IBlock  = (*RootBlock)(nil)
+)
