@@ -164,6 +164,24 @@ type extminorblock struct {
 	Trackingdata []byte       `bytesizeofslicelen:"2"`
 }
 
+func copyTransaction(tx *Transaction) *Transaction {
+	if tx == nil {
+		return nil
+	}
+	return NewTransaction(tx.inner)
+}
+
+func copyTransactions(txs []*Transaction) Transactions {
+	if txs == nil {
+		return nil
+	}
+	cpy := make(Transactions, len(txs))
+	for i, tx := range txs {
+		cpy[i] = copyTransaction(tx)
+	}
+	return cpy
+}
+
 // NewBlock creates a new block. The input data is copied,
 // changes to header and to the field values will not affect the
 // block.
@@ -172,12 +190,10 @@ type extminorblock struct {
 // are ignored and set to values derived from the given txs and receipts.
 func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, receipts []*Receipt, trackingdata []byte) *MinorBlock {
 	b := &MinorBlock{header: CopyMinorBlockHeader(header), meta: CopyMinorBlockMeta(meta)}
-
-	b.meta.TxHash = CalculateMerkleRoot(Transactions(txs))
 	if len(txs) > 0 {
-		b.transactions = make(Transactions, len(txs))
-		copy(b.transactions, txs)
+		b.transactions = copyTransactions(txs)
 	}
+	b.meta.TxHash = CalculateMerkleRoot(b.transactions)
 
 	b.meta.ReceiptHash = DeriveSha(Receipts(receipts))
 	b.header.Bloom = CreateBloom(receipts)
@@ -266,14 +282,12 @@ func (b *MinorBlock) Serialize(w *[]byte) error {
 	return err
 }
 
-// TODO: copies
-
-func (b *MinorBlock) Transactions() Transactions { return b.transactions }
+func (b *MinorBlock) Transactions() Transactions { return copyTransactions(b.transactions) }
 
 func (b *MinorBlock) Transaction(hash common.Hash) *Transaction {
 	for _, transaction := range b.transactions {
 		if transaction.Hash() == hash {
-			return transaction
+			return copyTransaction(transaction)
 		}
 	}
 	return nil
@@ -356,8 +370,8 @@ func (b *MinorBlock) WithSeal(header *MinorBlockHeader) *MinorBlock {
 	return &MinorBlock{
 		header:       CopyMinorBlockHeader(header),
 		meta:         CopyMinorBlockMeta(b.meta),
-		transactions: b.transactions,
-		trackingdata: b.trackingdata,
+		transactions: copyTransactions(b.transactions),
+		trackingdata: common.CopyBytes(b.trackingdata),
 	}
 }
 
@@ -366,10 +380,12 @@ func (b *MinorBlock) WithBody(transactions []*Transaction, trackingData []byte) 
 	block := &MinorBlock{
 		header:       CopyMinorBlockHeader(b.header),
 		meta:         CopyMinorBlockMeta(b.meta),
-		transactions: make([]*Transaction, len(transactions)),
+		transactions: make(Transactions, len(transactions)),
 		trackingdata: make([]byte, len(trackingData)),
 	}
-	copy(block.transactions, transactions)
+	for i, transaction := range transactions {
+		block.transactions[i] = copyTransaction(transaction)
+	}
 	copy(block.trackingdata, trackingData)
 	return block
 }
@@ -423,7 +439,7 @@ func (b *MinorBlock) GetTrackingData() []byte {
 }
 
 func (b *MinorBlock) GetTransactions() Transactions {
-	return b.transactions
+	return b.Transactions()
 }
 
 func (b *MinorBlock) GetSize() common.StorageSize {
@@ -452,7 +468,7 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 	} else {
 		m.header.CoinbaseAmount = coinbaseAmount.Copy()
 	}
-	m.meta.TxHash = CalculateMerkleRoot(m.Transactions())
+	m.meta.TxHash = CalculateMerkleRoot(m.transactions)
 	m.meta.ReceiptHash = DeriveSha(receipts)
 	m.header.MetaHash = m.meta.Hash()
 	m.header.Bloom = CreateBloom(receipts)
@@ -538,7 +554,7 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 // must Finalize before relying on Hash(); Finalize recomputes both hashes and
 // refreshes the cache.
 func (h *MinorBlock) AddTx(tx *Transaction) {
-	h.transactions = append(h.transactions, tx)
+	h.transactions = append(h.transactions, copyTransaction(tx))
 	h.hash.Store(nil)
 	h.size.Store(nil)
 }
