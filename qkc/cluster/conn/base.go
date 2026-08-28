@@ -252,7 +252,10 @@ func (c *BaseConn) SendRPCMeta(
 		RPCID:   rpcID,
 		Payload: payload,
 	}
-	err := c.transport.WriteFrame(frame)
+	// writeFrameLocked assumes writeMu is already held; it recovers a transport
+	// panic and returns it as an error so the Unlock below still runs and we
+	// can shut the connection down cleanly instead of leaking writeMu.
+	err := c.writeFrameLocked(frame)
 	c.writeMu.Unlock()
 
 	if err != nil {
@@ -361,28 +364,46 @@ func rpcTimeoutError(err error) error {
 // -- Write path ---------------------------------------------------------------
 //
 // writeFrame serializes transport writes with writeMu. Write failures trigger
-// shutdown after the lock is released; shutdown acquires writeMu as a barrier,
-// so shutdown must never be entered while writeMu is held.
+// shutdown only after writeMu is released: shutdown never acquires writeMu
+// and does not wait for an in-flight write. Releasing writeMu first ensures
+// senders queued behind it can proceed and observe the Closed state once
+// shutdown marks the connection closed.
 
-// writeFrame writes a pre-built frame.
+// writeFrame writes a pre-built frame. It holds writeMu while checking the
+// connection state and performing the transport write. Transport panics are
+// converted to errors by writeFrameLocked, so writeMu is always released
+// before any shutdown is triggered.
 func (c *BaseConn) writeFrame(f *wire.Frame) error {
 	c.writeMu.Lock()
 
-	c.mu.Lock()
+	c.mu.RLock()
 	if err := c.checkActiveLocked(); err != nil {
-		c.mu.Unlock()
+		c.mu.RUnlock()
 		c.writeMu.Unlock()
 		return err
 	}
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
-	err := c.transport.WriteFrame(f)
+	err := c.writeFrameLocked(f)
 	c.writeMu.Unlock()
 
 	if err != nil {
 		c.shutdown(fmt.Errorf("write frame: %w", err))
 	}
 	return err
+}
+
+// writeFrameLocked writes f assuming writeMu is already held by the caller.
+// It converts a panic from the transport into an error so the caller can
+// release writeMu and trigger connection shutdown. This function does not
+// acquire or release writeMu and must not be called without holding it.
+func (c *BaseConn) writeFrameLocked(f *wire.Frame) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("transport write panic: %v", r)
+		}
+	}()
+	return c.transport.WriteFrame(f)
 }
 
 // -- readerLoop --------------------------------------------------------------
@@ -618,9 +639,6 @@ func (c *BaseConn) shutdown(cause error) {
 		if err := c.transport.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			c.log.Warn("transport close failed", "err", err)
 		}
-
-		c.writeMu.Lock()
-		c.writeMu.Unlock()
 	})
 }
 

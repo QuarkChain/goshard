@@ -7,9 +7,20 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
+
+// frameWriteTimeout bounds each WriteFrame call (encode + flush), following
+// geth's bounded-write model: the same 20s constant geth uses for
+// frameWriteTimeout (p2p/server.go, "Maximum amount of time allowed for
+// writing a complete message") applied per message in rlpxTransport.WriteMsg
+// (p2p/transport.go). A peer that stops reading cannot block a writer
+// indefinitely: deadline expiry surfaces as a write error, which BaseConn
+// treats as fatal and closes the connection. Var (not const) so tests can
+// shorten it.
+var frameWriteTimeout = 20 * time.Second
 
 // FrameTransport is the frame I/O contract required by BaseConn.
 //
@@ -55,6 +66,16 @@ func (t *transport) ReadFrame() (*wire.Frame, error) {
 }
 
 func (t *transport) WriteFrame(f *wire.Frame) error {
+	// Clear the deadline once this write finishes (success or error), so it
+	// does not stay armed on the conn and break later operations. Failure to
+	// clear must not fail an already-successful write.
+	defer func() {
+		_ = t.conn.SetWriteDeadline(time.Time{})
+	}()
+
+	if err := t.conn.SetWriteDeadline(time.Now().Add(frameWriteTimeout)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
 	if err := t.writeFrameFn(t.w, f); err != nil {
 		return fmt.Errorf("write frame: %w", err)
 	}

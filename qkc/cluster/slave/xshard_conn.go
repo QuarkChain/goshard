@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
@@ -16,23 +17,26 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// XshardHandler serves inbound xshard requests. It is implemented by the
-// business layer and injected at construction.
+// XshardHandler serves inbound xshard requests, implemented by the business
+// layer. Implementations must be safe for concurrent calls.
 //
-// Handler implementations must be safe for concurrent calls.
-//
-// The error return is reserved for connection-level failures. Returning an
-// error causes the connection to be closed by BaseConn. Business-level
-// failures must be encoded in the response ErrorCode field.
+// A returned error signals a connection-level failure and closes the
+// connection via BaseConn; business failures must be encoded in the response
+// ErrorCode instead.
 type XshardHandler interface {
 	AddXshardTxList(req *wire.AddXshardTxListRequest) (*wire.AddXshardTxListResponse, error)
 
 	BatchAddXshardTxList(req *wire.BatchAddXshardTxListRequest) (*wire.BatchAddXshardTxListResponse, error)
 }
 
-// xshardConn is a direct TCP connection to another slave, using 0-byte
-// metadata (slave↔slave mode). Callers reach it only through XshardPool.
-type xshardConn struct {
+// XshardConn is a direct TCP connection to another slave using 0-byte
+// metadata (slave↔slave mode). It embeds conn.BaseConn and adds slave peer
+// identity plus xshard-specific operations.
+//
+// Connections are owned by XshardPool and obtained via XshardPool.Lookup. A
+// looked-up connection may be closed concurrently at any time; callers must
+// tolerate operating on closed connections (sends just fail).
+type XshardConn struct {
 	*conn.BaseConn
 
 	handler XshardHandler
@@ -40,26 +44,23 @@ type xshardConn struct {
 	localID              []byte // this slave's identity, sent in PING/PONG
 	localFullShardIDList []uint32
 
-	stateMu sync.RWMutex // guards peerID / peerFullShardIDList
-	// Peer identity: injected at construction for outbound connections
-	// (master-advertised SlaveInfo, mirroring Python's SlaveConnection
-	// constructor); recorded from the first PING for inbound connections.
+	// Peer identity, immutable once published: constructor-injected for
+	// outbound (master-advertised SlaveInfo), recorded on the first PING for
+	// inbound. close(pingReceived) under pingOnce.Do both marks completion
+	// and happens-before publishes the fields to all lock-free readers.
 	peerID              []byte
 	peerFullShardIDList []uint32
-	// pingReceived is closed on the first PING (py: ping_received_event);
-	// pingOnce makes the close exactly-once under concurrent PING dispatch.
-	pingReceived chan struct{}
-	pingOnce     sync.Once
+	pingReceived        chan struct{} // closed on the first PING (py: ping_received_event)
+	pingOnce            sync.Once     // keeps the close exactly-once under concurrent PINGs
 }
 
-// newXshardConn creates a slave-to-slave connection. Outbound callers inject
-// the master-advertised peer identity (peerID/peerShardList); inbound callers
-// pass nil and identity is recorded from the first PING.
-func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, peerID []byte, peerShardList []uint32, handler XshardHandler, logger log.Logger) (*xshardConn, error) {
+// newXshardConn creates a slave-to-slave connection. Inbound callers pass nil
+// peer identity; it is then recorded from the first PING.
+func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, peerID []byte, peerShardList []uint32, handler XshardHandler, logger log.Logger) (*XshardConn, error) {
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
 	}
-	xc := &xshardConn{
+	xc := &XshardConn{
 		handler:              handler,
 		localID:              append([]byte(nil), localID...),
 		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
@@ -90,27 +91,82 @@ func newXshardConn(nc net.Conn, maxPayloadSize uint32, localID []byte, localFull
 	return xc, nil
 }
 
-// handlePing performs slave identity handshake.
-func (x *xshardConn) handlePing(req any) (any, error) {
+// Public API
+
+// RemoteID returns a copy of the peer's id. Metadata is immutable once
+// published (see the peerID field), so the read needs no lock.
+func (x *XshardConn) RemoteID() []byte {
+	return append([]byte(nil), x.peerID...)
+}
+
+// RemoteFullShardIDList returns a copy of the peer's full shard ID list,
+// subject to the same guarantees as RemoteID.
+func (x *XshardConn) RemoteFullShardIDList() []uint32 {
+	return append([]uint32(nil), x.peerFullShardIDList...)
+}
+
+// SendAddXshardTxList sends an AddXshardTxListRequest to the peer.
+func (x *XshardConn) SendAddXshardTxList(ctx context.Context, req *wire.AddXshardTxListRequest) error {
+	resp, err := x.sendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), req)
+	if err != nil {
+		return err
+	}
+
+	r, ok := resp.(*wire.AddXshardTxListResponse)
+	if !ok {
+		return fmt.Errorf("unexpected response %T", resp)
+	}
+	if r.ErrorCode != 0 {
+		return fmt.Errorf("AddXshardTxList failed: %d", r.ErrorCode)
+	}
+
+	return nil
+}
+
+// SendBatchAddXshardTxList sends a BatchAddXshardTxListRequest to the peer.
+func (x *XshardConn) SendBatchAddXshardTxList(ctx context.Context, req *wire.BatchAddXshardTxListRequest) error {
+	resp, err := x.sendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), req)
+	if err != nil {
+		return err
+	}
+
+	r, ok := resp.(*wire.BatchAddXshardTxListResponse)
+	if !ok {
+		return fmt.Errorf("unexpected response %T", resp)
+	}
+
+	if r.ErrorCode != 0 {
+		return fmt.Errorf("BatchAddXshardTxList failed: %d", r.ErrorCode)
+	}
+
+	return nil
+}
+
+// Internal implementation
+
+// handlePing performs the slave identity handshake. Peer metadata is recorded
+// at most once by pingOnce.Do (see the peerID field); an empty inbound shard
+// list publishes nothing and is rejected below.
+func (x *XshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 
-	x.stateMu.Lock()
-	// Identity is written only while unset (py: `if not self.id`): outbound
-	// is pre-filled at construction so a late PING cannot overwrite it, and
-	// an empty id does not lock identity.
-	if len(x.peerID) == 0 {
-		x.peerID = append([]byte(nil), ping.ID...)
-		x.peerFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
-	}
-	emptyShardList := len(x.peerFullShardIDList) == 0
-	x.stateMu.Unlock()
+	x.pingOnce.Do(func() {
+		if len(x.peerID) == 0 {
+			if len(ping.FullShardIDList) == 0 {
+				// An invalid inbound identity must not complete the handshake.
+				return
+			}
 
-	// A handler error closes the connection.
-	if emptyShardList {
+			x.peerID = append([]byte(nil), ping.ID...)
+			x.peerFullShardIDList = append([]uint32(nil), ping.FullShardIDList...)
+		}
+
+		close(x.pingReceived)
+	})
+
+	if len(x.peerFullShardIDList) == 0 {
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
 	}
-
-	x.pingOnce.Do(func() { close(x.pingReceived) })
 
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), x.localID...),
@@ -119,40 +175,34 @@ func (x *xshardConn) handlePing(req any) (any, error) {
 }
 
 // handleAddXshardTxList delegates to the business handler.
-func (x *xshardConn) handleAddXshardTxList(req any) (any, error) {
+func (x *XshardConn) handleAddXshardTxList(req any) (any, error) {
 	return x.handler.AddXshardTxList(req.(*wire.AddXshardTxListRequest))
 }
 
 // handleBatchAddXshardTxList delegates to the business handler.
-func (x *xshardConn) handleBatchAddXshardTxList(req any) (any, error) {
+func (x *XshardConn) handleBatchAddXshardTxList(req any) (any, error) {
 	return x.handler.BatchAddXshardTxList(req.(*wire.BatchAddXshardTxListRequest))
 }
 
-func (x *xshardConn) remoteID() []byte {
-	x.stateMu.RLock()
-	defer x.stateMu.RUnlock()
-	return append([]byte(nil), x.peerID...)
-}
+// waitUntilPingReceived blocks until the first PING, connection close, or
+// handshake timeout, returning false on close or timeout.
+func (x *XshardConn) waitUntilPingReceived() bool {
+	timer := time.NewTimer(xshardHandshakeTimeout)
+	defer timer.Stop()
 
-func (x *xshardConn) remoteFullShardIDList() []uint32 {
-	x.stateMu.RLock()
-	defer x.stateMu.RUnlock()
-	return append([]uint32(nil), x.peerFullShardIDList...)
-}
-
-// waitUntilPingReceived blocks until the first PING or connection close,
-// returning false on close.
-func (x *xshardConn) waitUntilPingReceived() bool {
 	select {
 	case <-x.pingReceived:
 		return !x.IsClosed()
 	case <-x.WaitUntilClosed():
 		return false
+	case <-timer.C:
+		x.Close()
+		return false
 	}
 }
 
 // sendPing sends PING and returns the peer's id and shard list from PONG.
-func (x *xshardConn) sendPing(ctx context.Context) ([]byte, []uint32, error) {
+func (x *XshardConn) sendPing(ctx context.Context) ([]byte, []uint32, error) {
 	req := &wire.PingRequest{
 		ID:              x.localID,
 		FullShardIDList: x.localFullShardIDList,
@@ -173,48 +223,8 @@ func (x *xshardConn) sendPing(ctx context.Context) ([]byte, []uint32, error) {
 	return pong.ID, pong.FullShardIDList, nil
 }
 
-// --------------------
-// outbound protocol send
-// --------------------
-
-func (x *xshardConn) sendAddXshardTxList(ctx context.Context, req *wire.AddXshardTxListRequest) error {
-	resp, err := x.sendRPC(ctx, byte(wire.ClusterOpAddXshardTxListRequest), req)
-	if err != nil {
-		return err
-	}
-
-	r, ok := resp.(*wire.AddXshardTxListResponse)
-	if !ok {
-		return fmt.Errorf("unexpected response %T", resp)
-	}
-	if r.ErrorCode != 0 {
-		return fmt.Errorf("AddXshardTxList failed: %d", r.ErrorCode)
-	}
-
-	return nil
-}
-
-func (x *xshardConn) sendBatchAddXshardTxList(ctx context.Context, req *wire.BatchAddXshardTxListRequest) error {
-	resp, err := x.sendRPC(ctx, byte(wire.ClusterOpBatchAddXshardTxListRequest), req)
-	if err != nil {
-		return err
-	}
-
-	r, ok := resp.(*wire.BatchAddXshardTxListResponse)
-	if !ok {
-		return fmt.Errorf("unexpected response %T", resp)
-	}
-
-	if r.ErrorCode != 0 {
-		return fmt.Errorf("BatchAddXshardTxList failed: %d", r.ErrorCode)
-	}
-
-	return nil
-}
-
-// sendRPC is xshard protocol helper.
-// BaseConn stays payload-oriented.
-func (x *xshardConn) sendRPC(ctx context.Context, opcode byte, req any) (any, error) {
+// sendRPC serializes req and delegates to BaseConn.SendRPC.
+func (x *XshardConn) sendRPC(ctx context.Context, opcode byte, req any) (any, error) {
 	payload, err := serialize.SerializeToBytes(req)
 	if err != nil {
 		return nil, err
