@@ -15,6 +15,15 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
+// PeerRouter resolves a virtual peer frame to the PeerConn serving
+// (cluster_peer_id, branch). A nil result means no such peer (Python
+// NULL_CONNECTION): the frame is consumed and dropped by the caller.
+// The registry and lookup implementation are owned by the upper runtime/service
+// layer and are not part of the communication layer.
+type PeerRouter interface {
+	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
+}
+
 // MasterHandler serves inbound RPCs from the master. It is implemented by
 // the service layer and injected at construction.
 //
@@ -94,10 +103,9 @@ type MasterConnConfig struct {
 	// here; the runtime/service layer implements them.
 	Handler MasterHandler
 
-	// Router resolves virtual peer frames to their PeerConn. It is the minimal
-	// routing capability required for forwarding frames received from the master.
-	// The registry and lookup implementation are owned by the upper runtime/service
-	// layer and are not part of the communication layer.
+	// Router resolves virtual peer frames to their PeerConn (required). It is
+	// the minimal routing capability required for forwarding frames received
+	// from the master.
 	Router PeerRouter
 
 	// Logger defaults to log.Root() if nil.

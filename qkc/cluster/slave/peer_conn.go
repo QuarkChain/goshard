@@ -13,13 +13,6 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// PeerRouter resolves a virtual peer frame to the PeerConn serving
-// (cluster_peer_id, branch). A nil result means no such peer (Python
-// NULL_CONNECTION): the frame is consumed and dropped by the caller.
-type PeerRouter interface {
-	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
-}
-
 // PeerHandler processes PeerConn's inbound commands and RPC requests. A nil
 // handler makes the connection return conn.ErrHandlerNotImplemented. Outbound
 // sends are not part of this interface.
