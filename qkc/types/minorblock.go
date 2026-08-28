@@ -171,9 +171,14 @@ func copyTransactions(txs []*Transaction) Transactions {
 // changes to header and to the field values will not affect the
 // block.
 //
-// The values of Root, ReceiptHash and Bloom in header
-// are ignored and set to values derived from the given txs and receipts.
+// TxHash and ReceiptHash in meta, and Bloom and MetaHash in header,
+// are replaced with values derived from the transactions and receipts.
 func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, receipts []*Receipt, trackingdata []byte) *MinorBlock {
+	// Every local transaction produces a receipt, while incoming cross-shard
+	// deposits may add receipts that have no corresponding local transaction.
+	if len(receipts) < len(txs) {
+		panic("receipts count is less than txs count")
+	}
 	b := &MinorBlock{header: CopyMinorBlockHeader(header), meta: CopyMinorBlockMeta(meta)}
 	if len(txs) > 0 {
 		b.transactions = copyTransactions(txs)
@@ -413,6 +418,9 @@ func (b *MinorBlock) GetSize() common.StorageSize {
 }
 
 func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *big.Int, xShardReceiveGasUsed *big.Int, coinbaseAmount *qkcCommon.TokenBalances, xShardTxCursorInfo *XShardTxCursorInfo) {
+	if len(receipts) < len(m.transactions) {
+		panic("receipts count is less than txs count")
+	}
 	if gasUsed == nil {
 		gasUsed = new(big.Int)
 	}
@@ -421,7 +429,7 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 	}
 
 	if xShardTxCursorInfo == nil {
-		m.meta.XShardTxCursorInfo = nil
+		m.meta.XShardTxCursorInfo = &XShardTxCursorInfo{}
 	} else {
 		cursor := *xShardTxCursorInfo
 		m.meta.XShardTxCursorInfo = &cursor
@@ -468,7 +476,7 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 	}
 
 	if xShardGasLimit == nil {
-		xShardGasLimit = new(big.Int).Div(h.GasLimit(), new(big.Int).SetUint64(2))
+		xShardGasLimit = new(big.Int).Div(gasLimit, new(big.Int).SetUint64(2))
 	}
 
 	if extraData == nil {
@@ -526,7 +534,7 @@ func (h *MinorBlock) AddTx(tx *Transaction) {
 }
 
 func GetEmptyMinorBlock() *MinorBlock {
-	return NewMinorBlock(getDefaultMinorBlockHeader(), getDefaultMinorBlockMeta(), nil, nil, nil)
+	return NewMinorBlockWithHeader(getDefaultMinorBlockHeader(), getDefaultMinorBlockMeta())
 }
 
 func getDefaultMinorBlockHeader() *MinorBlockHeader {
@@ -540,8 +548,11 @@ func getDefaultMinorBlockHeader() *MinorBlockHeader {
 
 func getDefaultMinorBlockMeta() *MinorBlockMeta {
 	return &MinorBlockMeta{
-		GasUsed:           &serialize.Uint256{Value: new(big.Int)},
-		CrossShardGasUsed: &serialize.Uint256{Value: new(big.Int)},
-		XShardGasLimit:    &serialize.Uint256{Value: params.DefaultBlockGasLimit},
+		GasUsed:            &serialize.Uint256{Value: new(big.Int)},
+		CrossShardGasUsed:  &serialize.Uint256{Value: new(big.Int)},
+		XShardTxCursorInfo: &XShardTxCursorInfo{},
+		XShardGasLimit: &serialize.Uint256{
+			Value: new(big.Int).Div(params.DefaultBlockGasLimit, big.NewInt(2)),
+		},
 	}
 }

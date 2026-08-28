@@ -187,7 +187,7 @@ func TestMinorBlockMutableDataIsCopied(t *testing.T) {
 	}
 
 	transaction := goldenTxs()[0]
-	block := NewMinorBlock(header, meta, []*Transaction{transaction}, nil, []byte{1, 2, 3})
+	block := NewMinorBlock(header, meta, []*Transaction{transaction}, []*Receipt{NewReceipt(false, 0)}, []byte{1, 2, 3})
 
 	trackingData := block.TrackingData()
 	trackingData[0] = 9
@@ -251,6 +251,9 @@ func TestCreateBlockToAppendCopiesInputs(t *testing.T) {
 	if child.Difficulty().Cmp(big.NewInt(2)) != 0 || child.GasLimit().Cmp(big.NewInt(3)) != 0 {
 		t.Fatal("child block retained caller-owned big integers")
 	}
+	if got, want := child.GetXShardGasLimit(), big.NewInt(1); got.Cmp(want) != 0 {
+		t.Fatalf("child block cross-shard gas limit = %v, want %v", got, want)
+	}
 	if got := child.Extra()[0]; got != 4 {
 		t.Fatalf("child block retained caller-owned extra data: got %d, want 4", got)
 	}
@@ -267,10 +270,55 @@ func TestCreateBlockToAppendCopiesInputs(t *testing.T) {
 	}
 }
 
-func TestEmptyMinorBlockGasUsed(t *testing.T) {
+func TestMinorBlockReceiptCount(t *testing.T) {
+	header, meta := testMinorBlockHeader()
+	tx := goldenTxs()[0]
+	receipt := NewReceipt(false, 0)
+
+	// Incoming cross-shard deposits may add receipts beyond the local tx count.
+	NewMinorBlock(header, meta, []*Transaction{tx}, []*Receipt{receipt, receipt}, nil)
+
+	tests := []struct {
+		name string
+		call func()
+	}{
+		{
+			name: "NewMinorBlock",
+			call: func() { NewMinorBlock(header, meta, []*Transaction{tx}, nil, nil) },
+		},
+		{
+			name: "Finalize",
+			call: func() {
+				block := NewMinorBlockWithHeader(header, meta).WithBody([]*Transaction{tx}, nil)
+				block.Finalize(nil, common.Hash{}, nil, nil, nil, nil)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s accepted fewer receipts than transactions", test.name)
+				}
+			}()
+			test.call()
+		})
+	}
+}
+
+func TestEmptyMinorBlockDefaults(t *testing.T) {
 	block := GetEmptyMinorBlock()
 	if block.GasUsed().Sign() != 0 || block.CrossShardGasUsed().Sign() != 0 {
 		t.Fatalf("empty block gas used = %v/%v, want 0/0", block.GasUsed(), block.CrossShardGasUsed())
+	}
+	if cursor := block.Meta().XShardTxCursorInfo; cursor == nil || *cursor != (XShardTxCursorInfo{}) {
+		t.Fatalf("empty block cursor = %#v, want zero cursor", cursor)
+	}
+	if got, want := block.GetXShardGasLimit(), big.NewInt(6_000_000); got.Cmp(want) != 0 {
+		t.Fatalf("empty block cross-shard gas limit = %v, want %v", got, want)
+	}
+	if block.TxHash() != (common.Hash{}) || block.ReceiptHash() != (common.Hash{}) || block.MetaHash() != (common.Hash{}) {
+		t.Fatalf("empty block derived non-default hashes: tx=%s receipt=%s meta=%s", block.TxHash(), block.ReceiptHash(), block.MetaHash())
 	}
 }
 
@@ -504,6 +552,7 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	}
 
 	block.AddTx(goldenTxs()[0])
+	receipts := Receipts{NewReceipt(false, 0)}
 	if block.hash.Load() != nil {
 		t.Fatal("AddTx did not clear the hash cache")
 	}
@@ -511,13 +560,16 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 		t.Fatal("AddTx did not clear the size cache")
 	}
 	block.Size()
-	block.Finalize(nil, common.Hash{}, nil, nil, nil, nil)
+	block.Finalize(receipts, common.Hash{}, nil, nil, nil, nil)
 	if block.size.Load() != nil {
 		t.Fatal("Finalize did not clear the size cache")
 	}
+	if cursor := block.Meta().XShardTxCursorInfo; cursor == nil || *cursor != (XShardTxCursorInfo{}) {
+		t.Fatalf("Finalize nil cursor = %#v, want zero cursor", cursor)
+	}
 
 	cursor := &XShardTxCursorInfo{RootBlockHeight: 1, MinorBlockIndex: 2, XShardDepositIndex: 3}
-	block.Finalize(nil, common.Hash{}, nil, nil, nil, cursor)
+	block.Finalize(receipts, common.Hash{}, nil, nil, nil, cursor)
 	wantMetaHash := block.MetaHash()
 	wantHash := block.Hash()
 	cursor.RootBlockHeight = 9
@@ -532,7 +584,7 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	xShardGasUsed := big.NewInt(12)
 	coinbaseAmount := qkcCommon.NewEmptyTokenBalances()
 	coinbaseAmount.SetValue(uint256.NewInt(13), 1)
-	block.Finalize(nil, common.Hash{}, gasUsed, xShardGasUsed, coinbaseAmount, nil)
+	block.Finalize(receipts, common.Hash{}, gasUsed, xShardGasUsed, coinbaseAmount, nil)
 	wantMetaHash = block.MetaHash()
 	wantHash = block.Hash()
 	gasUsed.SetInt64(21)
