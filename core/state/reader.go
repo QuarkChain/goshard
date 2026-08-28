@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/overlay"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
@@ -105,11 +106,23 @@ func (r *flatReader) Account(addr common.Address) (*types.StateAccount, error) {
 	if account == nil {
 		return nil, nil
 	}
+	return slimAccountToStateAccount(account)
+}
+
+func slimAccountToStateAccount(account *types.SlimAccount) (*types.StateAccount, error) {
 	acct := &types.StateAccount{
-		Nonce:    account.Nonce,
-		Balance:  account.Balance,
-		CodeHash: account.CodeHash,
-		Root:     common.BytesToHash(account.Root),
+		Nonce:        account.Nonce,
+		Balance:      account.Balance,
+		CodeHash:     account.CodeHash,
+		Root:         common.BytesToHash(account.Root),
+		FullShardKey: account.FullShardKey,
+	}
+	if len(account.MntBal) > 0 {
+		mnt, err := qkccommon.NewTokenBalances(account.MntBal)
+		if err != nil {
+			return nil, err
+		}
+		acct.MntBalances = mnt
 	}
 	if len(acct.CodeHash) == 0 {
 		acct.CodeHash = types.EmptyCodeHash.Bytes()

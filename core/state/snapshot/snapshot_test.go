@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
@@ -41,16 +40,18 @@ func randomHash() common.Hash {
 	return hash
 }
 
-// randomAccount generates a random account and returns it RLP encoded.
+// randomAccount generates a random account in the slim RLP encoding the
+// snapshot layers store. It has to be slim: the full account encoding is
+// QuarkChain's six-element leaf, whose second element is the token balance blob
+// rather than a balance integer, so feeding it to a reader that decodes
+// SlimAccount fails on the first field that is not an integer.
 func randomAccount() []byte {
-	a := &types.StateAccount{
+	return types.SlimAccountRLP(types.StateAccount{
 		Balance:  uint256.NewInt(rand.Uint64()),
 		Nonce:    rand.Uint64(),
 		Root:     randomHash(),
 		CodeHash: types.EmptyCodeHash[:],
-	}
-	data, _ := rlp.EncodeToBytes(a)
-	return data
+	})
 }
 
 // randomAccountSet generates a set of random accounts with the given strings as

@@ -184,7 +184,7 @@ func NewTokenBalances(data []byte) (*TokenBalances, error) {
 	case tokenBalanceTriePrefix:
 		return nil, errors.New("token balance trie encoding is unsupported")
 	default:
-		return nil, fmt.Errorf("Unknown enum byte in token_balances:%v", data[0])
+		return nil, fmt.Errorf("unknown enum byte in token_balances: %v", data[0])
 
 	}
 	return tokenBalances, nil
@@ -257,6 +257,13 @@ func (t *TokenBalances) GetBalanceMap() map[uint64]*uint256.Int {
 
 func (t *TokenBalances) Len() int {
 	return len(t.balances)
+}
+
+// NonZeroLen is the number of tokens that survive serialization: entries holding
+// a zero balance stay in the map (so the blob is not empty) but are dropped from
+// the pair list, and it is the pair list that TokenTrieThreshold bounds.
+func (t *TokenBalances) NonZeroLen() int {
+	return t.nonZeroEntriesInBalancesCache()
 }
 
 func (t *TokenBalances) nonZeroEntriesInBalancesCache() int {

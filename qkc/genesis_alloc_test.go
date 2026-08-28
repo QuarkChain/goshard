@@ -16,10 +16,10 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/config"
-	"github.com/ethereum/go-ethereum/qkc/state"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/holiman/uint256"
 )
 
 // TestGenesisAllocRootFromFixture pins the genesis state root of each real
@@ -147,8 +147,8 @@ func TestCommitGenesisAllocPreservesExplicitEmptyCode(t *testing.T) {
 		t.Fatalf("commitGenesisAlloc: %v", err)
 	}
 	acct := readAccount(t, db, root, addr)
-	if acct.Nonce != 1 || acct.CodeHash != coretypes.EmptyCodeHash {
-		t.Errorf("account = nonce %d/code %s, want nonce 1 with empty code hash", acct.Nonce, acct.CodeHash)
+	if acct.Nonce != 1 || !bytes.Equal(acct.CodeHash, coretypes.EmptyCodeHash.Bytes()) {
+		t.Errorf("account = nonce %d/code %x, want nonce 1 with empty code hash", acct.Nonce, acct.CodeHash)
 	}
 }
 
@@ -180,21 +180,22 @@ func TestGenesisAllocAccountEncoding(t *testing.T) {
 	if acct.Nonce != 1 {
 		t.Errorf("nonce = %d, want 1 for an account with code", acct.Nonce)
 	}
-	if want := crypto.Keccak256Hash(code); acct.CodeHash != want {
-		t.Errorf("code hash = %s, want %s", acct.CodeHash, want)
+	if want := crypto.Keccak256Hash(code); !bytes.Equal(acct.CodeHash, want.Bytes()) {
+		t.Errorf("code hash = %x, want %s", acct.CodeHash, want)
 	}
-	if got := rawdb.ReadCode(db, acct.CodeHash); len(got) != len(code) {
+	if got := rawdb.ReadCode(db, common.BytesToHash(acct.CodeHash)); len(got) != len(code) {
 		t.Errorf("stored code = %x, want %x", got, code)
 	}
 	if acct.Root == coretypes.EmptyRootHash {
 		t.Error("storage root is empty, want the slot's trie root")
 	}
-	// The full shard key is a fixed four-byte string, leading zeros included.
-	if want := [4]byte{0x00, 0x00, 0x75, 0xb2}; acct.FullShardKey != want {
-		t.Errorf("full shard key = %x, want %x", acct.FullShardKey, want)
+	if want := uint32(0x000075b2); acct.FullShardKey != want {
+		t.Errorf("full shard key = %#x, want %#x", acct.FullShardKey, want)
 	}
-	if len(acct.TokenBalances) == 0 || acct.TokenBalances[0] != 0x00 {
-		t.Errorf("token balances blob = %x, want the 0x00-tagged list form", acct.TokenBalances)
+	// The QKC balance rides in Balance; the leaf merges it back into the token
+	// pair list, whose bytes core/types pins.
+	if want := uint256.NewInt(1000); !acct.Balance.Eq(want) {
+		t.Errorf("balance = %s, want %s", acct.Balance, want)
 	}
 
 	// An account without code keeps nonce 0 and the empty code hash.
@@ -207,7 +208,7 @@ func TestGenesisAllocAccountEncoding(t *testing.T) {
 		t.Fatalf("commitGenesisAlloc(plain): %v", err)
 	}
 	bare := readAccount(t, db2, root2, plain)
-	if bare.Nonce != 0 || bare.CodeHash != coretypes.EmptyCodeHash || bare.Root != coretypes.EmptyRootHash {
+	if bare.Nonce != 0 || !bytes.Equal(bare.CodeHash, coretypes.EmptyCodeHash.Bytes()) || bare.Root != coretypes.EmptyRootHash {
 		t.Errorf("plain account = %+v, want nonce 0 with empty code and storage", bare)
 	}
 }
@@ -315,7 +316,7 @@ func TestCommitGenesisAllocPersistsStorage(t *testing.T) {
 }
 
 // readAccount decodes one leaf back out of a committed state trie.
-func readAccount(t *testing.T, db ethdb.Database, root common.Hash, addr account.Address) *state.Account {
+func readAccount(t *testing.T, db ethdb.Database, root common.Hash, addr account.Address) *coretypes.StateAccount {
 	t.Helper()
 	tdb := triedb.NewDatabase(db, triedb.HashDefaults)
 	defer tdb.Close()
@@ -329,7 +330,7 @@ func readAccount(t *testing.T, db ethdb.Database, root common.Hash, addr account
 	if len(enc) == 0 {
 		t.Fatalf("account %s missing from the trie", addr.ToHex())
 	}
-	acct := new(state.Account)
+	acct := new(coretypes.StateAccount)
 	if err := rlp.DecodeBytes(enc, acct); err != nil {
 		t.Fatalf("decode account: %v", err)
 	}

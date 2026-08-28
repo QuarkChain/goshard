@@ -142,29 +142,34 @@ func (a fullShardList) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a fullShardList) Less(i, j int) bool { return a[i] < a[j] }
 
 type QuarkChainConfig struct {
-	ChainSize                             uint32      `json:"CHAIN_SIZE"`
-	MaxNeighbors                          uint32      `json:"MAX_NEIGHBORS"`
-	NetworkID                             uint32      `json:"NETWORK_ID"`
-	TransactionQueueSizeLimitPerShard     uint64      `json:"TRANSACTION_QUEUE_SIZE_LIMIT_PER_SHARD"`
-	BlockExtraDataSizeLimit               uint32      `json:"BLOCK_EXTRA_DATA_SIZE_LIMIT"`
-	GuardianPublicKey                     []byte      `json:"-"`
-	RootSignerPrivateKey                  []byte      `json:"-"`
-	P2PProtocolVersion                    uint32      `json:"P2P_PROTOCOL_VERSION"`
-	P2PCommandSizeLimit                   uint32      `json:"P2P_COMMAND_SIZE_LIMIT"`
-	SkipRootDifficultyCheck               bool        `json:"SKIP_ROOT_DIFFICULTY_CHECK"`
-	SkipRootCoinbaseCheck                 bool        `json:"SKIP_ROOT_COINBASE_CHECK"`
-	SkipMinorDifficultyCheck              bool        `json:"SKIP_MINOR_DIFFICULTY_CHECK"`
-	GenesisToken                          string      `json:"GENESIS_TOKEN"`
-	Root                                  *RootConfig `json:"ROOT"`
-	shards                                map[uint32]*ShardConfig
-	Chains                                map[uint32]*ChainConfig `json:"-"`
-	RewardTaxRate                         *big.Rat                `json:"-"`
-	LocalFeeRate                          *big.Rat                `json:"-"`
-	RewardCalculateRate                   *big.Rat                `json:"-"`
-	BlockRewardDecayFactor                *big.Rat                `json:"-"`
-	chainIdToShardSize                    map[uint32]uint32
-	chainIdToShardIds                     map[uint32][]uint32
-	defaultChainTokenID                   uint64
+	ChainSize                         uint32      `json:"CHAIN_SIZE"`
+	MaxNeighbors                      uint32      `json:"MAX_NEIGHBORS"`
+	NetworkID                         uint32      `json:"NETWORK_ID"`
+	TransactionQueueSizeLimitPerShard uint64      `json:"TRANSACTION_QUEUE_SIZE_LIMIT_PER_SHARD"`
+	BlockExtraDataSizeLimit           uint32      `json:"BLOCK_EXTRA_DATA_SIZE_LIMIT"`
+	GuardianPublicKey                 []byte      `json:"-"`
+	RootSignerPrivateKey              []byte      `json:"-"`
+	P2PProtocolVersion                uint32      `json:"P2P_PROTOCOL_VERSION"`
+	P2PCommandSizeLimit               uint32      `json:"P2P_COMMAND_SIZE_LIMIT"`
+	SkipRootDifficultyCheck           bool        `json:"SKIP_ROOT_DIFFICULTY_CHECK"`
+	SkipRootCoinbaseCheck             bool        `json:"SKIP_ROOT_COINBASE_CHECK"`
+	SkipMinorDifficultyCheck          bool        `json:"SKIP_MINOR_DIFFICULTY_CHECK"`
+	GenesisToken                      string      `json:"GENESIS_TOKEN"`
+	Root                              *RootConfig `json:"ROOT"`
+	shards                            map[uint32]*ShardConfig
+	Chains                            map[uint32]*ChainConfig `json:"-"`
+	RewardTaxRate                     *big.Rat                `json:"-"`
+	LocalFeeRate                      *big.Rat                `json:"-"`
+	RewardCalculateRate               *big.Rat                `json:"-"`
+	BlockRewardDecayFactor            *big.Rat                `json:"-"`
+	chainIdToShardSize                map[uint32]uint32
+	chainIdToShardIds                 map[uint32][]uint32
+	defaultChainTokenID               uint64
+	// EnableTxTimeStamp and TxWhitelistSenders are the early-mainnet gate:
+	// before that timestamp only whitelisted senders could transact at all
+	// (shard_state.py:501).
+	EnableTxTimeStamp                     uint64      `json:"ENABLE_TX_TIMESTAMP"`
+	TxWhitelistSenders                    []string    `json:"TX_WHITELIST_SENDERS"`
 	EnableEvmTimeStamp                    uint64      `json:"ENABLE_EVM_TIMESTAMP"`
 	EnableQkcHashXHeight                  uint64      `json:"ENABLE_QKCHASHX_HEIGHT"`
 	EnableNonReservedNativeTokenTimestamp uint64      `json:"ENABLE_NON_RESERVED_NATIVE_TOKEN_TIMESTAMP"`
@@ -483,6 +488,18 @@ func NewQuarkChainConfig() *QuarkChainConfig {
 func (q *QuarkChainConfig) SetShardsAndValidate(shards map[uint32]*ShardConfig) { // only used in gen config
 	q.shards = shards
 	q.initAndValidate()
+}
+
+// IsTxSenderWhitelisted reports whether sender may transact before
+// ENABLE_TX_TIMESTAMP. The configured list is hex without the 0x prefix and in
+// mixed case, so it is compared as an address rather than as a string.
+func (q *QuarkChainConfig) IsTxSenderWhitelisted(sender ethcom.Address) bool {
+	for _, entry := range q.TxWhitelistSenders {
+		if ethcom.HexToAddress(entry) == sender {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *QuarkChainConfig) GetDefaultChainTokenID() uint64 {

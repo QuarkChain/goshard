@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 )
 
 // memoryGasCost calculates the quadratic gas for memory expansion. It does so
@@ -306,6 +307,15 @@ func gasCreate2(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memoryS
 	if wordGas, overflow = math.SafeMul(toWordSize(wordGas), params.Keccak256WordGas); overflow {
 		return GasCosts{}, ErrGasUintOverflow
 	}
+	// The word charge is where pyquarkchain's counter can go negative, and only
+	// when the memory needs no growing: mem_extend is what would otherwise catch
+	// it, and it checks nothing when it has nothing to grow. gas is the memory
+	// cost so far, and contract.Gas is already net of CREATE2's 32000, so both
+	// conditions read directly off this frame. See EVM.QKCGasUnderflow for why
+	// the answer is a boundary rather than an out-of-gas.
+	if evm.QKC != nil && gas == 0 && wordGas > contract.Gas.RegularGas {
+		evm.QKC.gasUnderflow = true
+	}
 	if gas, overflow = math.SafeAdd(gas, wordGas); overflow {
 		return GasCosts{}, ErrGasUintOverflow
 	}
@@ -491,7 +501,7 @@ func gasSelfdestruct(evm *EVM, contract *Contract, stack *Stack, mem *Memory, me
 
 		if evm.chainRules.IsEIP158 {
 			// if empty and transfers value
-			if evm.StateDB.Empty(address) && evm.StateDB.GetBalance(contract.Address()).Sign() != 0 {
+			if evm.StateDB.Empty(address) && selfdestructBalance(evm, contract.Address()).Sign() != 0 {
 				gas += params.CreateBySelfdestructGas
 			}
 		} else if !evm.StateDB.Exist(address) {
@@ -499,8 +509,26 @@ func gasSelfdestruct(evm *EVM, contract *Contract, stack *Stack, mem *Memory, me
 		}
 	}
 
+	// The refund counts distinct accounts. QuarkChain does not mark the account
+	// destroyed at the opcode, so the message's own suicide list is what says
+	// whether this one has already been counted (messages.py:322).
+	if evm.QKC != nil {
+		if !evm.QKC.hasSuicided(contract.Address()) {
+			evm.StateDB.AddRefund(params.SelfdestructRefundGas)
+		}
+		return GasCosts{RegularGas: gas}, nil
+	}
 	if !evm.StateDB.HasSelfDestructed(contract.Address()) {
 		evm.StateDB.AddRefund(params.SelfdestructRefundGas)
 	}
 	return GasCosts{RegularGas: gas}, nil
+}
+
+// selfdestructBalance is the balance SELFDESTRUCT would move: the chain's
+// default token under QuarkChain rules, the single scalar otherwise.
+func selfdestructBalance(evm *EVM, addr common.Address) *uint256.Int {
+	if evm.QKC != nil {
+		return evm.QKC.defaultBalance(addr)
+	}
+	return evm.StateDB.GetBalance(addr)
 }

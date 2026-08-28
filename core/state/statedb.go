@@ -137,6 +137,15 @@ type StateDB struct {
 	// Snapshot and RevertToSnapshot.
 	journal *journal
 
+	// fullShardKey is the QuarkChain shard key of the current transaction's
+	// destination. It is set once per transaction via SetFullShardKey and
+	// assigned to any newly created accounts that have no prior state.
+	fullShardKey uint32
+
+	// qkcShardKeys is the shard key each absent address was first looked up
+	// with, kept for the lifetime of the block. See noteQKCShardKey.
+	qkcShardKeys map[common.Address]uint32
+
 	// State witness if cross validation is needed
 	witness *stateless.Witness
 
@@ -187,6 +196,7 @@ func NewWithReader(root common.Hash, db Database, reader Reader) (*StateDB, erro
 		reader:               reader,
 		stateObjects:         make(map[common.Address]*stateObject),
 		stateObjectsDestruct: make(map[common.Address]*stateObject),
+		qkcShardKeys:         make(map[common.Address]uint32),
 		mutations:            make(map[common.Address]*mutation),
 		logs:                 make(map[common.Hash][]*types.Log),
 		preimages:            make(map[common.Hash][]byte),
@@ -290,6 +300,13 @@ func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
 // Preimages returns a list of SHA3 preimages that have been submitted.
 func (s *StateDB) Preimages() map[common.Hash][]byte {
 	return s.preimages
+}
+
+// SetFullShardKey sets the QuarkChain shard key for the current transaction
+// context. It is called once per transaction before account operations, and
+// any newly created accounts (with no prior state) inherit this value.
+func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
+	s.fullShardKey = fullShardKey
 }
 
 // AddRefund adds gas to the refund counter
@@ -611,6 +628,7 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 
 	// Short circuit if the account is not found
 	if acct == nil {
+		s.noteQKCShardKey(addr)
 		return nil
 	}
 	// Schedule the resolved account for prefetching if it's enabled.
@@ -638,10 +656,24 @@ func (s *StateDB) getOrNewStateObject(addr common.Address) *stateObject {
 	return obj
 }
 
-// createObject creates a new state object. The assumption is held there is no
-// existing account with the given address, otherwise it will be silently overwritten.
+// createObject creates a new state object, replacing any object currently live
+// at the address. The prior object's storage/balance/nonce are dropped (the
+// caller is responsible for having deleted them where required), but its
+// QuarkChain FullShardKey is preserved: the shard key is assigned on first
+// creation and must remain stable across a resurrection, so it is carried over
+// from the existing account rather than reset to the current transaction's key.
 func (s *StateDB) createObject(addr common.Address) *stateObject {
+	// Check for an existing account so we can preserve its FullShardKey.
+	prev := s.getStateObject(addr)
+
 	obj := newObject(s, addr, nil)
+	// New accounts carry the shard key that was current when the address was
+	// first looked up, not the one current now — see noteQKCShardKey.
+	obj.data.FullShardKey = s.qkcShardKey(addr)
+	// If the account previously existed, keep its original shard key unchanged.
+	if prev != nil {
+		obj.data.FullShardKey = prev.data.FullShardKey
+	}
 	s.journal.createObject(addr)
 	s.setStateObject(obj)
 	return obj
@@ -696,6 +728,8 @@ func (s *StateDB) Copy() *StateDB {
 		logs:                 make(map[common.Hash][]*types.Log, len(s.logs)),
 		logSize:              s.logSize,
 		preimages:            maps.Clone(s.preimages),
+		fullShardKey:         s.fullShardKey,
+		qkcShardKeys:         maps.Clone(s.qkcShardKeys),
 
 		// Do we need to copy the access list and transient storage?
 		// In practice: No. At the start of a transaction, these two lists are empty.
@@ -1324,6 +1358,9 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 	// Clear all internal flags and update state root at the end.
 	s.mutations = make(map[common.Address]*mutation)
 	s.stateObjectsDestruct = make(map[common.Address]*stateObject)
+	// The shard keys are a property of the account cache, which pyquarkchain
+	// also drops here (state.py:587).
+	s.qkcShardKeys = make(map[common.Address]uint32)
 
 	origin := s.originalRoot
 	s.originalRoot = root
