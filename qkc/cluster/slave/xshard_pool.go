@@ -198,9 +198,10 @@ func (p *XshardPool) Close() {
 // Internal implementation
 
 // rejectConnection closes a tracked but not-yet-registered connection and
-// evicts it from the tracking set. It is the single S1→S3 transition: every
-// failure path between trackConnection and registerConnection must go through
-// here, never through conn.Close() alone.
+// evicts it from the tracking set. Every failure path between
+// trackConnection and registerConnection must go through here, never
+// through conn.Close() alone: a conn left only in the tracking set would
+// linger until pool Close.
 func (p *XshardPool) rejectConnection(conn *XshardConn) {
 	conn.Close()
 

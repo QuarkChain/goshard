@@ -263,6 +263,31 @@ func TestXshardConn_XshardTxListServedByHandler(t *testing.T) {
 	}
 }
 
+// TestXshardConn_BatchAddXshardTxListServedByHandler verifies
+// BatchAddXshardTxList is served by the injected business handler and keeps
+// the connection open.
+func TestXshardConn_BatchAddXshardTxListServedByHandler(t *testing.T) {
+	client, server, cleanup := newTestConnPair(t)
+	defer cleanup()
+	server.Start()
+	client.Start()
+
+	txList := wire.RawBytes{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendBatchAddXshardTxList(ctx, &wire.BatchAddXshardTxListRequest{
+		AddXshardTxListRequestList: []wire.AddXshardTxListRequest{
+			{Branch: 1, TxList: &txList},
+			{Branch: 2, TxList: &txList},
+		},
+	}); err != nil {
+		t.Fatalf("sendBatchAddXshardTxList: %v", err)
+	}
+	if client.IsClosed() || server.IsClosed() {
+		t.Fatal("connection should stay open after BatchAddXshardTxList")
+	}
+}
+
 // TestXshardConn_SendPingRejectsWrongResponseOpcode verifies a wrong-opcode
 // PONG is rejected by sendPing's opcode check but does not close the connection.
 func TestXshardConn_SendPingRejectsWrongResponseOpcode(t *testing.T) {
@@ -577,7 +602,7 @@ func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
 
 // TestXshardPool_HandleInboundDeadConnEvicted verifies that an inbound conn
 // which closes before sending PING is evicted from the tracking set: dead
-// connections must not accumulate (F3).
+// connections must not accumulate.
 func TestXshardPool_HandleInboundDeadConnEvicted(t *testing.T) {
 	pool := mustNewXshardPool(t, []byte("local-slave"), []uint32{0x00030004})
 	defer pool.Close()
