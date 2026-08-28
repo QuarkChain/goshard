@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"net"
 	"sync/atomic"
@@ -27,6 +26,25 @@ type fakeMasterHandler struct {
 	errGenTx error
 	// createPeerCalls counts CreateClusterPeerConnection invocations.
 	createPeerCalls atomic.Int32
+	// createShardsCalls counts CreateShards invocations.
+	createShardsCalls atomic.Int32
+	// lastRootTip stores a copy of the most recent CreateShards argument.
+	lastRootTip atomic.Pointer[wire.RawBytes]
+	// destroyCalls counts DestroyClusterPeerConnection invocations.
+	destroyCalls atomic.Int32
+	// errCreateShards, if set, is returned by CreateShards to simulate a
+	// handler failure.
+	errCreateShards error
+}
+
+func (h *fakeMasterHandler) CreateShards(rootTip *wire.RawBytes) error {
+	h.createShardsCalls.Add(1)
+	if rootTip != nil {
+		cp := make(wire.RawBytes, len(*rootTip))
+		copy(cp, *rootTip)
+		h.lastRootTip.Store(&cp)
+	}
+	return h.errCreateShards
 }
 
 func (h *fakeMasterHandler) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
@@ -35,6 +53,7 @@ func (h *fakeMasterHandler) CreateClusterPeerConnection(req *wire.CreateClusterP
 }
 
 func (h *fakeMasterHandler) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
+	h.destroyCalls.Add(1)
 	return nil
 }
 
@@ -325,11 +344,12 @@ func TestMasterConn_ConfigValidation(t *testing.T) {
 // ── communication handlers ───────────────────────────────────────────────────
 
 // TestMasterConn_Ping verifies PING→PONG across the real wire path: it echoes
-// the slave's configured identity (never the PING payload's), behaves the same
-// with a root tip set (shard creation is a PR7 TODO and must not corrupt the
-// reply), and keeps the connection open.
+// the slave's configured identity (never the PING payload's), delegates a
+// carried RootTip to MasterHandler.CreateShards exactly once (nil RootTip must
+// not trigger it), and keeps the connection open.
 func TestMasterConn_Ping(t *testing.T) {
-	server, peer, cleanup := newMasterConnWithPeer(t, &fakeMasterHandler{})
+	handler := &fakeMasterHandler{}
+	server, peer, cleanup := newMasterConnWithPeer(t, handler)
 	defer cleanup()
 
 	for i, rootTip := range []*wire.RawBytes{nil, {0x01, 0x02}} {
@@ -370,6 +390,53 @@ func TestMasterConn_Ping(t *testing.T) {
 	select {
 	case <-server.WaitUntilClosed():
 		t.Fatal("connection closed by PING")
+	default:
+	}
+
+	if got := handler.createShardsCalls.Load(); got != 1 {
+		t.Fatalf("CreateShards calls: got %d, want 1 (only the non-nil RootTip)", got)
+	}
+	if got := handler.lastRootTip.Load(); got == nil || len(*got) != 2 || (*got)[0] != 0x01 || (*got)[1] != 0x02 {
+		t.Fatalf("CreateShards RootTip mismatch: got %v, want [2]byte{0x01, 0x02}", got)
+	}
+}
+
+// TestMasterConn_CreateShardsErrorClosesConnection verifies that a CreateShards
+// failure during PING is a connection-level failure: no PONG is written and the
+// connection closes (py: the create_shards exception propagates through
+// handle_ping into close_with_error, so the master never sees a PONG).
+func TestMasterConn_CreateShardsErrorClosesConnection(t *testing.T) {
+	handler := &fakeMasterHandler{errCreateShards: errors.New("boom")}
+	server, peer, cleanup := newMasterConnWithPeer(t, handler)
+	defer cleanup()
+
+	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
+		ID:              []byte("master"),
+		FullShardIDList: []uint32{0x00010001},
+		RootTip:         &wire.RawBytes{0x01},
+	})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+	if err := peer.send(&wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  byte(wire.ClusterOpPing),
+		RPCID:   1,
+		Payload: payload,
+	}); err != nil {
+		t.Fatalf("send ping: %v", err)
+	}
+
+	select {
+	case <-server.WaitUntilClosed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not close after CreateShards error")
+	}
+
+	// No PONG (or any other frame) may have been written before the close.
+	select {
+	case f := <-peer.frames:
+		t.Fatalf("unexpected frame after CreateShards failure: opcode 0x%x", f.Opcode)
 	default:
 	}
 }
@@ -413,7 +480,8 @@ func TestMasterConn_CreateClusterPeerConnectionDelegated(t *testing.T) {
 // DESTROY_CLUSTER_PEER_CONNECTION_COMMAND is accepted with rpc_id == 0 and does
 // not produce a response or close the connection.
 func TestMasterConn_NonRPCDispatch(t *testing.T) {
-	server, peer, cleanup := newMasterConnWithPeer(t, &fakeMasterHandler{})
+	handler := &fakeMasterHandler{}
+	server, peer, cleanup := newMasterConnWithPeer(t, handler)
 	defer cleanup()
 
 	// Fire-and-forget: rpc_id == 0, no response expected.
@@ -450,6 +518,16 @@ func TestMasterConn_NonRPCDispatch(t *testing.T) {
 	case <-server.WaitUntilClosed():
 		t.Fatal("connection closed by non-rpc command")
 	default:
+	}
+
+	// The destroy dispatch goroutine races with the PONG read above, so poll
+	// for the handler invocation instead of asserting immediately.
+	deadline := time.Now().Add(2 * time.Second)
+	for handler.destroyCalls.Load() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("handler.DestroyClusterPeerConnection called %d times, want 1", handler.destroyCalls.Load())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -768,42 +846,5 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 }
 
 // ── wire format ──────────────────────────────────────────────────────────────
-
-// TestMasterConn_FrameWireLayout verifies the full ClusterMetadata frame layout
-// written by MasterConn matches the Python protocol.
-func TestMasterConn_FrameWireLayout(t *testing.T) {
-	var buf bytes.Buffer
-	frame := &wire.Frame{
-		Meta:    wire.ClusterMetadata{Branch: 0x01020304, ClusterPeerID: 0x1122334455667788},
-		Opcode:  byte(wire.ClusterOpPing),
-		RPCID:   0xAABBCCDDEEFF0011,
-		Payload: []byte{0xAA, 0xBB},
-	}
-	if err := wire.WriteFrame(&buf, frame); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
-
-	wireBytes := buf.Bytes()
-	if len(wireBytes) != 4+12+1+8+2 {
-		t.Fatalf("frame length: got %d, want %d", len(wireBytes), 4+12+1+8+2)
-	}
-
-	if got := binary.BigEndian.Uint32(wireBytes[0:4]); got != 2 {
-		t.Fatalf("payload_len: got %d, want 2", got)
-	}
-	if got := binary.BigEndian.Uint32(wireBytes[4:8]); got != frame.Meta.Branch {
-		t.Fatalf("branch mismatch: got 0x%x", got)
-	}
-	if got := binary.BigEndian.Uint64(wireBytes[8:16]); got != frame.Meta.ClusterPeerID {
-		t.Fatalf("cluster_peer_id mismatch: got 0x%x", got)
-	}
-	if wireBytes[16] != frame.Opcode {
-		t.Fatalf("opcode mismatch: got 0x%x", wireBytes[16])
-	}
-	if got := binary.BigEndian.Uint64(wireBytes[17:25]); got != frame.RPCID {
-		t.Fatalf("rpc_id mismatch: got 0x%x", got)
-	}
-	if !bytes.Equal(wireBytes[25:], frame.Payload) {
-		t.Fatalf("payload mismatch: got %x", wireBytes[25:])
-	}
-}
+// Frame layout is covered by the wire package (TestWireFormatLayout); MasterConn
+// exercises it through the real transport in every wire-path test above.

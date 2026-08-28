@@ -18,11 +18,9 @@ import (
 // MasterHandler serves inbound RPCs from the master. It is implemented by
 // the service layer and injected at construction.
 //
-// Cluster peer connection management (CREATE/DESTROY) is delegated here too:
-// the runtime/service layer implements the create and destroy business
-// (py: slave.py handle_create_cluster_peer_connection_request /
-// handle_destroy_cluster_peer_connection_command). ConnectToSlaves is also
-// delegated (py: slave_connection_manager.connect_to_slave).
+// CREATE/DESTROY of cluster peer connections, ConnectToSlaves and CreateShards
+// are delegated here as well — see the method comments for ownership
+// boundaries.
 //
 // Handler implementations must be safe for concurrent calls.
 //
@@ -30,9 +28,23 @@ import (
 // error closes the connection (py: close_with_error). Business failures must
 // be encoded in the response ErrorCode field.
 type MasterHandler interface {
+	// CreateShards handles the RootTip carried by the master's PING.
+	// It owns shard-runtime initialization/update logic
+	// (py: slave_server.create_shards). The PONG handshake itself remains
+	// in MasterConn.
+	CreateShards(rootTip *wire.RawBytes) error
+	// CreateClusterPeerConnection and DestroyClusterPeerConnection handle
+	// the master's peer-connection management commands. The requests arrive
+	// through MasterConn, but PeerConn ownership belongs to the runtime,
+	// therefore creation and teardown are delegated.
 	CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error)
 	DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error
+	// ConnectToSlaves dials the fellow slaves advertised by the master. The
+	// resulting slave↔slave connections are owned by the xshard pool, so the
+	// dialing policy is service-layer business
+	// (py: slave_connection_manager.connect_to_slave).
 	ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error)
+
 	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
 	GenTx(req *wire.GenTxRequest) (*wire.GenTxResponse, error)
 	AddRootBlock(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error)
@@ -136,9 +148,11 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 			byte(wire.ClusterOpAddMinorBlockHeaderRequest): conn.OpSerializerFor[wire.AddMinorBlockHeaderRequest, wire.AddMinorBlockHeaderResponse](byte(wire.ClusterOpAddMinorBlockHeaderResponse)),
 
 			// §4 Master → Slave (sync / virtual conns)
-			byte(wire.ClusterOpSyncMinorBlockListRequest):           conn.OpSerializerFor[wire.SyncMinorBlockListRequest, wire.SyncMinorBlockListResponse](byte(wire.ClusterOpSyncMinorBlockListResponse)),
-			byte(wire.ClusterOpAddMinorBlockRequest):                conn.OpSerializerFor[wire.AddMinorBlockRequest, wire.AddMinorBlockResponse](byte(wire.ClusterOpAddMinorBlockResponse)),
-			byte(wire.ClusterOpCreateClusterPeerConnectionRequest):  conn.OpSerializerFor[wire.CreateClusterPeerConnectionRequest, wire.CreateClusterPeerConnectionResponse](byte(wire.ClusterOpCreateClusterPeerConnectionResponse)),
+			byte(wire.ClusterOpSyncMinorBlockListRequest):          conn.OpSerializerFor[wire.SyncMinorBlockListRequest, wire.SyncMinorBlockListResponse](byte(wire.ClusterOpSyncMinorBlockListResponse)),
+			byte(wire.ClusterOpAddMinorBlockRequest):               conn.OpSerializerFor[wire.AddMinorBlockRequest, wire.AddMinorBlockResponse](byte(wire.ClusterOpAddMinorBlockResponse)),
+			byte(wire.ClusterOpCreateClusterPeerConnectionRequest): conn.OpSerializerFor[wire.CreateClusterPeerConnectionRequest, wire.CreateClusterPeerConnectionResponse](byte(wire.ClusterOpCreateClusterPeerConnectionResponse)),
+			// 0 = non-RPC placeholder: ignored by Config validation and never
+			// read at runtime (see NonRPCOps below).
 			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): conn.OpSerializerFor[wire.DestroyClusterPeerConnectionCommand, wire.DestroyClusterPeerConnectionCommand](0),
 			byte(wire.ClusterOpGetMinorBlockRequest):                conn.OpSerializerFor[wire.GetMinorBlockRequest, wire.GetMinorBlockResponse](byte(wire.ClusterOpGetMinorBlockResponse)),
 			byte(wire.ClusterOpGetTransactionRequest):               conn.OpSerializerFor[wire.GetTransactionRequest, wire.GetTransactionResponse](byte(wire.ClusterOpGetTransactionResponse)),
@@ -206,6 +220,8 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		},
 		// Forwarder stays nil: routing peer traffic (cluster_peer_id != 0)
 		// to virtual PeerConns is PR6 (Dispatcher as the frame consumer).
+		// Until then, any peer frame (CommandOp opcode) is unregistered and
+		// closes the connection — MasterConn must not receive peer traffic.
 		Logger: cfg.Logger,
 	})
 	return mc, nil
@@ -259,16 +275,24 @@ func (mc *MasterConn) SendAddMinorBlockHeaderList(ctx context.Context, req *wire
 
 // ── Communication handlers ─────────────────────────────────────────────
 
-// handlePing responds to the master's PING with this slave's identity.
-// Python: MasterConnection.handle_ping -> Pong(self.slave_server.id, ...).
+// handlePing serves the master's PING, which has two roles:
+//
+//   - Protocol handshake: reply with this slave's identity. The PONG is built
+//     here because it is pure protocol framing
+//     (py: MasterConnection.handle_ping -> Pong(self.slave_server.id, ...)).
+//   - Runtime notification: a RootTip asks the runtime to create/update shards.
+//     That business logic is delegated to MasterHandler
+//     (py: await self.slave_server.create_shards(ping.root_tip)); MasterConn
+//     keeps only the delegation.
+//     That business logic is delegated to MasterHandler because shard
+//     lifecycle belongs to the runtime, not MasterConn.
 func (mc *MasterConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
-
 	if ping.RootTip != nil {
-		// TODO: create/update shard runtime from root tip when core.RootBlock
-		// is ported (py: await self.slave_server.create_shards(ping.root_tip)).
+		if err := mc.handler.CreateShards(ping.RootTip); err != nil {
+			return nil, err
+		}
 	}
-
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), mc.localID...),
 		FullShardIDList: append([]uint32(nil), mc.localFullShardIDList...),
@@ -277,16 +301,10 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 
 // ── Inbound handler dispatch (delegated to MasterHandler) ───────────────
 
-// handleCreateClusterPeerConnection delegates CREATE to the service layer,
-// which establishes the cluster peer connection for the given cluster_peer_id
-// (Python: slave.py:329-370).
 func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
 	return mc.handler.CreateClusterPeerConnection(req.(*wire.CreateClusterPeerConnectionRequest))
 }
 
-// handleDestroyClusterPeerConnection delegates DESTROY (a fire-and-forget
-// command) to the service layer, which tears down the cluster peer connection
-// for the given cluster_peer_id (Python: slave.py:321-327).
 func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
 	return nil, mc.handler.DestroyClusterPeerConnection(req.(*wire.DestroyClusterPeerConnectionCommand))
 }
