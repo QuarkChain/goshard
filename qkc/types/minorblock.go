@@ -149,27 +149,9 @@ type extminorblock struct {
 	Trackingdata []byte       `bytesizeofslicelen:"2"`
 }
 
-func copyTransaction(tx *Transaction) *Transaction {
-	if tx == nil {
-		return nil
-	}
-	return NewTransaction(tx.inner)
-}
-
-func copyTransactions(txs []*Transaction) Transactions {
-	if txs == nil {
-		return nil
-	}
-	cpy := make(Transactions, len(txs))
-	for i, tx := range txs {
-		cpy[i] = copyTransaction(tx)
-	}
-	return cpy
-}
-
-// NewBlock creates a new block. The input data is copied,
-// changes to header and to the field values will not affect the
-// block.
+// NewMinorBlock creates a new block. The header, meta, transaction slice, and
+// tracking data are copied. Transactions are shared and must not be mutated
+// after being added to the block.
 //
 // TxHash and ReceiptHash in meta, and Bloom and MetaHash in header,
 // are replaced with values derived from the transactions and receipts.
@@ -181,7 +163,8 @@ func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transa
 	}
 	b := &MinorBlock{header: CopyMinorBlockHeader(header), meta: CopyMinorBlockMeta(meta)}
 	if len(txs) > 0 {
-		b.transactions = copyTransactions(txs)
+		b.transactions = make(Transactions, len(txs))
+		copy(b.transactions, txs)
 	}
 	b.meta.TxHash = CalculateMerkleRoot(b.transactions)
 
@@ -274,12 +257,14 @@ func (b *MinorBlock) Serialize(w *[]byte) error {
 	return nil
 }
 
-func (b *MinorBlock) Transactions() Transactions { return copyTransactions(b.transactions) }
+// Transactions returns the block's transaction slice without copying because
+// transactions are treated as immutable once shared with a block.
+func (b *MinorBlock) Transactions() Transactions { return b.transactions }
 
 func (b *MinorBlock) Transaction(hash common.Hash) *Transaction {
 	for _, transaction := range b.transactions {
 		if transaction.Hash() == hash {
-			return copyTransaction(transaction)
+			return transaction
 		}
 	}
 	return nil
@@ -341,12 +326,12 @@ func (b *MinorBlock) WithSeal(header *MinorBlockHeader) *MinorBlock {
 	return &MinorBlock{
 		header:       CopyMinorBlockHeader(header),
 		meta:         CopyMinorBlockMeta(b.meta),
-		transactions: copyTransactions(b.transactions),
+		transactions: b.transactions,
 		trackingdata: common.CopyBytes(b.trackingdata),
 	}
 }
 
-// WithBody returns a new block with the given transaction and uncle contents.
+// WithBody returns a new block with the given transactions and tracking data.
 func (b *MinorBlock) WithBody(transactions []*Transaction, trackingData []byte) *MinorBlock {
 	block := &MinorBlock{
 		header:       CopyMinorBlockHeader(b.header),
@@ -354,9 +339,7 @@ func (b *MinorBlock) WithBody(transactions []*Transaction, trackingData []byte) 
 		transactions: make(Transactions, len(transactions)),
 		trackingdata: make([]byte, len(trackingData)),
 	}
-	for i, transaction := range transactions {
-		block.transactions[i] = copyTransaction(transaction)
-	}
+	copy(block.transactions, transactions)
 	copy(block.trackingdata, trackingData)
 	return block
 }
@@ -394,9 +377,7 @@ func (b *MinorBlock) WithMiningResult(nonce uint64, mixDigest common.Hash, signa
 func (b *MinorBlock) Content() []IHashable {
 	items := make([]IHashable, len(b.transactions))
 	for i, item := range b.transactions {
-		if item != nil {
-			items[i] = NewTransaction(item.inner)
-		}
+		items[i] = item
 	}
 	return items
 }
@@ -407,10 +388,6 @@ func (b *MinorBlock) GetMetaData() *MinorBlockMeta {
 
 func (b *MinorBlock) GetTrackingData() []byte {
 	return b.TrackingData()
-}
-
-func (b *MinorBlock) GetTransactions() Transactions {
-	return b.Transactions()
 }
 
 func (b *MinorBlock) GetSize() common.StorageSize {
@@ -528,7 +505,7 @@ func (h *MinorBlock) CreateBlockToAppend(createTime *uint64, difficulty *big.Int
 // must Finalize before relying on Hash(); Finalize recomputes both hashes and
 // refreshes the cache.
 func (h *MinorBlock) AddTx(tx *Transaction) {
-	h.transactions = append(h.transactions, copyTransaction(tx))
+	h.transactions = append(h.transactions, tx)
 	h.hash.Store(nil)
 	h.size.Store(nil)
 }

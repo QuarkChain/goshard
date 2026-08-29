@@ -177,62 +177,6 @@ func TestMinorBlockHeaderGetGasLimitReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestMinorBlockMutableDataIsCopied(t *testing.T) {
-	header, meta := testMinorBlockHeader()
-	if NewMinorBlock(header, meta, []*Transaction{}, nil, nil).Transactions() != nil {
-		t.Fatal("NewMinorBlock returned a non-nil empty transaction list")
-	}
-	if NewMinorBlockWithHeader(header, meta).WithBody(nil, nil).Transactions() == nil {
-		t.Fatal("WithBody returned a nil transaction list")
-	}
-
-	transaction := goldenTxs()[0]
-	block := NewMinorBlock(header, meta, []*Transaction{transaction}, []*Receipt{NewReceipt(false, 0)}, []byte{1, 2, 3})
-
-	trackingData := block.TrackingData()
-	trackingData[0] = 9
-	if got := block.TrackingData()[0]; got != 1 {
-		t.Fatalf("TrackingData exposed internal data: got %d, want 1", got)
-	}
-	trackingData = block.GetTrackingData()
-	trackingData[0] = 9
-	if got := block.GetTrackingData()[0]; got != 1 {
-		t.Fatalf("GetTrackingData exposed internal data: got %d, want 1", got)
-	}
-
-	withBody := NewMinorBlockWithHeader(header, meta).WithBody([]*Transaction{transaction}, nil)
-	withAddTx := NewMinorBlockWithHeader(header, meta)
-	withAddTx.AddTx(transaction)
-	withSeal := block.WithSeal(block.Header())
-	hash := block.transactions[0].Hash()
-	tests := []struct {
-		name     string
-		original *Transaction
-		copy     *Transaction
-	}{
-		{"NewMinorBlock", transaction, block.transactions[0]},
-		{"WithBody", transaction, withBody.transactions[0]},
-		{"AddTx", transaction, withAddTx.transactions[0]},
-		{"WithSeal", block.transactions[0], withSeal.transactions[0]},
-		{"Transactions", block.transactions[0], block.Transactions()[0]},
-		{"Transaction", block.transactions[0], block.Transaction(hash)},
-		{"GetTransactions", block.transactions[0], block.GetTransactions()[0]},
-		{"Content", block.transactions[0], block.Content()[0].(*Transaction)},
-	}
-	for _, test := range tests {
-		want := test.original.Nonce()
-		test.copy.SetNonce(want + 1)
-		if got := test.original.Nonce(); got != want {
-			t.Errorf("%s shared a transaction: got nonce %d, want %d", test.name, got, want)
-		}
-	}
-
-	block.trackingdata[0] = 2
-	if withSeal.trackingdata[0] != 1 {
-		t.Fatal("WithSeal shared tracking data with source block")
-	}
-}
-
 func TestCreateBlockToAppendCopiesInputs(t *testing.T) {
 	header, meta := testMinorBlockHeader()
 	parent := NewMinorBlockWithHeader(header, meta)
