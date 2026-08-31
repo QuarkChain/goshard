@@ -22,7 +22,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/holiman/uint256"
 )
 
 // StateAccount is the QuarkChain consensus representation of accounts.
@@ -67,14 +66,23 @@ func (acct *StateAccount) Copy() *StateAccount {
 // and FullShardKey. This is a known issue which is ignored until those modes are
 // supported; they must not be enabled before the conversion becomes lossless.
 type SlimAccount struct {
-	Nonce    uint64
-	Balance  *uint256.Int
-	Root     []byte // Nil if root equals to types.EmptyRootHash
-	CodeHash []byte // Nil if hash equals to types.EmptyCodeHash
+	Nonce        uint64
+	MntBal       []byte
+	FullShardKey qkccommon.Uint32
+	Root         []byte // Nil if root equals to types.EmptyRootHash
+	CodeHash     []byte // Nil if hash equals to types.EmptyCodeHash
 }
 
 // SlimAccountRLP encodes the state account in 'slim RLP' format.
 func SlimAccountRLP(account StateAccount) []byte {
+	balances := account.MntBalances
+	if balances == nil {
+		balances = qkccommon.NewEmptyTokenBalances()
+	}
+	mntBal, err := balances.SerializeToBytes()
+	if err != nil {
+		panic(err)
+	}
 	slim := SlimAccount{
 		Nonce:   account.Nonce,
 		Balance: account.GetBalance(),
@@ -85,7 +93,7 @@ func SlimAccountRLP(account StateAccount) []byte {
 	if !bytes.Equal(account.CodeHash, EmptyCodeHash[:]) {
 		slim.CodeHash = account.CodeHash
 	}
-	data, err := rlp.EncodeToBytes(slim)
+	data, err := rlp.EncodeToBytes(&slim)
 	if err != nil {
 		panic(err)
 	}
@@ -120,9 +128,26 @@ func FullAccount(data []byte) (*StateAccount, error) {
 
 // FullAccountRLP converts data on the 'slim RLP' format into the full RLP-format.
 func FullAccountRLP(data []byte) ([]byte, error) {
-	account, err := FullAccount(data)
-	if err != nil {
+	var slim SlimAccount
+	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		return nil, err
 	}
-	return rlp.EncodeToBytes(account)
+	if _, err := qkccommon.NewTokenBalances(slim.MntBal); err != nil {
+		return nil, err
+	}
+	root := EmptyRootHash
+	if len(slim.Root) != 0 {
+		root = common.BytesToHash(slim.Root)
+	}
+	codeHash := EmptyCodeHash.Bytes()
+	if len(slim.CodeHash) != 0 {
+		codeHash = slim.CodeHash
+	}
+	return rlp.EncodeToBytes(&qkcAccountRLP{
+		Nonce:        slim.Nonce,
+		TokenBal:     slim.MntBal,
+		Root:         root,
+		CodeHash:     codeHash,
+		FullShardKey: slim.FullShardKey,
+	})
 }
