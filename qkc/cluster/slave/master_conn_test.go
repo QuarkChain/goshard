@@ -210,7 +210,7 @@ func newMasterTestConnPairWithIdentity(
 		LocalID:              clientID,
 		LocalFullShardIDList: clientShards,
 		Handler:              &fakeMasterHandler{},
-		Router:               newFakeSlaveService(nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil, nil),
 		Logger:               logger,
 	})
 	if err != nil {
@@ -221,7 +221,7 @@ func newMasterTestConnPairWithIdentity(
 		LocalID:              serverID,
 		LocalFullShardIDList: serverShards,
 		Handler:              &fakeMasterHandler{},
-		Router:               newFakeSlaveService(nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil, nil),
 		Logger:               logger,
 	})
 	if err != nil {
@@ -290,7 +290,7 @@ func newMasterConnWithPeer(t *testing.T, handler MasterHandler) (*MasterConn, *m
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
 		Handler:              handler,
-		Router:               newFakeSlaveService(nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil, []uint32{0x00010001}),
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -319,7 +319,7 @@ func TestMasterConn_ConfigValidation(t *testing.T) {
 		t.Fatal("expected error for nil handler")
 	}
 	if _, err := NewMasterConn(MasterConnConfig{Conn: &net.TCPConn{}, Handler: &fakeMasterHandler{}}); err == nil {
-		t.Fatal("expected error for nil router")
+		t.Fatal("expected error for nil peer resolver")
 	}
 
 	// Identity getters return copies: source slices are stored by value and
@@ -701,7 +701,7 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
-		Router:               newFakeSlaveService(nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil, []uint32{0x00010001}),
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -785,7 +785,7 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
-		Router:               newFakeSlaveService(nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil, []uint32{0x00010001}),
 		Logger:               log.New(),
 	})
 	if err != nil {

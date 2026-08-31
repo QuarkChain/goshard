@@ -15,13 +15,14 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// PeerRouter resolves a virtual peer frame to the PeerConn serving
+// PeerResolver resolves a virtual peer frame to the PeerConn serving
 // (cluster_peer_id, branch). A nil result means no such peer (Python
 // NULL_CONNECTION): the frame is consumed and dropped by the caller.
 // The registry and lookup implementation are owned by the upper runtime/service
 // layer and are not part of the communication layer.
-type PeerRouter interface {
+type PeerResolver interface {
 	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
+	BranchConfigured(branch uint32) bool
 }
 
 // MasterHandler serves inbound RPCs from the master. It is implemented by
@@ -82,7 +83,7 @@ type MasterHandler interface {
 	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
 }
 
-// MasterConnConfig configures a MasterConn. Conn, Handler and Router are
+// MasterConnConfig configures a MasterConn. Conn, Handler and PeerResolver are
 // required; Logger defaults to log.Root().
 type MasterConnConfig struct {
 	// Conn is the accepted TCP connection from the master. The slave never
@@ -103,10 +104,10 @@ type MasterConnConfig struct {
 	// here; the runtime/service layer implements them.
 	Handler MasterHandler
 
-	// Router resolves virtual peer frames to their PeerConn (required). It is
-	// the minimal routing capability required for forwarding frames received
-	// from the master.
-	Router PeerRouter
+	// PeerResolver resolves virtual peer frames to their PeerConn (required).
+	// It is the minimal routing capability required for forwarding frames
+	// received from the master.
+	PeerResolver PeerResolver
 
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger
@@ -118,7 +119,7 @@ type MasterConnConfig struct {
 //
 // MasterConn is the slave's single connection to the master: it dispatches
 // master commands (business operations delegated to MasterHandler) and routes
-// virtual peer frames through PeerRouter.
+// virtual peer frames through PeerResolver.
 type MasterConn struct {
 	*conn.BaseConn
 
@@ -126,10 +127,10 @@ type MasterConn struct {
 	localID              []byte
 	localFullShardIDList []uint32
 
-	// router resolves virtual peer frames to their PeerConn (Python:
+	// peerResolver resolves virtual peer frames to their PeerConn (Python:
 	// MasterConnection.get_connection_to_forward, slave.py:116-148). Never nil
 	// on a started MasterConn.
-	router PeerRouter
+	peerResolver PeerResolver
 }
 
 // NewMasterConn wraps an accepted net.Conn from the master.
@@ -141,8 +142,8 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
-	if cfg.Router == nil {
-		return nil, errors.New("master peer router must not be nil")
+	if cfg.PeerResolver == nil {
+		return nil, errors.New("master peer resolver must not be nil")
 	}
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
@@ -152,7 +153,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
-		router:               cfg.Router,
+		peerResolver:         cfg.PeerResolver,
 	}
 
 	// Forwarder: route cluster_peer_id != 0 frames to virtual PeerConns.
@@ -328,18 +329,34 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 
 // ── Frame routing ───────────────────────────────────────────────────────
 
-// routeFrame is the forwarder installed on BaseConn: cluster_peer_id == 0 is
-// master-local (dispatch normally); peer traffic is routed through the router
-// and handed to the matching PeerConn. A LookupPeer miss is Python's
-// NULL_CONNECTION semantics (slave.py:131-146): the frame is consumed and
-// dropped, no new error is produced.
+// routeFrame handles frames addressed to virtual peer connections.
+// cluster_peer_id == 0 is master-local traffic and returns false so the
+// normal MasterConn dispatcher handles it. Peer traffic is validated and
+// forwarded to the corresponding PeerConn.
+// A branch outside the GLOBAL configured shard set is fatal for the
+// connection (py: slave.py:123-129 close_with_error); a branch that is
+// globally valid but not owned/created locally, or an unknown peer id,
+// follows Python's NULL_CONNECTION semantics (slave.py:131-146): the
+// frame is consumed and dropped without closing the connection.
 func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
 	if frame.Meta.ClusterPeerID == 0 {
 		return false
 	}
 
-	pc := mc.router.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
+	if !mc.peerResolver.BranchConfigured(frame.Meta.Branch) {
+		mc.Logger().Error(
+			"incorrect forwarding branch",
+			"branch", fmt.Sprintf("0x%x", frame.Meta.Branch),
+		)
+		mc.Close()
+		return true
+	}
+
+	pc := mc.peerResolver.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
 	if pc == nil {
+		// Covers both "shard valid globally but not created locally"
+		// (slave.py:131-134) and "peer not found" (slave.py:136-146): drop,
+		// keep the connection.
 		mc.Logger().Warn("dropping frame for unknown virtual peer connection",
 			"cluster_peer_id", frame.Meta.ClusterPeerID, "branch", frame.Meta.Branch)
 		return true
