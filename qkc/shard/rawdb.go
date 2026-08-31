@@ -96,7 +96,7 @@ func WriteGenesisBlock(db ethdb.KeyValueWriter, block *types.MinorBlock) error {
 // another shard's chaindb, a changed config, or a header whose meta and body no
 // longer match it.
 func ReconcileGenesisBlock(db ethdb.KeyValueStore, expected *types.MinorBlock, dbPath string) (existed bool, err error) {
-	fullShardID := expected.Header.Branch.GetFullShardID()
+	fullShardID := expected.Header().Branch.GetFullShardID()
 	storedData, err := readGenesisBlockBytes(db)
 	if err != nil {
 		return false, fmt.Errorf("shard 0x%08x: read genesis block (db %s): %w", fullShardID, dbPath, err)
@@ -118,7 +118,7 @@ func ReconcileGenesisBlock(db ethdb.KeyValueStore, expected *types.MinorBlock, d
 	}
 	// A chaindb holding another shard's genesis is a misplaced directory, not a
 	// config change — name the right cause.
-	if storedID := stored.Header.Branch.GetFullShardID(); storedID != fullShardID {
+	if storedID := stored.Header().Branch.GetFullShardID(); storedID != fullShardID {
 		return true, fmt.Errorf("shard 0x%08x: stored genesis belongs to shard 0x%08x (db %s) — misplaced chaindb",
 			fullShardID, storedID, dbPath)
 	}
@@ -163,7 +163,7 @@ func ReconcileGenesisBlock(db ethdb.KeyValueStore, expected *types.MinorBlock, d
 // CheckCompatible's time argument is inert, and the ShardChain seam exposes no
 // head timestamp to pass. A timestamp-scheduled fork would need both.
 func ReconcileChainConfig(db ethdb.Database, genesis *types.MinorBlock, cfg *params.ChainConfig, head uint64, existed bool, dbPath string) error {
-	fullShardID := genesis.Header.Branch.GetFullShardID()
+	fullShardID := genesis.Header().Branch.GetFullShardID()
 	if cfg == nil {
 		return fmt.Errorf("shard 0x%08x: shard has no chain config (db %s)", fullShardID, dbPath)
 	}
