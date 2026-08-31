@@ -157,11 +157,12 @@ func NewPeerConn(clusterPeerID uint64, branch uint32, masterConn *MasterConn, ha
 		// Only shard-level CommandOps are registered here; root-level opcodes
 		// are handled by Peer on the Master side (Python: OP_SERIALIZER_MAP).
 		Serializers: map[byte]*conn.OpSerializer{
-			// Non-RPC commands (fire-and-forget). Response opcode mirrors the
-			// command opcode (same convention as DestroyClusterPeerConnectionCommand).
-			byte(wire.CommandOpNewMinorBlockHeaderList): conn.OpSerializerFor[wire.NewMinorBlockHeaderListCommand, wire.NewMinorBlockHeaderListCommand](byte(wire.CommandOpNewMinorBlockHeaderList)),
-			byte(wire.CommandOpNewTransactionList):      conn.OpSerializerFor[wire.NewTransactionListCommand, wire.NewTransactionListCommand](byte(wire.CommandOpNewTransactionList)),
-			byte(wire.CommandOpNewBlockMinor):           conn.OpSerializerFor[wire.NewBlockMinorCommand, wire.NewBlockMinorCommand](byte(wire.CommandOpNewBlockMinor)),
+			// Non-RPC commands (fire-and-forget, no response). The response
+			// opcode argument is a placeholder: 0, since these commands never
+			// produce a response (the opcode is only used for RPC pairs).
+			byte(wire.CommandOpNewMinorBlockHeaderList): conn.OpSerializerFor[wire.NewMinorBlockHeaderListCommand, wire.NewMinorBlockHeaderListCommand](0),
+			byte(wire.CommandOpNewTransactionList):      conn.OpSerializerFor[wire.NewTransactionListCommand, wire.NewTransactionListCommand](0),
+			byte(wire.CommandOpNewBlockMinor):           conn.OpSerializerFor[wire.NewBlockMinorCommand, wire.NewBlockMinorCommand](0),
 			// RPC request/response pairs. Matches PeerShardConnection.OP_RPC_MAP.
 			byte(wire.CommandOpGetMinorBlockListRequest):               conn.OpSerializerFor[wire.GetMinorBlockListRequest, wire.GetMinorBlockListResponse](byte(wire.CommandOpGetMinorBlockListResponse)),
 			byte(wire.CommandOpGetMinorBlockHeaderListRequest):         conn.OpSerializerFor[wire.GetMinorBlockHeaderListRequest, wire.GetMinorBlockHeaderListResponse](byte(wire.CommandOpGetMinorBlockHeaderListResponse)),
@@ -287,23 +288,20 @@ func (pc *PeerConn) GetMinorBlockHeaderList(ctx context.Context, req *wire.GetMi
 // Each handler delegates the deserialized request of its opcode to the
 // injected PeerHandler.
 
-// handleNewMinorBlockHeaderList dispatches a NEW_MINOR_BLOCK_HEADER_LIST
-// command to the business layer.
-// Python: OP_SERIALIZER_MAP[NEW_MINOR_BLOCK_HEADER_LIST] → PeerShardConnection.NewMinorBlockHeaderList.
+// handleNewMinorBlockHeaderList handles CommandOp.NEW_MINOR_BLOCK_HEADER_LIST.
+// Python: handle_new_minor_block_header_list_command (OP_SERIALIZER_MAP).
 func (pc *PeerConn) handleNewMinorBlockHeaderList(req any) (any, error) {
 	return nil, pc.handler.NewMinorBlockHeaderList(req.(*wire.NewMinorBlockHeaderListCommand))
 }
 
-// handleNewTransactionList dispatches a NEW_TRANSACTION_LIST command to the
-// business layer.
-// Python: OP_SERIALIZER_MAP[NEW_TRANSACTION_LIST] → PeerShardConnection.NewTransactionList.
+// handleNewTransactionList handles CommandOp.NEW_TRANSACTION_LIST.
+// Python: handle_new_transaction_list_command (OP_SERIALIZER_MAP).
 func (pc *PeerConn) handleNewTransactionList(req any) (any, error) {
 	return nil, pc.handler.NewTransactionList(req.(*wire.NewTransactionListCommand))
 }
 
-// handleNewBlockMinor dispatches a NEW_BLOCK_MINOR command to the business
-// layer.
-// Python: OP_SERIALIZER_MAP[NEW_BLOCK_MINOR] → PeerShardConnection.NewBlockMinor.
+// handleNewBlockMinor handles CommandOp.NEW_BLOCK_MINOR.
+// Python: handle_new_block_minor_command (OP_SERIALIZER_MAP).
 func (pc *PeerConn) handleNewBlockMinor(req any) (any, error) {
 	return nil, pc.handler.NewBlockMinor(req.(*wire.NewBlockMinorCommand))
 }
