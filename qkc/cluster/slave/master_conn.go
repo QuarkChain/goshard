@@ -4,250 +4,255 @@ package slave
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
-	"slices"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
+
+// PeerResolver resolves a virtual peer frame to the PeerConn serving
+// (cluster_peer_id, branch). A nil result means no such peer (Python
+// NULL_CONNECTION): the frame is consumed and dropped by the caller.
+// The registry and lookup implementation are owned by the upper runtime/service
+// layer and are not part of the communication layer.
+type PeerResolver interface {
+	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
+	BranchConfigured(branch uint32) bool
+}
+
+// MasterHandler serves inbound RPCs from the master. It is implemented by
+// the service layer and injected at construction.
+//
+// CREATE/DESTROY of cluster peer connections, ConnectToSlaves and CreateShards
+// are delegated here as well — see the method comments for ownership
+// boundaries.
+//
+// Handler implementations must be safe for concurrent calls.
+//
+// The error return is reserved for connection-level failures: returning an
+// error closes the connection (py: close_with_error). Business failures must
+// be encoded in the response ErrorCode field.
+type MasterHandler interface {
+	// CreateShards handles the RootTip carried by the master's PING.
+	// It owns shard-runtime initialization/update logic
+	// (py: slave_server.create_shards). The PONG handshake itself remains
+	// in MasterConn.
+	CreateShards(rootTip *wire.RawBytes) error
+	// CreateClusterPeerConnection and DestroyClusterPeerConnection handle
+	// the master's peer-connection management commands. The requests arrive
+	// through MasterConn, but PeerConn ownership belongs to the runtime,
+	// therefore creation and teardown are delegated.
+	CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error)
+	DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error
+	// ConnectToSlaves dials the fellow slaves advertised by the master. The
+	// resulting slave↔slave connections are owned by the xshard pool, so the
+	// dialing policy is service-layer business
+	// (py: slave_connection_manager.connect_to_slave).
+	ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error)
+
+	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
+	GenTx(req *wire.GenTxRequest) (*wire.GenTxResponse, error)
+	AddRootBlock(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error)
+	GetEcoInfoList(req *wire.GetEcoInfoListRequest) (*wire.GetEcoInfoListResponse, error)
+	GetNextBlockToMine(req *wire.GetNextBlockToMineRequest) (*wire.GetNextBlockToMineResponse, error)
+	AddMinorBlock(req *wire.AddMinorBlockRequest) (*wire.AddMinorBlockResponse, error)
+	GetUnconfirmedHeaders(req *wire.GetUnconfirmedHeadersRequest) (*wire.GetUnconfirmedHeadersResponse, error)
+	GetAccountData(req *wire.GetAccountDataRequest) (*wire.GetAccountDataResponse, error)
+	AddTransaction(req *wire.AddTransactionRequest) (*wire.AddTransactionResponse, error)
+	GetMinorBlock(req *wire.GetMinorBlockRequest) (*wire.GetMinorBlockResponse, error)
+	GetTransaction(req *wire.GetTransactionRequest) (*wire.GetTransactionResponse, error)
+	SyncMinorBlockList(req *wire.SyncMinorBlockListRequest) (*wire.SyncMinorBlockListResponse, error)
+	ExecuteTransaction(req *wire.ExecuteTransactionRequest) (*wire.ExecuteTransactionResponse, error)
+	GetTransactionReceipt(req *wire.GetTransactionReceiptRequest) (*wire.GetTransactionReceiptResponse, error)
+	GetTransactionListByAddress(req *wire.GetTransactionListByAddressRequest) (*wire.GetTransactionListByAddressResponse, error)
+	GetLogs(req *wire.GetLogRequest) (*wire.GetLogResponse, error)
+	EstimateGas(req *wire.EstimateGasRequest) (*wire.EstimateGasResponse, error)
+	GetStorageAt(req *wire.GetStorageRequest) (*wire.GetStorageResponse, error)
+	GetCode(req *wire.GetCodeRequest) (*wire.GetCodeResponse, error)
+	GasPrice(req *wire.GasPriceRequest) (*wire.GasPriceResponse, error)
+	GetWork(req *wire.GetWorkRequest) (*wire.GetWorkResponse, error)
+	SubmitWork(req *wire.SubmitWorkRequest) (*wire.SubmitWorkResponse, error)
+	CheckMinorBlock(req *wire.CheckMinorBlockRequest) (*wire.CheckMinorBlockResponse, error)
+	GetAllTransactions(req *wire.GetAllTransactionsRequest) (*wire.GetAllTransactionsResponse, error)
+	GetRootChainStakes(req *wire.GetRootChainStakesRequest) (*wire.GetRootChainStakesResponse, error)
+	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
+}
+
+// MasterConnConfig configures a MasterConn. Conn, Handler and PeerResolver are
+// required; Logger defaults to log.Root().
+type MasterConnConfig struct {
+	// Conn is the accepted TCP connection from the master. The slave never
+	// dials the master (py: MasterServer connects, SlaveServer listens).
+	Conn net.Conn
+
+	// MaxPayloadSize limits frame payload size; 0 disables the limit.
+	MaxPayloadSize uint32
+
+	// LocalID and LocalFullShardIDList identify this slave; they come from
+	// SlaveConfig and are echoed in PONG (py: Pong(self.slave_server.id, ...)).
+	// The slave never adopts identity from the master's PING.
+	LocalID              []byte
+	LocalFullShardIDList []uint32
+
+	// Handler serves inbound RPCs (required). All business operations
+	// (including CREATE/DESTROY of cluster peer connections) are delegated
+	// here; the runtime/service layer implements them.
+	Handler MasterHandler
+
+	// PeerResolver resolves virtual peer frames to their PeerConn (required).
+	// It is the minimal routing capability required for forwarding frames
+	// received from the master.
+	PeerResolver PeerResolver
+
+	// Logger defaults to log.Root() if nil.
+	Logger log.Logger
+}
 
 // MasterConn represents the slave-side TCP connection to the cluster master.
 // It corresponds to Python's quarkchain.cluster.slave.MasterConnection and uses
 // 12-byte ClusterMetadata framing.
 //
-// Architecture:
-//
-//	MasterConn embeds *baseConn
-//
-// All master→slave ClusterOp handlers are registered during construction.
-// Business handlers that depend on unported components (Shard, StateDB, etc.)
-// are implemented as protocol-compatible stubs that return valid responses.
+// MasterConn is the slave's single connection to the master: it dispatches
+// master commands (business operations delegated to MasterHandler) and routes
+// virtual peer frames through PeerResolver.
 type MasterConn struct {
-	*baseConn
+	*conn.BaseConn
 
+	handler              MasterHandler
 	localID              []byte
 	localFullShardIDList []uint32
 
-	// dispatcher routes peer traffic (cluster_peer_id != 0) to virtual PeerConns.
-	// It is nil until wired by SetDispatcher. Once Start() is called, it is
-	// immutable — handlers and Close() read it without synchronization.
-	dispatcher *Dispatcher
-
-	// peerRPCIDs tracks the most recent inbound RPC ID per cluster_peer_id.
-	// cluster_peer_id == 0 is the master itself; each non-zero peer has its
-	// own independent monotonic sequence so PeerConns sharing this MasterConn
-	// do not collide on rpc_id.
-	// Only accessed by readLoop; no lock needed.
-	peerRPCIDs map[uint64]int64
+	// peerResolver resolves virtual peer frames to their PeerConn (Python:
+	// MasterConnection.get_connection_to_forward, slave.py:116-148). Never nil
+	// on a started MasterConn.
+	peerResolver PeerResolver
 }
 
-// NewMasterConn dials the master at addr and returns a MasterConn.
-// maxPayloadSize controls frame payload size limit; 0 disables the limit.
-// localID and localFullShardIDList identify this slave and are used in PONG.
-func NewMasterConn(addr string, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) (*MasterConn, error) {
-	conn, err := net.DialTimeout("tcp", addr, defaultDialTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("dial master %s: %w", addr, err)
+// NewMasterConn wraps an accepted net.Conn from the master.
+// The caller is responsible for calling Start().
+func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
+	if cfg.Conn == nil {
+		return nil, errors.New("master connection must not be nil")
 	}
-	return newMasterConn(conn, maxPayloadSize, localID, localFullShardIDList, logger), nil
-}
-
-// NewMasterConnFromConn wraps an accepted net.Conn as a MasterConn.
-// maxPayloadSize controls frame payload size limit; 0 disables the limit.
-func NewMasterConnFromConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *MasterConn {
-	return newMasterConn(conn, maxPayloadSize, localID, localFullShardIDList, logger)
-}
-
-func newMasterConn(conn net.Conn, maxPayloadSize uint32, localID []byte, localFullShardIDList []uint32, logger log.Logger) *MasterConn {
+	if cfg.Handler == nil {
+		return nil, errors.New("master handler must not be nil")
+	}
+	if cfg.PeerResolver == nil {
+		return nil, errors.New("master peer resolver must not be nil")
+	}
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
-		return wire.ReadFrame(r, maxPayloadSize)
+		return wire.ReadFrame(r, cfg.MaxPayloadSize)
 	}
+
 	mc := &MasterConn{
-		baseConn:             newBaseConnFromConn(conn, readFrame, wire.WriteFrame, logger),
-		localID:              append([]byte(nil), localID...),
-		localFullShardIDList: append([]uint32(nil), localFullShardIDList...),
-		peerRPCIDs:           make(map[uint64]int64),
+		handler:              cfg.Handler,
+		localID:              append([]byte(nil), cfg.LocalID...),
+		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
+		peerResolver:         cfg.PeerResolver,
 	}
 
-	mc.baseConn.validateRPCID = mc.validatePeerRPCID
+	// Forwarder: route cluster_peer_id != 0 frames to virtual PeerConns.
+	// routeFrame returns false for master-local traffic so MasterConn handles
+	// it normally. The forwarder runs on the reader goroutine; it enqueues
+	// frames without blocking (the PeerConn inbound queue is unbounded).
+	forwarder := mc.routeFrame
 
-	mc.registerOpSerializers()
-	mc.registerHandlers()
+	mc.BaseConn = conn.NewBaseConn(conn.Config{
+		Transport: conn.NewTCPTransport(cfg.Conn, readFrame, wire.WriteFrame),
+		Serializers: map[byte]*conn.OpSerializer{
+			// §1 Cluster initialisation
+			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
+			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
+			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
+			byte(wire.ClusterOpGetEcoInfoListRequest):        conn.OpSerializerFor[wire.GetEcoInfoListRequest, wire.GetEcoInfoListResponse](byte(wire.ClusterOpGetEcoInfoListResponse)),
+			byte(wire.ClusterOpGetNextBlockToMineRequest):    conn.OpSerializerFor[wire.GetNextBlockToMineRequest, wire.GetNextBlockToMineResponse](byte(wire.ClusterOpGetNextBlockToMineResponse)),
+			byte(wire.ClusterOpGetUnconfirmedHeadersRequest): conn.OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](byte(wire.ClusterOpGetUnconfirmedHeadersResponse)),
+			byte(wire.ClusterOpGetAccountDataRequest):        conn.OpSerializerFor[wire.GetAccountDataRequest, wire.GetAccountDataResponse](byte(wire.ClusterOpGetAccountDataResponse)),
+			byte(wire.ClusterOpAddTransactionRequest):        conn.OpSerializerFor[wire.AddTransactionRequest, wire.AddTransactionResponse](byte(wire.ClusterOpAddTransactionResponse)),
 
-	return mc
-}
+			// §2 Slave → Master (mining)
+			byte(wire.ClusterOpAddMinorBlockHeaderRequest): conn.OpSerializerFor[wire.AddMinorBlockHeaderRequest, wire.AddMinorBlockHeaderResponse](byte(wire.ClusterOpAddMinorBlockHeaderResponse)),
 
-// registerOpSerializers registers serializers for every opcode in Python's
-// CLUSTER_OP_SERIALIZER_MAP. This covers master→slave, slave→master and
-// slave→slave opcodes so outbound RPC responses can be deserialized if needed.
-func (mc *MasterConn) registerOpSerializers() {
-	mc.baseConn.RegisterOpSerializers(map[byte]*OpSerializer{
-		// §1 Cluster initialisation
-		byte(wire.ClusterOpPing):                          OpSerializerFor[wire.PingRequest, wire.PongResponse](),
-		byte(wire.ClusterOpPong):                          OpSerializerFor[wire.PongResponse, wire.PingRequest](),
-		byte(wire.ClusterOpConnectToSlavesRequest):        OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](),
-		byte(wire.ClusterOpConnectToSlavesResponse):       OpSerializerFor[wire.ConnectToSlavesResponse, wire.ConnectToSlavesRequest](),
-		byte(wire.ClusterOpAddRootBlockRequest):           OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](),
-		byte(wire.ClusterOpAddRootBlockResponse):          OpSerializerFor[wire.AddRootBlockResponse, wire.AddRootBlockRequest](),
-		byte(wire.ClusterOpGetEcoInfoListRequest):         OpSerializerFor[wire.GetEcoInfoListRequest, wire.GetEcoInfoListResponse](),
-		byte(wire.ClusterOpGetEcoInfoListResponse):        OpSerializerFor[wire.GetEcoInfoListResponse, wire.GetEcoInfoListRequest](),
-		byte(wire.ClusterOpGetNextBlockToMineRequest):     OpSerializerFor[wire.GetNextBlockToMineRequest, wire.GetNextBlockToMineResponse](),
-		byte(wire.ClusterOpGetNextBlockToMineResponse):    OpSerializerFor[wire.GetNextBlockToMineResponse, wire.GetNextBlockToMineRequest](),
-		byte(wire.ClusterOpGetUnconfirmedHeadersRequest):  OpSerializerFor[wire.GetUnconfirmedHeadersRequest, wire.GetUnconfirmedHeadersResponse](),
-		byte(wire.ClusterOpGetUnconfirmedHeadersResponse): OpSerializerFor[wire.GetUnconfirmedHeadersResponse, wire.GetUnconfirmedHeadersRequest](),
-		byte(wire.ClusterOpGetAccountDataRequest):         OpSerializerFor[wire.GetAccountDataRequest, wire.GetAccountDataResponse](),
-		byte(wire.ClusterOpGetAccountDataResponse):        OpSerializerFor[wire.GetAccountDataResponse, wire.GetAccountDataRequest](),
-		byte(wire.ClusterOpAddTransactionRequest):         OpSerializerFor[wire.AddTransactionRequest, wire.AddTransactionResponse](),
-		byte(wire.ClusterOpAddTransactionResponse):        OpSerializerFor[wire.AddTransactionResponse, wire.AddTransactionRequest](),
+			// §4 Master → Slave (sync / virtual conns)
+			byte(wire.ClusterOpSyncMinorBlockListRequest):          conn.OpSerializerFor[wire.SyncMinorBlockListRequest, wire.SyncMinorBlockListResponse](byte(wire.ClusterOpSyncMinorBlockListResponse)),
+			byte(wire.ClusterOpAddMinorBlockRequest):               conn.OpSerializerFor[wire.AddMinorBlockRequest, wire.AddMinorBlockResponse](byte(wire.ClusterOpAddMinorBlockResponse)),
+			byte(wire.ClusterOpCreateClusterPeerConnectionRequest): conn.OpSerializerFor[wire.CreateClusterPeerConnectionRequest, wire.CreateClusterPeerConnectionResponse](byte(wire.ClusterOpCreateClusterPeerConnectionResponse)),
+			// 0 = non-RPC placeholder: ignored by Config validation and never
+			// read at runtime (see NonRPCOps below).
+			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): conn.OpSerializerFor[wire.DestroyClusterPeerConnectionCommand, wire.DestroyClusterPeerConnectionCommand](0),
+			byte(wire.ClusterOpGetMinorBlockRequest):                conn.OpSerializerFor[wire.GetMinorBlockRequest, wire.GetMinorBlockResponse](byte(wire.ClusterOpGetMinorBlockResponse)),
+			byte(wire.ClusterOpGetTransactionRequest):               conn.OpSerializerFor[wire.GetTransactionRequest, wire.GetTransactionResponse](byte(wire.ClusterOpGetTransactionResponse)),
 
-		// §2 Slave → Master (mining)
-		byte(wire.ClusterOpAddMinorBlockHeaderRequest):  OpSerializerFor[wire.AddMinorBlockHeaderRequest, wire.AddMinorBlockHeaderResponse](),
-		byte(wire.ClusterOpAddMinorBlockHeaderResponse): OpSerializerFor[wire.AddMinorBlockHeaderResponse, wire.AddMinorBlockHeaderRequest](),
+			// §6 Master → Slave (JSON-RPC-like)
+			byte(wire.ClusterOpExecuteTransactionRequest):          conn.OpSerializerFor[wire.ExecuteTransactionRequest, wire.ExecuteTransactionResponse](byte(wire.ClusterOpExecuteTransactionResponse)),
+			byte(wire.ClusterOpGetTransactionReceiptRequest):       conn.OpSerializerFor[wire.GetTransactionReceiptRequest, wire.GetTransactionReceiptResponse](byte(wire.ClusterOpGetTransactionReceiptResponse)),
+			byte(wire.ClusterOpMineRequest):                        conn.OpSerializerFor[wire.MineRequest, wire.MineResponse](byte(wire.ClusterOpMineResponse)),
+			byte(wire.ClusterOpGenTxRequest):                       conn.OpSerializerFor[wire.GenTxRequest, wire.GenTxResponse](byte(wire.ClusterOpGenTxResponse)),
+			byte(wire.ClusterOpGetTransactionListByAddressRequest): conn.OpSerializerFor[wire.GetTransactionListByAddressRequest, wire.GetTransactionListByAddressResponse](byte(wire.ClusterOpGetTransactionListByAddressResponse)),
+			byte(wire.ClusterOpGetLogRequest):                      conn.OpSerializerFor[wire.GetLogRequest, wire.GetLogResponse](byte(wire.ClusterOpGetLogResponse)),
+			byte(wire.ClusterOpEstimateGasRequest):                 conn.OpSerializerFor[wire.EstimateGasRequest, wire.EstimateGasResponse](byte(wire.ClusterOpEstimateGasResponse)),
+			byte(wire.ClusterOpGetStorageRequest):                  conn.OpSerializerFor[wire.GetStorageRequest, wire.GetStorageResponse](byte(wire.ClusterOpGetStorageResponse)),
+			byte(wire.ClusterOpGetCodeRequest):                     conn.OpSerializerFor[wire.GetCodeRequest, wire.GetCodeResponse](byte(wire.ClusterOpGetCodeResponse)),
+			byte(wire.ClusterOpGasPriceRequest):                    conn.OpSerializerFor[wire.GasPriceRequest, wire.GasPriceResponse](byte(wire.ClusterOpGasPriceResponse)),
+			byte(wire.ClusterOpGetWorkRequest):                     conn.OpSerializerFor[wire.GetWorkRequest, wire.GetWorkResponse](byte(wire.ClusterOpGetWorkResponse)),
+			byte(wire.ClusterOpSubmitWorkRequest):                  conn.OpSerializerFor[wire.SubmitWorkRequest, wire.SubmitWorkResponse](byte(wire.ClusterOpSubmitWorkResponse)),
 
-		// §3 Slave ↔ Slave (xshard direct)
-		byte(wire.ClusterOpAddXshardTxListRequest):  OpSerializerFor[wire.AddXshardTxListRequest, wire.AddXshardTxListResponse](),
-		byte(wire.ClusterOpAddXshardTxListResponse): OpSerializerFor[wire.AddXshardTxListResponse, wire.AddXshardTxListRequest](),
+			// §7 Slave → Master (block list)
+			byte(wire.ClusterOpAddMinorBlockHeaderListRequest): conn.OpSerializerFor[wire.AddMinorBlockHeaderListRequest, wire.AddMinorBlockHeaderListResponse](byte(wire.ClusterOpAddMinorBlockHeaderListResponse)),
 
-		// §4 Master → Slave (sync / virtual conns)
-		byte(wire.ClusterOpSyncMinorBlockListRequest):           OpSerializerFor[wire.SyncMinorBlockListRequest, wire.SyncMinorBlockListResponse](),
-		byte(wire.ClusterOpSyncMinorBlockListResponse):          OpSerializerFor[wire.SyncMinorBlockListResponse, wire.SyncMinorBlockListRequest](),
-		byte(wire.ClusterOpAddMinorBlockRequest):                OpSerializerFor[wire.AddMinorBlockRequest, wire.AddMinorBlockResponse](),
-		byte(wire.ClusterOpAddMinorBlockResponse):               OpSerializerFor[wire.AddMinorBlockResponse, wire.AddMinorBlockRequest](),
-		byte(wire.ClusterOpCreateClusterPeerConnectionRequest):  OpSerializerFor[wire.CreateClusterPeerConnectionRequest, wire.CreateClusterPeerConnectionResponse](),
-		byte(wire.ClusterOpCreateClusterPeerConnectionResponse): OpSerializerFor[wire.CreateClusterPeerConnectionResponse, wire.CreateClusterPeerConnectionRequest](),
-		byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): OpSerializerFor[wire.DestroyClusterPeerConnectionCommand, wire.DestroyClusterPeerConnectionCommand](),
-		byte(wire.ClusterOpGetMinorBlockRequest):                OpSerializerFor[wire.GetMinorBlockRequest, wire.GetMinorBlockResponse](),
-		byte(wire.ClusterOpGetMinorBlockResponse):               OpSerializerFor[wire.GetMinorBlockResponse, wire.GetMinorBlockRequest](),
-		byte(wire.ClusterOpGetTransactionRequest):               OpSerializerFor[wire.GetTransactionRequest, wire.GetTransactionResponse](),
-		byte(wire.ClusterOpGetTransactionResponse):              OpSerializerFor[wire.GetTransactionResponse, wire.GetTransactionRequest](),
+			// §8 Master → Slave (JRPC & staking)
+			byte(wire.ClusterOpCheckMinorBlockRequest):    conn.OpSerializerFor[wire.CheckMinorBlockRequest, wire.CheckMinorBlockResponse](byte(wire.ClusterOpCheckMinorBlockResponse)),
+			byte(wire.ClusterOpGetAllTransactionsRequest): conn.OpSerializerFor[wire.GetAllTransactionsRequest, wire.GetAllTransactionsResponse](byte(wire.ClusterOpGetAllTransactionsResponse)),
+			byte(wire.ClusterOpGetRootChainStakesRequest): conn.OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](byte(wire.ClusterOpGetRootChainStakesResponse)),
+			byte(wire.ClusterOpGetTotalBalanceRequest):    conn.OpSerializerFor[wire.GetTotalBalanceRequest, wire.GetTotalBalanceResponse](byte(wire.ClusterOpGetTotalBalanceResponse)),
+		},
+		Handlers: map[byte]conn.TypedHandler{
+			// ── Communication handlers ─────────────────────────────────────
+			byte(wire.ClusterOpPing): mc.handlePing,
 
-		// §5 Slave ↔ Slave (xshard batch)
-		byte(wire.ClusterOpBatchAddXshardTxListRequest):  OpSerializerFor[wire.BatchAddXshardTxListRequest, wire.BatchAddXshardTxListResponse](),
-		byte(wire.ClusterOpBatchAddXshardTxListResponse): OpSerializerFor[wire.BatchAddXshardTxListResponse, wire.BatchAddXshardTxListRequest](),
-
-		// §6 Master → Slave (JSON-RPC-like)
-		byte(wire.ClusterOpExecuteTransactionRequest):           OpSerializerFor[wire.ExecuteTransactionRequest, wire.ExecuteTransactionResponse](),
-		byte(wire.ClusterOpExecuteTransactionResponse):          OpSerializerFor[wire.ExecuteTransactionResponse, wire.ExecuteTransactionRequest](),
-		byte(wire.ClusterOpGetTransactionReceiptRequest):        OpSerializerFor[wire.GetTransactionReceiptRequest, wire.GetTransactionReceiptResponse](),
-		byte(wire.ClusterOpGetTransactionReceiptResponse):       OpSerializerFor[wire.GetTransactionReceiptResponse, wire.GetTransactionReceiptRequest](),
-		byte(wire.ClusterOpMineRequest):                         OpSerializerFor[wire.MineRequest, wire.MineResponse](),
-		byte(wire.ClusterOpMineResponse):                        OpSerializerFor[wire.MineResponse, wire.MineRequest](),
-		byte(wire.ClusterOpGenTxRequest):                        OpSerializerFor[wire.GenTxRequest, wire.GenTxResponse](),
-		byte(wire.ClusterOpGenTxResponse):                       OpSerializerFor[wire.GenTxResponse, wire.GenTxRequest](),
-		byte(wire.ClusterOpGetTransactionListByAddressRequest):  OpSerializerFor[wire.GetTransactionListByAddressRequest, wire.GetTransactionListByAddressResponse](),
-		byte(wire.ClusterOpGetTransactionListByAddressResponse): OpSerializerFor[wire.GetTransactionListByAddressResponse, wire.GetTransactionListByAddressRequest](),
-		byte(wire.ClusterOpGetLogRequest):                       OpSerializerFor[wire.GetLogRequest, wire.GetLogResponse](),
-		byte(wire.ClusterOpGetLogResponse):                      OpSerializerFor[wire.GetLogResponse, wire.GetLogRequest](),
-		byte(wire.ClusterOpEstimateGasRequest):                  OpSerializerFor[wire.EstimateGasRequest, wire.EstimateGasResponse](),
-		byte(wire.ClusterOpEstimateGasResponse):                 OpSerializerFor[wire.EstimateGasResponse, wire.EstimateGasRequest](),
-		byte(wire.ClusterOpGetStorageRequest):                   OpSerializerFor[wire.GetStorageRequest, wire.GetStorageResponse](),
-		byte(wire.ClusterOpGetStorageResponse):                  OpSerializerFor[wire.GetStorageResponse, wire.GetStorageRequest](),
-		byte(wire.ClusterOpGetCodeRequest):                      OpSerializerFor[wire.GetCodeRequest, wire.GetCodeResponse](),
-		byte(wire.ClusterOpGetCodeResponse):                     OpSerializerFor[wire.GetCodeResponse, wire.GetCodeRequest](),
-		byte(wire.ClusterOpGasPriceRequest):                     OpSerializerFor[wire.GasPriceRequest, wire.GasPriceResponse](),
-		byte(wire.ClusterOpGasPriceResponse):                    OpSerializerFor[wire.GasPriceResponse, wire.GasPriceRequest](),
-		byte(wire.ClusterOpGetWorkRequest):                      OpSerializerFor[wire.GetWorkRequest, wire.GetWorkResponse](),
-		byte(wire.ClusterOpGetWorkResponse):                     OpSerializerFor[wire.GetWorkResponse, wire.GetWorkRequest](),
-		byte(wire.ClusterOpSubmitWorkRequest):                   OpSerializerFor[wire.SubmitWorkRequest, wire.SubmitWorkResponse](),
-		byte(wire.ClusterOpSubmitWorkResponse):                  OpSerializerFor[wire.SubmitWorkResponse, wire.SubmitWorkRequest](),
-
-		// §7 Slave → Master (block list)
-		byte(wire.ClusterOpAddMinorBlockHeaderListRequest):  OpSerializerFor[wire.AddMinorBlockHeaderListRequest, wire.AddMinorBlockHeaderListResponse](),
-		byte(wire.ClusterOpAddMinorBlockHeaderListResponse): OpSerializerFor[wire.AddMinorBlockHeaderListResponse, wire.AddMinorBlockHeaderListRequest](),
-
-		// §8 Master → Slave (JRPC & staking)
-		byte(wire.ClusterOpCheckMinorBlockRequest):     OpSerializerFor[wire.CheckMinorBlockRequest, wire.CheckMinorBlockResponse](),
-		byte(wire.ClusterOpCheckMinorBlockResponse):    OpSerializerFor[wire.CheckMinorBlockResponse, wire.CheckMinorBlockRequest](),
-		byte(wire.ClusterOpGetAllTransactionsRequest):  OpSerializerFor[wire.GetAllTransactionsRequest, wire.GetAllTransactionsResponse](),
-		byte(wire.ClusterOpGetAllTransactionsResponse): OpSerializerFor[wire.GetAllTransactionsResponse, wire.GetAllTransactionsRequest](),
-		byte(wire.ClusterOpGetRootChainStakesRequest):  OpSerializerFor[wire.GetRootChainStakesRequest, wire.GetRootChainStakesResponse](),
-		byte(wire.ClusterOpGetRootChainStakesResponse): OpSerializerFor[wire.GetRootChainStakesResponse, wire.GetRootChainStakesRequest](),
-		byte(wire.ClusterOpGetTotalBalanceRequest):     OpSerializerFor[wire.GetTotalBalanceRequest, wire.GetTotalBalanceResponse](),
-		byte(wire.ClusterOpGetTotalBalanceResponse):    OpSerializerFor[wire.GetTotalBalanceResponse, wire.GetTotalBalanceRequest](),
+			// ── Inbound handlers (delegated to MasterHandler / service layer) ─
+			byte(wire.ClusterOpCreateClusterPeerConnectionRequest):  mc.handleCreateClusterPeerConnection,
+			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): mc.handleDestroyClusterPeerConnection,
+			byte(wire.ClusterOpConnectToSlavesRequest):              mc.handleConnectToSlaves,
+			byte(wire.ClusterOpMineRequest):                         mc.handleMine,
+			byte(wire.ClusterOpGenTxRequest):                        mc.handleGenTx,
+			byte(wire.ClusterOpAddRootBlockRequest):                 mc.handleAddRootBlock,
+			byte(wire.ClusterOpGetEcoInfoListRequest):               mc.handleGetEcoInfoList,
+			byte(wire.ClusterOpGetNextBlockToMineRequest):           mc.handleGetNextBlockToMine,
+			byte(wire.ClusterOpAddMinorBlockRequest):                mc.handleAddMinorBlock,
+			byte(wire.ClusterOpGetUnconfirmedHeadersRequest):        mc.handleGetUnconfirmedHeaders,
+			byte(wire.ClusterOpGetAccountDataRequest):               mc.handleGetAccountData,
+			byte(wire.ClusterOpAddTransactionRequest):               mc.handleAddTransaction,
+			byte(wire.ClusterOpGetMinorBlockRequest):                mc.handleGetMinorBlock,
+			byte(wire.ClusterOpGetTransactionRequest):               mc.handleGetTransaction,
+			byte(wire.ClusterOpSyncMinorBlockListRequest):           mc.handleSyncMinorBlockList,
+			byte(wire.ClusterOpExecuteTransactionRequest):           mc.handleExecuteTransaction,
+			byte(wire.ClusterOpGetTransactionReceiptRequest):        mc.handleGetTransactionReceipt,
+			byte(wire.ClusterOpGetTransactionListByAddressRequest):  mc.handleGetTransactionListByAddress,
+			byte(wire.ClusterOpGetLogRequest):                       mc.handleGetLogs,
+			byte(wire.ClusterOpEstimateGasRequest):                  mc.handleEstimateGas,
+			byte(wire.ClusterOpGetStorageRequest):                   mc.handleGetStorageAt,
+			byte(wire.ClusterOpGetCodeRequest):                      mc.handleGetCode,
+			byte(wire.ClusterOpGasPriceRequest):                     mc.handleGasPrice,
+			byte(wire.ClusterOpGetWorkRequest):                      mc.handleGetWork,
+			byte(wire.ClusterOpSubmitWorkRequest):                   mc.handleSubmitWork,
+			byte(wire.ClusterOpCheckMinorBlockRequest):              mc.handleCheckMinorBlock,
+			byte(wire.ClusterOpGetAllTransactionsRequest):           mc.handleGetAllTransactions,
+			byte(wire.ClusterOpGetRootChainStakesRequest):           mc.handleGetRootChainStakes,
+			byte(wire.ClusterOpGetTotalBalanceRequest):              mc.handleGetTotalBalance,
+		},
+		NonRPCOps: map[byte]struct{}{
+			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): {},
+		},
+		Forwarder: forwarder,
+		Logger:    cfg.Logger,
 	})
-}
-
-// registerHandlers registers all master→slave RPC handlers and marks the
-// fire-and-forget opcodes as non-RPC.
-//
-// NOTE: ClusterOpConnectToSlavesRequest is registered by SlaveComm.runMasterConn
-// via mc.RegisterTypedHandlers, not here. This is deliberate: the handler needs
-// access to SlaveComm.xshardPool which lives in the runtime layer.
-func (mc *MasterConn) registerHandlers() {
-	mc.baseConn.RegisterTypedHandlers(map[byte]TypedHandler{
-		// ── Permanent connection handlers ──────────────────────────────
-		// These handlers manage connection lifecycle and peer routing.
-		// They belong to MasterConn permanently.
-
-		byte(wire.ClusterOpPing):                                mc.handlePing,
-		byte(wire.ClusterOpCreateClusterPeerConnectionRequest):  mc.handleCreateClusterPeerConnection,
-		byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): mc.handleDestroyClusterPeerConnection,
-
-		// ── Migration stubs ─────────────────────────────────────────────
-		// These handlers exist only to preserve protocol compatibility.
-		// Real implementations must be added outside the connection layer.
-		// After migration, remove these stub registrations and handlers.
-
-		byte(wire.ClusterOpMineRequest):                        mc.handleMine,
-		byte(wire.ClusterOpGenTxRequest):                       mc.handleGenTx,
-		byte(wire.ClusterOpAddRootBlockRequest):                mc.handleAddRootBlock,
-		byte(wire.ClusterOpGetEcoInfoListRequest):              mc.handleGetEcoInfoList,
-		byte(wire.ClusterOpGetNextBlockToMineRequest):          mc.handleGetNextBlockToMine,
-		byte(wire.ClusterOpAddMinorBlockRequest):               mc.handleAddMinorBlock,
-		byte(wire.ClusterOpGetUnconfirmedHeadersRequest):       mc.handleGetUnconfirmedHeaders,
-		byte(wire.ClusterOpGetAccountDataRequest):              mc.handleGetAccountData,
-		byte(wire.ClusterOpAddTransactionRequest):              mc.handleAddTransaction,
-		byte(wire.ClusterOpGetMinorBlockRequest):               mc.handleGetMinorBlock,
-		byte(wire.ClusterOpGetTransactionRequest):              mc.handleGetTransaction,
-		byte(wire.ClusterOpSyncMinorBlockListRequest):          mc.handleSyncMinorBlockList,
-		byte(wire.ClusterOpExecuteTransactionRequest):          mc.handleExecuteTransaction,
-		byte(wire.ClusterOpGetTransactionReceiptRequest):       mc.handleGetTransactionReceipt,
-		byte(wire.ClusterOpGetTransactionListByAddressRequest): mc.handleGetTransactionListByAddress,
-		byte(wire.ClusterOpGetLogRequest):                      mc.handleGetLogs,
-		byte(wire.ClusterOpEstimateGasRequest):                 mc.handleEstimateGas,
-		byte(wire.ClusterOpGetStorageRequest):                  mc.handleGetStorageAt,
-		byte(wire.ClusterOpGetCodeRequest):                     mc.handleGetCode,
-		byte(wire.ClusterOpGasPriceRequest):                    mc.handleGasPrice,
-		byte(wire.ClusterOpGetWorkRequest):                     mc.handleGetWork,
-		byte(wire.ClusterOpSubmitWorkRequest):                  mc.handleSubmitWork,
-		byte(wire.ClusterOpCheckMinorBlockRequest):             mc.handleCheckMinorBlock,
-		byte(wire.ClusterOpGetAllTransactionsRequest):          mc.handleGetAllTransactions,
-		byte(wire.ClusterOpGetRootChainStakesRequest):          mc.handleGetRootChainStakes,
-		byte(wire.ClusterOpGetTotalBalanceRequest):             mc.handleGetTotalBalance,
-	})
-
-	mc.baseConn.RegisterNonRPCOps([]byte{
-		byte(wire.ClusterOpDestroyClusterPeerConnectionCommand),
-	})
-}
-
-// rawBytes is a helper that returns a non-nil *wire.RawBytes pointer.
-func rawBytes(b []byte) *wire.RawBytes {
-	rb := wire.RawBytes(b)
-	return &rb
-}
-
-// emptyRawBytes returns a non-nil *wire.RawBytes pointing to an empty slice.
-func emptyRawBytes() *wire.RawBytes {
-	return rawBytes([]byte{})
-}
-
-// validatePeerRPCID validates inbound RPC IDs independently for each
-// cluster_peer_id. This lets multiple PeerConns share one MasterConn without
-// colliding on rpc_id.
-func (mc *MasterConn) validatePeerRPCID(clusterPeerID uint64, rpcID uint64) bool {
-	last, ok := mc.peerRPCIDs[clusterPeerID]
-	if !ok {
-		last = -1
-	}
-	if int64(rpcID) <= last {
-		return false
-	}
-	mc.peerRPCIDs[clusterPeerID] = int64(rpcID)
-	return true
+	return mc, nil
 }
 
 // LocalID returns this slave's ID used in PONG responses.
@@ -260,396 +265,221 @@ func (mc *MasterConn) LocalFullShardIDList() []uint32 {
 	return append([]uint32(nil), mc.localFullShardIDList...)
 }
 
-// handlePing responds to the master's PING with this slave's identity.
-// Python: MasterConnection.handle_ping -> Pong(self.slave_server.id, ...).
+// SendAddMinorBlockHeader sends AddMinorBlockHeaderRequest to the master and
+// returns the parsed response.
+func (mc *MasterConn) SendAddMinorBlockHeader(ctx context.Context, req *wire.AddMinorBlockHeaderRequest) (*wire.AddMinorBlockHeaderResponse, error) {
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		return nil, fmt.Errorf("serialize AddMinorBlockHeaderRequest: %w", err)
+	}
+	resp, err := mc.SendRPCMeta(ctx, byte(wire.ClusterOpAddMinorBlockHeaderRequest), payload, wire.ClusterMetadata{})
+	if err != nil {
+		return nil, err
+	}
+	r, ok := resp.(*wire.AddMinorBlockHeaderResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected AddMinorBlockHeader response %T", resp)
+	}
+	return r, nil
+}
+
+// SendAddMinorBlockHeaderList sends AddMinorBlockHeaderListRequest to the master
+// and returns the parsed response.
+func (mc *MasterConn) SendAddMinorBlockHeaderList(ctx context.Context, req *wire.AddMinorBlockHeaderListRequest) (*wire.AddMinorBlockHeaderListResponse, error) {
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		return nil, fmt.Errorf("serialize AddMinorBlockHeaderListRequest: %w", err)
+	}
+	resp, err := mc.SendRPCMeta(ctx, byte(wire.ClusterOpAddMinorBlockHeaderListRequest), payload, wire.ClusterMetadata{})
+	if err != nil {
+		return nil, err
+	}
+	r, ok := resp.(*wire.AddMinorBlockHeaderListResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected AddMinorBlockHeaderList response %T", resp)
+	}
+	return r, nil
+}
+
+// ── Communication handlers ─────────────────────────────────────────────
+
+// handlePing serves the master's PING, which has two roles:
+//
+//   - Protocol handshake: reply with this slave's identity. The PONG is built
+//     here because it is pure protocol framing
+//     (py: MasterConnection.handle_ping -> Pong(self.slave_server.id, ...)).
+//   - Runtime notification: a RootTip asks the runtime to create/update shards.
+//     That business logic is delegated to MasterHandler
+//     (py: await self.slave_server.create_shards(ping.root_tip)); MasterConn
+//     keeps only the delegation.
+//     That business logic is delegated to MasterHandler because shard
+//     lifecycle belongs to the runtime, not MasterConn.
 func (mc *MasterConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
-
 	if ping.RootTip != nil {
-		// TODO: create/update shard runtime from root tip. when core.RootBlock is ported, use ping.root_tip to drive shard creation.
+		if err := mc.handler.CreateShards(ping.RootTip); err != nil {
+			return nil, err
+		}
 	}
-
 	return &wire.PongResponse{
 		ID:              append([]byte(nil), mc.localID...),
 		FullShardIDList: append([]uint32(nil), mc.localFullShardIDList...),
 	}, nil
 }
 
-// handleCreateClusterPeerConnection creates virtual peer connections for all shards.
-// Python: returns CreateClusterPeerConnectionResponse(error_code=0) on success.
+// ── Frame routing ───────────────────────────────────────────────────────
+
+// routeFrame handles frames addressed to virtual peer connections.
+// cluster_peer_id == 0 is master-local traffic and returns false so the
+// normal MasterConn dispatcher handles it. Peer traffic is validated and
+// forwarded to the corresponding PeerConn.
+// A branch outside the GLOBAL configured shard set is fatal for the
+// connection (py: slave.py:123-129 close_with_error); a branch that is
+// globally valid but not owned/created locally, or an unknown peer id,
+// follows Python's NULL_CONNECTION semantics (slave.py:131-146): the
+// frame is consumed and dropped without closing the connection.
+func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
+	if frame.Meta.ClusterPeerID == 0 {
+		return false
+	}
+
+	if !mc.peerResolver.BranchConfigured(frame.Meta.Branch) {
+		mc.Logger().Error(
+			"incorrect forwarding branch",
+			"branch", fmt.Sprintf("0x%x", frame.Meta.Branch),
+		)
+		mc.Close()
+		return true
+	}
+
+	pc := mc.peerResolver.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
+	if pc == nil {
+		// Covers both "shard valid globally but not created locally"
+		// (slave.py:131-134) and "peer not found" (slave.py:136-146): drop,
+		// keep the connection.
+		mc.Logger().Warn("dropping frame for unknown virtual peer connection",
+			"cluster_peer_id", frame.Meta.ClusterPeerID, "branch", frame.Meta.Branch)
+		return true
+	}
+
+	pc.HandleFrame(frame)
+	return true
+}
+
+// ── Inbound handler dispatch (delegated to MasterHandler) ───────────────
+
 func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
-	r := req.(*wire.CreateClusterPeerConnectionRequest)
-
-	// TODO: localFullShardIDList is a temporary stand-in for the real shard
-	// registry. Once the shard registry is available, replace with the actual
-	// per-shard branch list from the registry.
-
-	d := mc.dispatcher
-	if d != nil {
-		d.CreatePeerConns(r.ClusterPeerID, mc.localFullShardIDList, mc, mc.baseConn.log)
-	}
-
-	return &wire.CreateClusterPeerConnectionResponse{ErrorCode: 0}, nil
+	return mc.handler.CreateClusterPeerConnection(req.(*wire.CreateClusterPeerConnectionRequest))
 }
 
-// handleDestroyClusterPeerConnection is a fire-and-forget command to tear down
-// a virtual peer connection. No response is sent.
 func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
-	r := req.(*wire.DestroyClusterPeerConnectionCommand)
-
-	d := mc.dispatcher
-	if d != nil {
-		d.DestroyPeerConns(r.ClusterPeerID)
-	}
-
-	return nil, nil
+	return nil, mc.handler.DestroyClusterPeerConnection(req.(*wire.DestroyClusterPeerConnectionCommand))
 }
 
-// ── Migration stubs ─────────────────────────────────────────────
+func (mc *MasterConn) handleConnectToSlaves(req any) (any, error) {
+	return mc.handler.ConnectToSlaves(req.(*wire.ConnectToSlavesRequest))
+}
 
-// handleMine starts or stops mining.
-// Python: MineResponse(error_code=0).
 func (mc *MasterConn) handleMine(req any) (any, error) {
-	_ = req.(*wire.MineRequest)
-	// TODO: delegate to SlaveComm.start_mining / stop_mining.
-	mc.log.Warn("Mine stub invoked — mining command will be discarded", "remote", mc.RemoteAddr())
-	return &wire.MineResponse{ErrorCode: 0}, nil
+	return mc.handler.Mine(req.(*wire.MineRequest))
 }
 
-// handleGenTx generates transactions.
-// Python: GenTxResponse(error_code=0).
 func (mc *MasterConn) handleGenTx(req any) (any, error) {
-	_ = req.(*wire.GenTxRequest)
-	// TODO: delegate to SlaveComm.create_transactions.
-	mc.log.Warn("GenTx stub invoked — transaction generation will be discarded", "remote", mc.RemoteAddr())
-	return &wire.GenTxResponse{ErrorCode: 0}, nil
+	return mc.handler.GenTx(req.(*wire.GenTxRequest))
 }
 
-// handleAddRootBlock processes a root block from the master.
-// Python: returns AddRootBlockResponse(error_code=0, switched=False) on success.
 func (mc *MasterConn) handleAddRootBlock(req any) (any, error) {
-	_ = req.(*wire.AddRootBlockRequest)
-	// TODO: delegate to shard.add_root_block and SlaveComm.create_shards.
-	mc.log.Warn("AddRootBlock stub invoked — root block will be discarded", "remote", mc.RemoteAddr())
-	return &wire.AddRootBlockResponse{ErrorCode: 0, Switched: false}, nil
+	return mc.handler.AddRootBlock(req.(*wire.AddRootBlockRequest))
 }
 
-// handleGetEcoInfoList returns economic info for all initialized shards.
-// Python: returns empty list when no shards are initialized.
 func (mc *MasterConn) handleGetEcoInfoList(req any) (any, error) {
-	_ = req.(*wire.GetEcoInfoListRequest)
-	// TODO: collect real EcoInfo from shard states.
-	mc.log.Warn("GetEcoInfoList stub invoked — returning empty list", "remote", mc.RemoteAddr())
-	return &wire.GetEcoInfoListResponse{ErrorCode: 0, EcoInfoList: []wire.EcoInfo{}}, nil
+	return mc.handler.GetEcoInfoList(req.(*wire.GetEcoInfoListRequest))
 }
 
-// handleGetNextBlockToMine returns a block template for the requested branch.
-// Python requires the shard to exist; without shard runtime we return not-found.
 func (mc *MasterConn) handleGetNextBlockToMine(req any) (any, error) {
-	_ = req.(*wire.GetNextBlockToMineRequest)
-	// TODO: delegate to shard.state.create_block_to_mine.
-	return &wire.GetNextBlockToMineResponse{ErrorCode: 1, Block: emptyRawBytes()}, nil
+	return mc.handler.GetNextBlockToMine(req.(*wire.GetNextBlockToMineRequest))
 }
 
-// handleAddMinorBlock adds a JRPC-mined minor block.
-// Python: returns AddMinorBlockResponse(error_code=0) on success.
 func (mc *MasterConn) handleAddMinorBlock(req any) (any, error) {
-	_ = req.(*wire.AddMinorBlockRequest)
-	// TODO: deserialize MinorBlock and delegate to shard.add_block.
-	mc.log.Warn("AddMinorBlock stub invoked — minor block will be discarded", "remote", mc.RemoteAddr())
-	return &wire.AddMinorBlockResponse{ErrorCode: 0}, nil
+	return mc.handler.AddMinorBlock(req.(*wire.AddMinorBlockRequest))
 }
 
-// handleGetUnconfirmedHeaders returns unconfirmed headers per shard.
-// Python: returns empty list when no shards are initialized.
 func (mc *MasterConn) handleGetUnconfirmedHeaders(req any) (any, error) {
-	_ = req.(*wire.GetUnconfirmedHeadersRequest)
-	// TODO: collect real HeadersInfo from shard states.
-	mc.log.Warn("GetUnconfirmedHeaders stub invoked — returning empty list", "remote", mc.RemoteAddr())
-	return &wire.GetUnconfirmedHeadersResponse{ErrorCode: 0, HeadersInfoList: []wire.HeadersInfo{}}, nil
+	return mc.handler.GetUnconfirmedHeaders(req.(*wire.GetUnconfirmedHeadersRequest))
 }
 
-// handleGetAccountData returns account data across shards.
-// Python: returns empty list when there are no shards for the address.
 func (mc *MasterConn) handleGetAccountData(req any) (any, error) {
-	_ = req.(*wire.GetAccountDataRequest)
-	// TODO: delegate to SlaveComm.get_account_data.
-	mc.log.Warn("GetAccountData stub invoked — returning empty list", "remote", mc.RemoteAddr())
-	return &wire.GetAccountDataResponse{ErrorCode: 0, AccountBranchDataList: []wire.AccountBranchData{}}, nil
+	return mc.handler.GetAccountData(req.(*wire.GetAccountDataRequest))
 }
 
-// handleAddTransaction adds a transaction to the tx pool.
-// Python: returns AddTransactionResponse(error_code=0) on success.
 func (mc *MasterConn) handleAddTransaction(req any) (any, error) {
-	_ = req.(*wire.AddTransactionRequest)
-	// TODO: delegate to SlaveComm.add_tx.
-	mc.log.Warn("AddTransaction stub invoked — transaction will be discarded", "remote", mc.RemoteAddr())
-	return &wire.AddTransactionResponse{ErrorCode: 0}, nil
+	return mc.handler.AddTransaction(req.(*wire.AddTransactionRequest))
 }
 
-// handleGetMinorBlock fetches a minor block by hash or height.
-// Python returns error_code=1 with an empty block when not found.
 func (mc *MasterConn) handleGetMinorBlock(req any) (any, error) {
-	_ = req.(*wire.GetMinorBlockRequest)
-	// TODO: delegate to SlaveComm.get_minor_block_by_hash / by_height.
-	return &wire.GetMinorBlockResponse{
-		ErrorCode:  1,
-		MinorBlock: emptyRawBytes(),
-		ExtraInfo:  nil,
-	}, nil
+	return mc.handler.GetMinorBlock(req.(*wire.GetMinorBlockRequest))
 }
 
-// handleGetTransaction fetches a transaction by hash.
-// Python returns error_code=1 with an empty block when not found.
 func (mc *MasterConn) handleGetTransaction(req any) (any, error) {
-	_ = req.(*wire.GetTransactionRequest)
-	// TODO: delegate to SlaveComm.get_transaction_by_hash.
-	return &wire.GetTransactionResponse{
-		ErrorCode:  1,
-		MinorBlock: emptyRawBytes(),
-		Index:      0,
-	}, nil
+	return mc.handler.GetTransaction(req.(*wire.GetTransactionRequest))
 }
 
-// handleSyncMinorBlockList downloads and applies a list of minor blocks.
-// Python returns error_code=0 with empty data when the input list is empty.
 func (mc *MasterConn) handleSyncMinorBlockList(req any) (any, error) {
-	r := req.(*wire.SyncMinorBlockListRequest)
-	_ = r
-	// TODO: delegate to SlaveComm.add_block_list_for_sync.
-	mc.log.Warn("SyncMinorBlockList stub invoked — block list will be discarded", "remote", mc.RemoteAddr())
-	return &wire.SyncMinorBlockListResponse{
-		ErrorCode:        0,
-		BlockCoinbaseMap: emptyRawBytes(),
-		ShardStats:       nil,
-	}, nil
+	return mc.handler.SyncMinorBlockList(req.(*wire.SyncMinorBlockListRequest))
 }
 
-// handleExecuteTransaction executes a transaction and returns the result.
-// Python returns error_code=1 when execution fails (e.g. shard missing).
 func (mc *MasterConn) handleExecuteTransaction(req any) (any, error) {
-	_ = req.(*wire.ExecuteTransactionRequest)
-	// TODO: delegate to SlaveComm.execute_tx.
-	return &wire.ExecuteTransactionResponse{ErrorCode: 1, Result: []byte{}}, nil
+	return mc.handler.ExecuteTransaction(req.(*wire.ExecuteTransactionRequest))
 }
 
-// handleGetTransactionReceipt fetches a transaction receipt.
-// Python returns error_code=1 with empty block/receipt when not found.
 func (mc *MasterConn) handleGetTransactionReceipt(req any) (any, error) {
-	_ = req.(*wire.GetTransactionReceiptRequest)
-	// TODO: delegate to SlaveComm.get_transaction_receipt.
-	return &wire.GetTransactionReceiptResponse{
-		ErrorCode:  1,
-		MinorBlock: emptyRawBytes(),
-		Index:      0,
-		Receipt:    emptyRawBytes(),
-	}, nil
+	return mc.handler.GetTransactionReceipt(req.(*wire.GetTransactionReceiptRequest))
 }
 
-// handleGetTransactionListByAddress returns transactions for an address.
-// Python returns error_code=1 with empty lists when the shard is missing.
 func (mc *MasterConn) handleGetTransactionListByAddress(req any) (any, error) {
-	_ = req.(*wire.GetTransactionListByAddressRequest)
-	// TODO: delegate to SlaveComm.get_transaction_list_by_address.
-	return &wire.GetTransactionListByAddressResponse{
-		ErrorCode: 1,
-		TxList:    []wire.TransactionDetail{},
-		Next:      []byte{},
-	}, nil
+	return mc.handler.GetTransactionListByAddress(req.(*wire.GetTransactionListByAddressRequest))
 }
 
-// handleGetLogs returns logs matching the filter.
-// Python returns error_code=1 with empty logs when the shard is missing.
 func (mc *MasterConn) handleGetLogs(req any) (any, error) {
-	_ = req.(*wire.GetLogRequest)
-	// TODO: delegate to SlaveComm.get_logs.
-	return &wire.GetLogResponse{ErrorCode: 1, Logs: []*wire.RawBytes{}}, nil
+	return mc.handler.GetLogs(req.(*wire.GetLogRequest))
 }
 
-// handleEstimateGas estimates gas for a transaction.
-// Python returns error_code=1 when estimation fails (e.g. shard missing).
 func (mc *MasterConn) handleEstimateGas(req any) (any, error) {
-	_ = req.(*wire.EstimateGasRequest)
-	// TODO: delegate to SlaveComm.estimate_gas.
-	return &wire.EstimateGasResponse{ErrorCode: 1, Result: 0}, nil
+	return mc.handler.EstimateGas(req.(*wire.EstimateGasRequest))
 }
 
-// handleGetStorageAt reads storage at the given address/key.
-// Python returns error_code=1 with a zero result when the shard is missing.
 func (mc *MasterConn) handleGetStorageAt(req any) (any, error) {
-	_ = req.(*wire.GetStorageRequest)
-	// TODO: delegate to SlaveComm.get_storage_at.
-	return &wire.GetStorageResponse{ErrorCode: 1, Result: [wire.HashLength]byte{}}, nil
+	return mc.handler.GetStorageAt(req.(*wire.GetStorageRequest))
 }
 
-// handleGetCode reads code at the given address.
-// Python returns error_code=1 with empty bytes when the shard is missing.
 func (mc *MasterConn) handleGetCode(req any) (any, error) {
-	_ = req.(*wire.GetCodeRequest)
-	// TODO: delegate to SlaveComm.get_code.
-	return &wire.GetCodeResponse{ErrorCode: 1, Result: []byte{}}, nil
+	return mc.handler.GetCode(req.(*wire.GetCodeRequest))
 }
 
-// handleGasPrice returns the gas price for a token on a branch.
-// Python returns error_code=1 with result 0 when the shard is missing.
 func (mc *MasterConn) handleGasPrice(req any) (any, error) {
-	_ = req.(*wire.GasPriceRequest)
-	// TODO: delegate to SlaveComm.gas_price.
-	return &wire.GasPriceResponse{ErrorCode: 1, Result: 0}, nil
+	return mc.handler.GasPrice(req.(*wire.GasPriceRequest))
 }
 
-// handleGetWork returns mining work.
-// Python returns error_code=1 when work cannot be produced.
 func (mc *MasterConn) handleGetWork(req any) (any, error) {
-	_ = req.(*wire.GetWorkRequest)
-	// TODO: delegate to SlaveComm.get_work.
-	return &wire.GetWorkResponse{ErrorCode: 1}, nil
+	return mc.handler.GetWork(req.(*wire.GetWorkRequest))
 }
 
-// handleSubmitWork submits mining work.
-// Python returns error_code=1, success=False when submission fails.
 func (mc *MasterConn) handleSubmitWork(req any) (any, error) {
-	_ = req.(*wire.SubmitWorkRequest)
-	// TODO: delegate to SlaveComm.submit_work.
-	return &wire.SubmitWorkResponse{ErrorCode: 1, Success: false}, nil
+	return mc.handler.SubmitWork(req.(*wire.SubmitWorkRequest))
 }
 
-// handleCheckMinorBlock validates a minor block header.
-// Python returns CheckMinorBlockResponse(error_code=0) when the block is valid,
-// and error_code=errno.EBADMSG when the shard is missing or validation fails.
-// This stub returns ErrorCode=1 to signal "not implemented / cannot validate".
 func (mc *MasterConn) handleCheckMinorBlock(req any) (any, error) {
-	_ = req.(*wire.CheckMinorBlockRequest)
-	// TODO: delegate to shard.check_minor_block_by_header.
-	return &wire.CheckMinorBlockResponse{ErrorCode: 1}, nil
+	return mc.handler.CheckMinorBlock(req.(*wire.CheckMinorBlockRequest))
 }
 
-// handleGetAllTransactions returns all transactions in the mempool.
-// Python returns error_code=1 with empty lists when the shard is missing.
 func (mc *MasterConn) handleGetAllTransactions(req any) (any, error) {
-	_ = req.(*wire.GetAllTransactionsRequest)
-	// TODO: delegate to SlaveComm.get_all_transactions.
-	return &wire.GetAllTransactionsResponse{
-		ErrorCode: 1,
-		TxList:    []wire.TransactionDetail{},
-		Next:      []byte{},
-	}, nil
+	return mc.handler.GetAllTransactions(req.(*wire.GetAllTransactionsRequest))
 }
 
-// handleGetRootChainStakes reads root-chain stake info.
-// Python returns GetRootChainStakesResponse(0, stakes, signer).
 func (mc *MasterConn) handleGetRootChainStakes(req any) (any, error) {
-	_ = req.(*wire.GetRootChainStakesRequest)
-	// TODO: delegate to SlaveComm.get_root_chain_stakes.
-	mc.log.Warn("GetRootChainStakes stub invoked — returning zero values", "remote", mc.RemoteAddr())
-	return &wire.GetRootChainStakesResponse{
-		ErrorCode: 0,
-		Stakes:    serialize.BigUint{},
-		Signer:    [20]byte{},
-	}, nil
+	return mc.handler.GetRootChainStakes(req.(*wire.GetRootChainStakesRequest))
 }
 
-// handleGetTotalBalance returns the total token balance across accounts.
-// Python catches exceptions and returns GetTotalBalanceResponse(1, 0, b"").
 func (mc *MasterConn) handleGetTotalBalance(req any) (any, error) {
-	_ = req.(*wire.GetTotalBalanceRequest)
-	// TODO: delegate to SlaveComm.get_total_balance.
-	return &wire.GetTotalBalanceResponse{
-		ErrorCode:    1,
-		TotalBalance: serialize.BigUint{},
-		Next:         []byte{},
-	}, nil
-}
-
-// SetForwarder installs a raw-frame forwarder hook for peer traffic
-// (cluster_peer_id != 0). The Dispatcher uses this to route frames to
-// virtual PeerConns.
-func (mc *MasterConn) SetForwarder(f func(*wire.Frame) bool) {
-	mc.baseConn.SetForwarder(f)
-}
-
-// ForwardFrame writes a raw frame to the underlying TCP transport. It is used
-// by virtual PeerConns to send responses back to the master.
-func (mc *MasterConn) ForwardFrame(f *wire.Frame) error {
-	return mc.baseConn.writeFrame(f)
-}
-
-// SetDispatcher wires the dispatcher that routes peer traffic. It also installs
-// a forwarder that validates the branch before routing.
-//
-// Must be called before Start(). dispatcher and forwarder are immutable after Start().
-//
-// Python: MasterConnection.get_connection_to_forward() closes the connection if
-// the branch is not in the configured full_shard_id_list.
-func (mc *MasterConn) SetDispatcher(d *Dispatcher) {
-	mc.dispatcher = d
-
-	// Create a wrapper forwarder that validates branch before routing.
-	// Python: MasterConnection.get_connection_to_forward() only validates
-	// branch when cluster_peer_id != 0 (i.e., on the forwarding path).
-	// Master-local RPCs (cluster_peer_id == 0) use branch=0 and must not
-	// be validated.
-	mc.SetForwarder(func(frame *wire.Frame) bool {
-		if frame.Meta.ClusterPeerID != 0 && !mc.isValidBranch(frame.Meta.Branch) {
-			mc.log.Error("incorrect forwarding branch", "branch", frame.Meta.Branch)
-			mc.Close()
-			return true
-		}
-		return d.RouteFrame(frame)
-	})
-}
-
-// isValidBranch checks if the given branch is in the local full shard ID list.
-func (mc *MasterConn) isValidBranch(branch uint32) bool {
-	return slices.Contains(mc.localFullShardIDList, branch)
-}
-
-// Close closes the master connection and all associated peer connections.
-func (mc *MasterConn) Close() error {
-	d := mc.dispatcher
-	if d != nil {
-		d.Close()
-	}
-	return mc.baseConn.Close()
-}
-
-// SendRPCMeta sends a request with ClusterMetadata and waits for the response.
-func (mc *MasterConn) SendRPCMeta(ctx context.Context, opcode byte, payload []byte, meta wire.ClusterMetadata) (*wire.Frame, error) {
-	return mc.baseConn.SendRPCMeta(ctx, opcode, payload, meta)
-}
-
-// SendAddMinorBlockHeader sends AddMinorBlockHeaderRequest to the master and
-// returns the parsed response.
-func (mc *MasterConn) SendAddMinorBlockHeader(ctx context.Context, req *wire.AddMinorBlockHeaderRequest) (*wire.AddMinorBlockHeaderResponse, error) {
-	payload, err := serializeBytes(req)
-	if err != nil {
-		return nil, fmt.Errorf("serialize AddMinorBlockHeaderRequest: %w", err)
-	}
-	frame, err := mc.SendRPCMeta(ctx, byte(wire.ClusterOpAddMinorBlockHeaderRequest), payload, wire.ClusterMetadata{})
-	if err != nil {
-		return nil, err
-	}
-	var resp wire.AddMinorBlockHeaderResponse
-	if err := deserializeBytes(frame.Payload, &resp); err != nil {
-		return nil, fmt.Errorf("deserialize AddMinorBlockHeaderResponse: %w", err)
-	}
-	return &resp, nil
-}
-
-// SendAddMinorBlockHeaderList sends AddMinorBlockHeaderListRequest to the master
-// and returns the parsed response.
-func (mc *MasterConn) SendAddMinorBlockHeaderList(ctx context.Context, req *wire.AddMinorBlockHeaderListRequest) (*wire.AddMinorBlockHeaderListResponse, error) {
-	payload, err := serializeBytes(req)
-	if err != nil {
-		return nil, fmt.Errorf("serialize AddMinorBlockHeaderListRequest: %w", err)
-	}
-	frame, err := mc.SendRPCMeta(ctx, byte(wire.ClusterOpAddMinorBlockHeaderListRequest), payload, wire.ClusterMetadata{})
-	if err != nil {
-		return nil, err
-	}
-	var resp wire.AddMinorBlockHeaderListResponse
-	if err := deserializeBytes(frame.Payload, &resp); err != nil {
-		return nil, fmt.Errorf("deserialize AddMinorBlockHeaderListResponse: %w", err)
-	}
-	return &resp, nil
+	return mc.handler.GetTotalBalance(req.(*wire.GetTotalBalanceRequest))
 }
