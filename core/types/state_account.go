@@ -141,11 +141,14 @@ func SlimAccountRLP(account StateAccount) []byte {
 // the same normalization here ensures that snapshot and trie reads return the
 // same StateAccount.
 //
-// This behavior supports snapshot reads, but it cannot preserve trie leaves
-// byte-for-byte as required by snap sync. If snap sync support is needed, the
-// raw []byte account encodings must be transferred to the remote node and
-// stored directly without decoding and re-encoding them through StateAccount.
+// Callers reconstructing trie leaves must use FullAccountRLP, which preserves
+// the explicit zero-balance update marker. This distinction does not imply general
+// byte-preserving snap sync support.
 func FullAccount(data []byte) (*StateAccount, error) {
+	return fullAccount(data, false)
+}
+
+func fullAccount(data []byte, restoreBalanceUpdated bool) (*StateAccount, error) {
 	var slim SlimAccount
 	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		return nil, err
@@ -159,6 +162,8 @@ func FullAccount(data []byte) (*StateAccount, error) {
 		}
 		if tb.Len() != 0 {
 			account.MntBalances = tb
+		} else if restoreBalanceUpdated {
+			account.MarkBalanceUpdated()
 		}
 	}
 	if len(slim.Root) == 0 {
@@ -174,9 +179,10 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	return &account, nil
 }
 
-// FullAccountRLP converts data on the 'slim RLP' format into the full RLP-format.
+// FullAccountRLP converts slim RLP into full RLP while preserving an explicit
+// zero-balance update marker for snapshot proof verification and trie regeneration.
 func FullAccountRLP(data []byte) ([]byte, error) {
-	account, err := FullAccount(data)
+	account, err := fullAccount(data, true)
 	if err != nil {
 		return nil, err
 	}

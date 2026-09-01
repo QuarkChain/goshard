@@ -551,6 +551,13 @@ func TestZeroBalanceUpdateRoundTrip(t *testing.T) {
 	var slimWire SlimAccount
 	require.NoError(t, rlp.DecodeBytes(slimEncoded, &slimWire))
 	require.Equal(t, []byte{0x00, 0xc0}, slimWire.MntBal)
+	fullEncoded, err := FullAccountRLP(slimEncoded)
+	require.NoError(t, err)
+	var fullWire qkcAccountRLP
+	require.NoError(t, rlp.DecodeBytes(fullEncoded, &fullWire))
+	assert.Equal(t, []byte{0x00, 0xc0}, fullWire.TokenBal)
+	assert.Equal(t, consensusEncoded, fullEncoded)
+
 	slimDecoded, err := FullAccount(slimEncoded)
 	require.NoError(t, err)
 	require.False(t, slimDecoded.IsBalanceUpdated())
