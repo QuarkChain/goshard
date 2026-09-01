@@ -269,7 +269,6 @@ func (s *stateObject) setState(key common.Hash, value common.Hash, origin common
 // finalise moves all dirty storage slots into the pending area to be hashed or
 // committed later. It is invoked at the end of every transaction.
 func (s *stateObject) finalise() {
-	s.data.FinaliseBalanceUpdates()
 	slotsToPrefetch := make([]common.Hash, 0, len(s.dirtyStorage))
 	for key, value := range s.dirtyStorage {
 		if origin, exist := s.uncommittedStorage[key]; exist && origin == value {
@@ -516,7 +515,7 @@ func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
 		return prev
 	}
 	s.db.journal.balanceChange(s.address, s.data.Balance)
-	s.data.AddBalanceUpdate()
+	s.data.MarkBalanceUpdated()
 	s.setBalance(amount)
 	return prev
 }

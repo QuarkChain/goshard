@@ -388,7 +388,7 @@ func TestSlimRLPRoundTripEquivalence(t *testing.T) {
 		{"fullShardKey set", StateAccount{Nonce: 2, Balance: uint256.NewInt(7), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), FullShardKey: 0x1a2b3c4d}},
 		// An update over a zero balance is not in this table: it survives neither
 		// round trip, by design (TestQKCUpdateIsNotCarriedByEitherReader).
-		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdateCount: 1}},
+		{"nonzero QKC updated", StateAccount{Balance: uint256.NewInt(1000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), balanceUpdated: true}},
 		{"MNT only, zero QKC", StateAccount{Nonce: 3, Balance: new(uint256.Int), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500)})}},
 		{"MNT + QKC + shard", StateAccount{Nonce: 8, Balance: uint256.NewInt(2000), Root: EmptyRootHash, CodeHash: EmptyCodeHash.Bytes(), MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{100: uint256.NewInt(500), 200: uint256.NewInt(900)}), FullShardKey: 0x2f3e}},
 	}
@@ -454,13 +454,13 @@ func TestStateAccountEncodeBalanceMntCombinations(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			account := StateAccount{
-				Nonce:              1,
-				Balance:            tc.bal,
-				Root:               EmptyRootHash,
-				CodeHash:           EmptyCodeHash.Bytes(),
-				MntBalances:        tc.mnt,
-				FullShardKey:       7,
-				balanceUpdateCount: map[bool]uint64{true: 1}[tc.updated],
+				Nonce:          1,
+				Balance:        tc.bal,
+				Root:           EmptyRootHash,
+				CodeHash:       EmptyCodeHash.Bytes(),
+				MntBalances:    tc.mnt,
+				FullShardKey:   7,
+				balanceUpdated: tc.updated,
 			}
 			encoded, err := rlp.EncodeToBytes(&account)
 			require.NoError(t, err)
@@ -489,7 +489,7 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	assert.False(t, account.IsBalanceUpdated())
 
 	drainedAcct := account.Copy()
-	drainedAcct.AddBalanceUpdate()
+	drainedAcct.MarkBalanceUpdated()
 	drainedAcct.Balance.Clear()
 	drained, err := rlp.EncodeToBytes(drainedAcct)
 	require.NoError(t, err)
@@ -517,6 +517,15 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 	assert.Empty(t, reencodedWire.TokenBal)
 }
 
+func TestBalanceUpdatedIsPresenceMarker(t *testing.T) {
+	account := NewEmptyStateAccount()
+	account.MarkBalanceUpdated()
+	account.MarkBalanceUpdated()
+
+	assert.True(t, account.IsBalanceUpdated())
+	assert.True(t, account.Copy().IsBalanceUpdated())
+}
+
 // TestQKCUpdateIsNotCarriedByEitherReader pins where the update marker stops.
 // It is a fact about the block in progress, not a stored one: pyquarkchain
 // rebuilds its balance map from the pair list (quarkchain/evm/state.py:104),
@@ -527,7 +536,7 @@ func TestStateAccountZeroBalanceUpdateEncoding(t *testing.T) {
 func TestQKCUpdateIsNotCarriedByEitherReader(t *testing.T) {
 	var account StateAccount
 	require.NoError(t, rlp.DecodeBytes(pyqkcVecNonce1QKC1000, &account))
-	account.AddBalanceUpdate()
+	account.MarkBalanceUpdated()
 	account.Balance.Clear()
 
 	drained, err := rlp.EncodeToBytes(&account)

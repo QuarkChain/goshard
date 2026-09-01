@@ -39,10 +39,10 @@ type StateAccount struct {
 	CodeHash     []byte
 	MntBalances  *qkccommon.TokenBalances // Non-QKC balances.
 	FullShardKey uint32                   // QuarkChain shard key; set on first tx, preserved thereafter
-	// balanceUpdateCount keeps a changed zero QKC balance encoded as 00c0. Only
-	// whether it is non-zero is ever read; FinaliseBalanceUpdates clamps it back
-	// to one at every transaction boundary.
-	balanceUpdateCount uint64
+	// balanceUpdated keeps a changed zero QKC balance encoded as 00c0. It remains
+	// set after a revert because pyquarkchain restores the previous value by
+	// writing it back, preserving the zero-valued token entry.
+	balanceUpdated bool
 }
 
 // NewEmptyStateAccount constructs an empty state account.
@@ -65,51 +65,32 @@ func (acct *StateAccount) Copy() *StateAccount {
 		mnt = acct.MntBalances.Copy()
 	}
 	return &StateAccount{
-		Nonce:              acct.Nonce,
-		Balance:            balance,
-		Root:               acct.Root,
-		CodeHash:           common.CopyBytes(acct.CodeHash),
-		MntBalances:        mnt,
-		FullShardKey:       acct.FullShardKey,
-		balanceUpdateCount: acct.balanceUpdateCount,
+		Nonce:          acct.Nonce,
+		Balance:        balance,
+		Root:           acct.Root,
+		CodeHash:       common.CopyBytes(acct.CodeHash),
+		MntBalances:    mnt,
+		FullShardKey:   acct.FullShardKey,
+		balanceUpdated: acct.balanceUpdated,
 	}
 }
 
 // IsBalanceUpdated reports whether the QKC balance has been explicitly updated.
-//
-// The recorded update outlives a revert on purpose. quarkchain/evm/state.py
-// undoes a balance write with `_balances[token_id] = preval` (state.py:166),
-// which writes the key back rather than deleting it, so an account whose only
-// credit is reverted holds zero rather than holding nothing. There is
-// deliberately no counterpart that takes an update back.
 func (acct *StateAccount) IsBalanceUpdated() bool {
-	return acct.balanceUpdateCount > 0
+	return acct.balanceUpdated
 }
 
-// AddBalanceUpdate records a QKC balance update.
-func (acct *StateAccount) AddBalanceUpdate() {
-	acct.balanceUpdateCount++
+// MarkBalanceUpdated records that the QKC balance entry has been written.
+func (acct *StateAccount) MarkBalanceUpdated() {
+	acct.balanceUpdated = true
 }
 
-// FinaliseBalanceUpdates keeps the recorded presence of an entry without
-// retaining a count that only grows over the life of a block.
-func (acct *StateAccount) FinaliseBalanceUpdates() {
-	if acct.balanceUpdateCount > 0 {
-		acct.balanceUpdateCount = 1
-	}
-}
-
-// SlimAccount is a modified version of an Account, where the root is replaced
-// with a byte slice. This format can be used to represent full-consensus format
-// or slim format which replaces the empty root and code hash as nil byte slice.
-// FullShardKey and MntBal are rlp:"optional" so accounts without QKC-specific
-// fields still decode cleanly from older snapshots.
-//
-// MntBal holds TokenBalances.SerializeToBytes() output rather than the
-// *TokenBalances value directly: TokenBalances stores its balances in an
-// unexported map, so it is not RLP-struct-encodable and must go through the
-// same []byte serialization the trie account uses, and carries exactly what a
-// trie leaf would.
+// SlimAccount is the compact RLP account format used by state snapshots,
+// pathdb readers, and account iterators. To support snapshots in goshard, the
+// standard format must be extended with FullShardKey and MntBal so snapshots
+// preserve QuarkChain-specific account state. The added fields are optional
+// trailing RLP fields, keeping old snapshots readable and leaving room for
+// future extensions without changing the existing account format.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
@@ -152,8 +133,20 @@ func SlimAccountRLP(account StateAccount) []byte {
 	return data
 }
 
-// FullAccount decodes the data on the 'slim RLP' format and returns
-// the consensus format account.
+// FullAccount decodes snapshot data from slim RLP into a StateAccount.
+//
+// This conversion intentionally follows the semantics of StateAccount's
+// EncodeRLP and DecodeRLP methods instead of preserving the original account
+// bytes. An explicitly updated zero balance can initially encode as 00c0, but
+// decoding loses the zero entry because the serialized token list is empty.
+// Re-encoding the decoded account therefore produces an empty TokenBal. Doing
+// the same normalization here ensures that snapshot and trie reads return the
+// same StateAccount.
+//
+// This behavior supports snapshot reads, but it cannot preserve trie leaves
+// byte-for-byte as required by snap sync. If snap sync support is needed, the
+// raw []byte account encodings must be transferred to the remote node and
+// stored directly without decoding and re-encoding them through StateAccount.
 func FullAccount(data []byte) (*StateAccount, error) {
 	var slim SlimAccount
 	if err := rlp.DecodeBytes(data, &slim); err != nil {
@@ -166,14 +159,10 @@ func FullAccount(data []byte) (*StateAccount, error) {
 		if err != nil {
 			return nil, err
 		}
-		// An all-zero pair list decodes to an empty map, which is the same
-		// nothing DecodeRLP reads out of a 00c0 leaf.
 		if tb.Len() != 0 {
 			account.MntBalances = tb
 		}
 	}
-
-	// Interpret the storage root and code hash in slim format.
 	if len(slim.Root) == 0 {
 		account.Root = EmptyRootHash
 	} else {

@@ -79,7 +79,7 @@ func (acct *StateAccount) DecodeRLP(s *rlp.Stream) error {
 	}
 	acct.Balance = new(uint256.Int)
 	acct.MntBalances = nil
-	acct.balanceUpdateCount = 0
+	acct.balanceUpdated = false
 	if len(qkc.TokenBal) > 0 {
 		tb, err := qkccommon.NewTokenBalances(qkc.TokenBal)
 		if err != nil {
