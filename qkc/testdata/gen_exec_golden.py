@@ -81,6 +81,7 @@ _ORACLE_MODULES = (
     "quarkchain/evm/state.py",
     "quarkchain/evm/transactions.py",
     "quarkchain/evm/specials.py",
+    "quarkchain/evm/vm.py",
     "quarkchain/evm/opcodes.py",
     "quarkchain/cluster/shard_state.py",
     "quarkchain/core.py",
@@ -913,18 +914,33 @@ CREATE2_RUNTIME = "0x6460006000f36000526000600560" + "1b" + "6000f500"
 #
 # It is built to sit on the boundary the word charge creates. Up to and
 # including CREATE2's 32000 the frame spends 32327; the 6-per-word charge on
-# top is 576 more. pyquarkchain subtracts that charge without checking
-# (vm.py:689) and mem_extend only checks when it has to grow, so a frame given
-# less than 32903 goes negative there rather than running out. Placing CREATE2
-# last is what makes the difference observable: the main loop's `gas < 0` test
-# is at the top of the next iteration, which never comes.
+# top is 576 more. The charge carries its own `gas < 0` test (vm.py:695), and
+# for a frame given less than 32903 that test is the only one it meets:
+# mem_extend has nothing to grow and so checks nothing, and the main loop's
+# own test sits at the top of the next iteration, which -- with CREATE2 last
+# -- never comes.
 CREATE2_WORD_GAS_RUNTIME = "0x6000610be0526000610c0060006000f5"
 
 # The same CREATE2 without the mstore in front, so the memory still has to grow.
-# mem_extend then does check what it is about to spend, which makes an
-# underfunded frame a plain out-of-gas on both sides -- the case that says a
-# consumer must not mistake every short CREATE2 for the boundary above.
+# The word charge is taken first either way; growing costs 306 more right after
+# it, so a frame short by less than that clears the charge and is refused by
+# mem_extend instead. Same answer, one check further on.
 CREATE2_GROW_RUNTIME = "0x6000610c0060006000f5"
+
+# LOG_BYTE_GAS_RUNTIME is the same boundary one opcode over: it expands memory
+# to exactly 512 bytes and then logs all of it, as the last instruction.
+#
+#   mstore(0x01e0, 0)   expand to ceil32(0x01e0 + 32) = 512 bytes = 16 words
+#   log0(0, 0x0200)     512 bytes of data, no further expansion
+#
+# Up to and including LOG0's 375 the frame spends 438; the 8-per-byte charge on
+# top is 4096 more. That charge carries its own `gas < 0` test (vm.py:675), and
+# for a frame given less than 4534 that test is the only one it meets, for the
+# two reasons above: nothing to grow, and no next iteration.
+LOG_BYTE_GAS_RUNTIME = "0x60006101e0526102006000a0"
+
+# The same log without the mstore in front, so the memory still has to grow.
+LOG_GROW_RUNTIME = "0x6102006000a0"
 
 
 def general_native_token_runtime():
@@ -1590,15 +1606,14 @@ def message_cases():
             },
         },
         {
-            "name": "create2_word_gas_underflows",
-            "expect": "rejected",
-            "comment": "CREATE2's per-word charge is subtracted unchecked and the "
-            "memory it is charged for needs no growing, so the frame carries a "
-            "negative gas counter past the point anything would notice it; with "
-            "CREATE2 last, the frame hands that counter back and apply_transaction "
-            "trips its own `assert gas_remained >= 0` (messages.py:305). The "
-            "transaction is not refused for a reason -- pyquarkchain cannot "
-            "process it at all, so no block containing it exists",
+            "name": "create2_word_gas_oog_without_growing",
+            "expect": "success",
+            "comment": "CREATE2's per-word charge over memory that needs no "
+            "growing: mem_extend has nothing to grow and so checks nothing, "
+            "which leaves the check the charge carries (vm.py:695) as the only "
+            "thing between the frame and a negative gas counter. It refuses, so "
+            "the frame is an ordinary out-of-gas: failed receipt, the whole "
+            "limit spent, the fee in the coinbase",
             "network": "devnet",
             "timestamp": 1,
             "pre_alloc": {
@@ -1608,9 +1623,9 @@ def message_cases():
             "tx": {
                 "nonce": 0,
                 "gas_price": 1,
-                # 21000 intrinsic + 32500 for the frame: past CREATE2's 32000 but
-                # 403 short of the word charge.
-                "start_gas": 53500,
+                # 21000 intrinsic + 32700 for the frame: past CREATE2's 32000 but
+                # 203 short of the word charge.
+                "start_gas": 53700,
                 "to": A,
                 "value": 0,
                 "signer": "A",
@@ -1641,11 +1656,10 @@ def message_cases():
         {
             "name": "create2_word_gas_oog_while_growing",
             "expect": "success",
-            "comment": "the same shortfall with the memory still to grow: "
-            "mem_extend checks before it spends, so both sides simply run out of "
-            "gas and the transaction is processed with a failed receipt. This is "
-            "the case that keeps the boundary above from swallowing an ordinary "
-            "out-of-gas and abandoning a block that is fine",
+            "comment": "the same shortfall with the memory still to grow, "
+            "which clears the word charge and is refused by mem_extend instead. "
+            "The pair is worth keeping because the two checks are reached by "
+            "different code and have to agree on the answer",
             "network": "devnet",
             "timestamp": 1,
             "pre_alloc": {
@@ -1655,8 +1669,77 @@ def message_cases():
             "tx": {
                 "nonce": 0,
                 "gas_price": 1,
-                # 21000 intrinsic + 32500 for the frame, against 32894 needed.
-                "start_gas": 53500,
+                # 21000 intrinsic + 32700 for the frame, against 32894 needed.
+                "start_gas": 53700,
+                "to": A,
+                "value": 0,
+                "signer": "A",
+            },
+        },
+        {
+            "name": "log_byte_gas_oog_without_growing",
+            "expect": "success",
+            "comment": "the same boundary on the other fee: LOG0's per-byte "
+            "charge over memory that needs no growing, where the check the "
+            "charge carries (vm.py:675) is the only thing between the frame and "
+            "a negative gas counter. It refuses, so the frame is an ordinary "
+            "out-of-gas: failed receipt, no log, the whole limit spent",
+            "network": "devnet",
+            "timestamp": 1,
+            "pre_alloc": {
+                SENDER_A + "00000001": funded,
+                A + "00000001": {"balances": {}, "code": LOG_BYTE_GAS_RUNTIME},
+            },
+            "tx": {
+                "nonce": 0,
+                "gas_price": 1,
+                # 21000 intrinsic + 4500 for the frame: past LOG0's 375 but 34
+                # short of the byte charge.
+                "start_gas": 25500,
+                "to": A,
+                "value": 0,
+                "signer": "A",
+            },
+        },
+        {
+            "name": "log_byte_gas_covered",
+            "expect": "success",
+            "comment": "the same code with the byte charge paid for: the log "
+            "goes out with all 512 zero bytes of it, and the receipt carries "
+            "the bloom of an address with no topics",
+            "network": "devnet",
+            "timestamp": 1,
+            "pre_alloc": {
+                SENDER_A + "00000001": funded,
+                A + "00000001": {"balances": {}, "code": LOG_BYTE_GAS_RUNTIME},
+            },
+            "tx": {
+                "nonce": 0,
+                "gas_price": 1,
+                # 21000 intrinsic + 5000 for the frame: 466 left after the charge.
+                "start_gas": 26000,
+                "to": A,
+                "value": 0,
+                "signer": "A",
+            },
+        },
+        {
+            "name": "log_byte_gas_oog_while_growing",
+            "expect": "success",
+            "comment": "the same shortfall with the memory still to grow, "
+            "which clears the byte charge and is refused by mem_extend instead. "
+            "The pair is worth keeping for the same reason as the CREATE2 one",
+            "network": "devnet",
+            "timestamp": 1,
+            "pre_alloc": {
+                SENDER_A + "00000001": funded,
+                A + "00000001": {"balances": {}, "code": LOG_GROW_RUNTIME},
+            },
+            "tx": {
+                "nonce": 0,
+                "gas_price": 1,
+                # 21000 intrinsic + 4500 for the frame, against 4525 needed.
+                "start_gas": 25500,
                 "to": A,
                 "value": 0,
                 "signer": "A",

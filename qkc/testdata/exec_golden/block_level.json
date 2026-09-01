@@ -9,13 +9,14 @@
     "root by applying it and nothing else."
   ],
   "source": {
-    "pyquarkchain_commit": "75f8d7e166df0f5a2579ffe37ea7b4f5ba79db60",
+    "pyquarkchain_commit": "bf860bf8351df80fbebc22919d516050f03ae900",
     "dirty_modules": [],
     "module_digests": {
       "quarkchain/evm/messages.py": "7d6cb97202b0e5e7",
       "quarkchain/evm/state.py": "de5216e6c10e606e",
       "quarkchain/evm/transactions.py": "573f578989e912a1",
       "quarkchain/evm/specials.py": "c14638312c952401",
+      "quarkchain/evm/vm.py": "90eadc5ac812eb1f",
       "quarkchain/evm/opcodes.py": "40d1eaab9bb6612a",
       "quarkchain/cluster/shard_state.py": "9cc7a3ff57b383b5",
       "quarkchain/core.py": "3f6d1865eb449b80",

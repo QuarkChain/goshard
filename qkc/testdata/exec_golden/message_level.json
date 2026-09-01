@@ -6,13 +6,14 @@
     "declares whether it pins a successful execution or a rejection."
   ],
   "source": {
-    "pyquarkchain_commit": "75f8d7e166df0f5a2579ffe37ea7b4f5ba79db60",
+    "pyquarkchain_commit": "bf860bf8351df80fbebc22919d516050f03ae900",
     "dirty_modules": [],
     "module_digests": {
       "quarkchain/evm/messages.py": "7d6cb97202b0e5e7",
       "quarkchain/evm/state.py": "de5216e6c10e606e",
       "quarkchain/evm/transactions.py": "573f578989e912a1",
       "quarkchain/evm/specials.py": "c14638312c952401",
+      "quarkchain/evm/vm.py": "90eadc5ac812eb1f",
       "quarkchain/evm/opcodes.py": "40d1eaab9bb6612a",
       "quarkchain/cluster/shard_state.py": "9cc7a3ff57b383b5",
       "quarkchain/core.py": "3f6d1865eb449b80",
@@ -2147,11 +2148,11 @@
       }
     },
     {
-      "name": "create2_word_gas_underflows",
-      "comment": "CREATE2's per-word charge is subtracted unchecked and the memory it is charged for needs no growing, so the frame carries a negative gas counter past the point anything would notice it; with CREATE2 last, the frame hands that counter back and apply_transaction trips its own `assert gas_remained >= 0` (messages.py:305). The transaction is not refused for a reason -- pyquarkchain cannot process it at all, so no block containing it exists",
+      "name": "create2_word_gas_oog_without_growing",
+      "comment": "CREATE2's per-word charge over memory that needs no growing: mem_extend has nothing to grow and so checks nothing, which leaves the check the charge carries (vm.py:695) as the only thing between the frame and a negative gas counter. It refuses, so the frame is an ordinary out-of-gas: failed receipt, the whole limit spent, the fee in the coinbase",
       "network": "devnet",
       "full_shard_id": 1,
-      "expect": "rejected",
+      "expect": "success",
       "context": {
         "timestamp": 1,
         "gas_limit": 12000000,
@@ -2176,7 +2177,7 @@
           "transaction": {
             "nonce": 0,
             "gas_price": "1",
-            "start_gas": 53500,
+            "start_gas": 53700,
             "to": "0xaaaa0000000000000000000000000000000000aa",
             "value": "0",
             "data": "0x",
@@ -2186,25 +2187,35 @@
             "gas_token_id": 35760,
             "transfer_token_id": 35760,
             "version": 0,
-            "v": "27",
-            "r": "597902601262657265624722210580897406987520543669649996700362526082170247999",
-            "s": "2777299912825643025837406676573787197657175596000636441731879062431711095029",
+            "v": "28",
+            "r": "40218412579742764606930556988143045674492478144583474886583865993533047047600",
+            "s": "31557536946104663492006276604022693423729777611841015951953706588560080122014",
             "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
-            "hash": "0x80cee19476dd4871dea33b8c9ef56a30dd9a3009f357f8faf6a55469bae5ad41"
+            "hash": "0x249d9695334a1de388c0592f5feb3e479495803ada310a8da87d663872a0c6d0"
           }
         }
       ],
       "gas_used_start": 0,
       "result": {
-        "rejected": true,
-        "error_type": "AssertionError",
-        "error": ""
+        "success": false,
+        "output": "0x"
       },
-      "post_state_root": "0xfcc68a8310cd1ed9846443526d2d946263674d0b2baf51306221bca8425ccc10",
-      "gas_used": 0,
+      "post_state_root": "0x2d1391178ec5ca809553ec695f669487ab64c135346c3d2fe86cda3b8de44a13",
+      "gas_used": 53700,
       "xshard_receive_gas_used": 0,
-      "block_fee_tokens": {},
-      "receipts": [],
+      "block_fee_tokens": {
+        "35760": "26850"
+      },
+      "receipts": [
+        {
+          "success": false,
+          "cumulative_gas_used": 53700,
+          "bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "contract_address": "0x",
+          "contract_full_shard_key": 1,
+          "logs": []
+        }
+      ],
       "xshard_deposit_receipts": [],
       "xshard_list": [],
       "accounts": {
@@ -2214,11 +2225,11 @@
           "full_shard_key": 1,
           "exists": true,
           "balances": {
-            "35760": "999999999999946500"
+            "35760": "999999999999946300"
           }
         },
         "aaaa0000000000000000000000000000000000aa": {
-          "nonce": 2,
+          "nonce": 1,
           "code_hash": "0xe85e9496874f0de902ba2d17fc8c7a7c2178e3e7c53fcd3c585bec4ef7c2aaab",
           "full_shard_key": 1,
           "exists": true,
@@ -2228,8 +2239,10 @@
           "nonce": 0,
           "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
           "full_shard_key": 1,
-          "exists": false,
-          "balances": {}
+          "exists": true,
+          "balances": {
+            "35760": "26850"
+          }
         }
       }
     },
@@ -2334,7 +2347,7 @@
     },
     {
       "name": "create2_word_gas_oog_while_growing",
-      "comment": "the same shortfall with the memory still to grow: mem_extend checks before it spends, so both sides simply run out of gas and the transaction is processed with a failed receipt. This is the case that keeps the boundary above from swallowing an ordinary out-of-gas and abandoning a block that is fine",
+      "comment": "the same shortfall with the memory still to grow, which clears the word charge and is refused by mem_extend instead. The pair is worth keeping because the two checks are reached by different code and have to agree on the answer",
       "network": "devnet",
       "full_shard_id": 1,
       "expect": "success",
@@ -2362,7 +2375,7 @@
           "transaction": {
             "nonce": 0,
             "gas_price": "1",
-            "start_gas": 53500,
+            "start_gas": 53700,
             "to": "0xaaaa0000000000000000000000000000000000aa",
             "value": "0",
             "data": "0x",
@@ -2372,11 +2385,11 @@
             "gas_token_id": 35760,
             "transfer_token_id": 35760,
             "version": 0,
-            "v": "27",
-            "r": "597902601262657265624722210580897406987520543669649996700362526082170247999",
-            "s": "2777299912825643025837406676573787197657175596000636441731879062431711095029",
+            "v": "28",
+            "r": "40218412579742764606930556988143045674492478144583474886583865993533047047600",
+            "s": "31557536946104663492006276604022693423729777611841015951953706588560080122014",
             "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
-            "hash": "0x80cee19476dd4871dea33b8c9ef56a30dd9a3009f357f8faf6a55469bae5ad41"
+            "hash": "0x249d9695334a1de388c0592f5feb3e479495803ada310a8da87d663872a0c6d0"
           }
         }
       ],
@@ -2385,16 +2398,16 @@
         "success": false,
         "output": "0x"
       },
-      "post_state_root": "0x3b42015ae04ec705566c463aea1f8ec7f8e2e43dfcafe3b3d7db0090d25e9b35",
-      "gas_used": 53500,
+      "post_state_root": "0xc49643aff49ab9c8a3b214bf8967ba5ac20da32f6c42267af81b35ccba421e74",
+      "gas_used": 53700,
       "xshard_receive_gas_used": 0,
       "block_fee_tokens": {
-        "35760": "26750"
+        "35760": "26850"
       },
       "receipts": [
         {
           "success": false,
-          "cumulative_gas_used": 53500,
+          "cumulative_gas_used": 53700,
           "bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
           "contract_address": "0x",
           "contract_full_shard_key": 1,
@@ -2410,7 +2423,7 @@
           "full_shard_key": 1,
           "exists": true,
           "balances": {
-            "35760": "999999999999946500"
+            "35760": "999999999999946300"
           }
         },
         "aaaa0000000000000000000000000000000000aa": {
@@ -2426,7 +2439,310 @@
           "full_shard_key": 1,
           "exists": true,
           "balances": {
-            "35760": "26750"
+            "35760": "26850"
+          }
+        }
+      }
+    },
+    {
+      "name": "log_byte_gas_oog_without_growing",
+      "comment": "the same boundary on the other fee: LOG0's per-byte charge over memory that needs no growing, where the check the charge carries (vm.py:675) is the only thing between the frame and a negative gas counter. It refuses, so the frame is an ordinary out-of-gas: failed receipt, no log, the whole limit spent",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "expect": "success",
+      "context": {
+        "timestamp": 1,
+        "gas_limit": 12000000,
+        "block_number": 1,
+        "block_coinbase": "0xcccc0000000000000000000000000000000000cc",
+        "block_difficulty": 1
+      },
+      "pre_alloc": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000001": {
+          "balances": {
+            "QKC": "1000000000000000000"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa00000001": {
+          "balances": {},
+          "code": "0x60006101e0526102006000a0"
+        }
+      },
+      "inputs": [
+        {
+          "kind": "transaction",
+          "transaction": {
+            "nonce": 0,
+            "gas_price": "1",
+            "start_gas": 25500,
+            "to": "0xaaaa0000000000000000000000000000000000aa",
+            "value": "0",
+            "data": "0x",
+            "network_id": 255,
+            "from_full_shard_key": 1,
+            "to_full_shard_key": 1,
+            "gas_token_id": 35760,
+            "transfer_token_id": 35760,
+            "version": 0,
+            "v": "28",
+            "r": "26188436340973416912773074672774267441913166088073261541710909355367547351316",
+            "s": "49046010314666837038394641130607236086850944873683011938439713119809583619933",
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "hash": "0x0a816d2504e33a4ebbd9660421a3f7bed7b27677c91041b86367699464330b93"
+          }
+        }
+      ],
+      "gas_used_start": 0,
+      "result": {
+        "success": false,
+        "output": "0x"
+      },
+      "post_state_root": "0x608238441dd0032ee5b756a1e47c1433dfd9702a81cfb91650e4312925e9c33a",
+      "gas_used": 25500,
+      "xshard_receive_gas_used": 0,
+      "block_fee_tokens": {
+        "35760": "12750"
+      },
+      "receipts": [
+        {
+          "success": false,
+          "cumulative_gas_used": 25500,
+          "bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "contract_address": "0x",
+          "contract_full_shard_key": 1,
+          "logs": []
+        }
+      ],
+      "xshard_deposit_receipts": [],
+      "xshard_list": [],
+      "accounts": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "999999999999974500"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0xaeb9690786437c210e9a71c838ee6101ed4c484ec4515e148281d8002938175e",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {}
+        },
+        "cccc0000000000000000000000000000000000cc": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "12750"
+          }
+        }
+      }
+    },
+    {
+      "name": "log_byte_gas_covered",
+      "comment": "the same code with the byte charge paid for: the log goes out with all 512 zero bytes of it, and the receipt carries the bloom of an address with no topics",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "expect": "success",
+      "context": {
+        "timestamp": 1,
+        "gas_limit": 12000000,
+        "block_number": 1,
+        "block_coinbase": "0xcccc0000000000000000000000000000000000cc",
+        "block_difficulty": 1
+      },
+      "pre_alloc": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000001": {
+          "balances": {
+            "QKC": "1000000000000000000"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa00000001": {
+          "balances": {},
+          "code": "0x60006101e0526102006000a0"
+        }
+      },
+      "inputs": [
+        {
+          "kind": "transaction",
+          "transaction": {
+            "nonce": 0,
+            "gas_price": "1",
+            "start_gas": 26000,
+            "to": "0xaaaa0000000000000000000000000000000000aa",
+            "value": "0",
+            "data": "0x",
+            "network_id": 255,
+            "from_full_shard_key": 1,
+            "to_full_shard_key": 1,
+            "gas_token_id": 35760,
+            "transfer_token_id": 35760,
+            "version": 0,
+            "v": "27",
+            "r": "14419709670409496279019973247488419195527304847111918631917398223720169042631",
+            "s": "10053120619107158353592859133004124275529900419099234271363009055517307456903",
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "hash": "0x02b865bd7f82441f7cdd284844bb08bf8e856de209b296e95d3711c79ee9f733"
+          }
+        }
+      ],
+      "gas_used_start": 0,
+      "result": {
+        "success": true,
+        "output": "0x"
+      },
+      "post_state_root": "0x22cb0b39d9cd51b0fc559b21b07911ba07be5acf73b03f93cbadfbca161bb895",
+      "gas_used": 25534,
+      "xshard_receive_gas_used": 0,
+      "block_fee_tokens": {
+        "35760": "12767"
+      },
+      "receipts": [
+        {
+          "success": true,
+          "cumulative_gas_used": 25534,
+          "bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "contract_address": "0x",
+          "contract_full_shard_key": 1,
+          "logs": [
+            {
+              "address": "0xaaaa0000000000000000000000000000000000aa",
+              "topics": [],
+              "data": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            }
+          ]
+        }
+      ],
+      "xshard_deposit_receipts": [],
+      "xshard_list": [],
+      "accounts": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "999999999999974466"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0xaeb9690786437c210e9a71c838ee6101ed4c484ec4515e148281d8002938175e",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {}
+        },
+        "cccc0000000000000000000000000000000000cc": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "12767"
+          }
+        }
+      }
+    },
+    {
+      "name": "log_byte_gas_oog_while_growing",
+      "comment": "the same shortfall with the memory still to grow, which clears the byte charge and is refused by mem_extend instead. The pair is worth keeping for the same reason as the CREATE2 one",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "expect": "success",
+      "context": {
+        "timestamp": 1,
+        "gas_limit": 12000000,
+        "block_number": 1,
+        "block_coinbase": "0xcccc0000000000000000000000000000000000cc",
+        "block_difficulty": 1
+      },
+      "pre_alloc": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000001": {
+          "balances": {
+            "QKC": "1000000000000000000"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa00000001": {
+          "balances": {},
+          "code": "0x6102006000a0"
+        }
+      },
+      "inputs": [
+        {
+          "kind": "transaction",
+          "transaction": {
+            "nonce": 0,
+            "gas_price": "1",
+            "start_gas": 25500,
+            "to": "0xaaaa0000000000000000000000000000000000aa",
+            "value": "0",
+            "data": "0x",
+            "network_id": 255,
+            "from_full_shard_key": 1,
+            "to_full_shard_key": 1,
+            "gas_token_id": 35760,
+            "transfer_token_id": 35760,
+            "version": 0,
+            "v": "28",
+            "r": "26188436340973416912773074672774267441913166088073261541710909355367547351316",
+            "s": "49046010314666837038394641130607236086850944873683011938439713119809583619933",
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "hash": "0x0a816d2504e33a4ebbd9660421a3f7bed7b27677c91041b86367699464330b93"
+          }
+        }
+      ],
+      "gas_used_start": 0,
+      "result": {
+        "success": false,
+        "output": "0x"
+      },
+      "post_state_root": "0xc4daedc5ecd37f15d0f210ad00118fcdd8fd5c449a05ef9d330cb9ca1e6676f0",
+      "gas_used": 25500,
+      "xshard_receive_gas_used": 0,
+      "block_fee_tokens": {
+        "35760": "12750"
+      },
+      "receipts": [
+        {
+          "success": false,
+          "cumulative_gas_used": 25500,
+          "bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "contract_address": "0x",
+          "contract_full_shard_key": 1,
+          "logs": []
+        }
+      ],
+      "xshard_deposit_receipts": [],
+      "xshard_list": [],
+      "accounts": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "999999999999974500"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0x14ad58f39b01bfc8532070b0384f8340d236ac3f00d10f7e60a82024b52db7ee",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {}
+        },
+        "cccc0000000000000000000000000000000000cc": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "12750"
           }
         }
       }
