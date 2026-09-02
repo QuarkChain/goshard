@@ -28,7 +28,6 @@ type fakeSlaveService struct {
 	masterConn *MasterConn
 	handler    PeerHandler
 	branches   []uint32 // local shard set for CREATE
-	configured []uint32 // global configured shard set for BranchConfigured
 }
 
 // stubPeerHandler stands in for the not-yet-migrated business layer: every
@@ -60,7 +59,7 @@ func (stubPeerHandler) GetMinorBlockHeaderListWithSkip(*wire.GetMinorBlockHeader
 	return nil, conn.ErrHandlerNotImplemented
 }
 
-func newFakeSlaveService(mc *MasterConn, handler PeerHandler, branches []uint32, configured []uint32) *fakeSlaveService {
+func newFakeSlaveService(mc *MasterConn, handler PeerHandler, branches []uint32) *fakeSlaveService {
 	if handler == nil {
 		handler = stubPeerHandler{}
 	}
@@ -70,7 +69,6 @@ func newFakeSlaveService(mc *MasterConn, handler PeerHandler, branches []uint32,
 		masterConn:        mc,
 		handler:           handler,
 		branches:          branches,
-		configured:        configured,
 	}
 }
 
@@ -138,17 +136,6 @@ func (f *fakeSlaveService) LookupPeer(clusterPeerID uint64, branch uint32) *Peer
 		return nil
 	}
 	return bm[branch]
-}
-
-// BranchConfigured implements PeerResolver: reports whether branch is in the
-// global configured shard set (py: env.quark_chain_config.get_full_shard_ids()).
-func (f *fakeSlaveService) BranchConfigured(branch uint32) bool {
-	for _, id := range f.configured {
-		if id == branch {
-			return true
-		}
-	}
-	return false
 }
 
 // closeAll closes every registered PeerConn (test cleanup helper; the
@@ -233,11 +220,13 @@ func newMasterConnWithShardSets(t *testing.T, global []uint32, local []uint32) (
 	}
 
 	logger := log.New()
-	fake := newFakeSlaveService(nil, nil, local, global)
+	fake := newFakeSlaveService(nil, nil, local)
 	client, err = NewMasterConn(MasterConnConfig{
 		Conn:                 clientConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: local,
+		ClusterShardIDs:      global,
+		SlaveConnHandler:     fake,
 		Handler:              fake,
 		PeerResolver:         fake,
 		Logger:               logger,

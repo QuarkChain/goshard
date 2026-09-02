@@ -211,7 +211,7 @@ func newMasterTestConnPairWithIdentity(
 		LocalFullShardIDList: clientShards,
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
-		PeerResolver:         newFakeSlaveService(nil, nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil),
 		Logger:               logger,
 	})
 	if err != nil {
@@ -223,7 +223,7 @@ func newMasterTestConnPairWithIdentity(
 		LocalFullShardIDList: serverShards,
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
-		PeerResolver:         newFakeSlaveService(nil, nil, nil, nil),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil),
 		Logger:               logger,
 	})
 	if err != nil {
@@ -291,9 +291,10 @@ func newMasterConnWithPeer(t *testing.T, handler MasterHandler) (*MasterConn, *m
 		Conn:                 slaveConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              handler,
-		PeerResolver:         newFakeSlaveService(nil, nil, nil, []uint32{0x00010001}),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil),
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -703,9 +704,10 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
-		PeerResolver:         newFakeSlaveService(nil, nil, nil, []uint32{0x00010001}),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil),
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -788,9 +790,10 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
-		PeerResolver:         newFakeSlaveService(nil, nil, nil, []uint32{0x00010001}),
+		PeerResolver:         newFakeSlaveService(nil, nil, nil),
 		Logger:               log.New(),
 	})
 	if err != nil {

@@ -22,7 +22,6 @@ import (
 // layer and are not part of the communication layer.
 type PeerResolver interface {
 	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
-	BranchConfigured(branch uint32) bool
 }
 
 // SlaveConnHandler handles master commands for slave-to-slave connections.
@@ -92,6 +91,12 @@ type MasterConnConfig struct {
 	LocalID              []byte
 	LocalFullShardIDList []uint32
 
+	// ClusterShardIDs is the cluster-wide configured full shard id set
+	// (py: env.quark_chain_config.get_full_shard_ids()). routeFrame uses it to
+	// reject frames from a master for a branch outside the global config, which
+	// is fatal for the connection (py: slave.py:123-129 close_with_error).
+	ClusterShardIDs []uint32
+
 	// SlaveConnHandler serves the slave-to-slave topology command
 	// CONNECT_TO_SLAVES (required). It is separate from Handler: the xshard
 	// topology is communication-owned, while Handler is the runtime/business
@@ -125,6 +130,10 @@ type MasterConn struct {
 	slaveConnHandler     SlaveConnHandler
 	localID              []byte
 	localFullShardIDList []uint32
+	// clusterShardIDs is the cluster-wide configured full shard id set
+	// (py: env.quark_chain_config.get_full_shard_ids()); a frame for a branch
+	// outside it closes the connection (see routeFrame).
+	clusterShardIDs map[uint32]struct{}
 
 	// peerResolver resolves virtual peer frames to their PeerConn (Python:
 	// MasterConnection.get_connection_to_forward, slave.py:116-148). Never nil
@@ -151,11 +160,17 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
 	}
 
+	clusterShardIDs := make(map[uint32]struct{}, len(cfg.ClusterShardIDs))
+	for _, id := range cfg.ClusterShardIDs {
+		clusterShardIDs[id] = struct{}{}
+	}
+
 	mc := &MasterConn{
 		slaveConnHandler:     cfg.SlaveConnHandler,
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
+		clusterShardIDs:      clusterShardIDs,
 		peerResolver:         cfg.PeerResolver,
 	}
 
@@ -346,7 +361,7 @@ func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
 		return false
 	}
 
-	if !mc.peerResolver.BranchConfigured(frame.Meta.Branch) {
+	if _, ok := mc.clusterShardIDs[frame.Meta.Branch]; !ok {
 		mc.Logger().Error(
 			"incorrect forwarding branch",
 			"branch", fmt.Sprintf("0x%x", frame.Meta.Branch),
