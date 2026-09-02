@@ -22,38 +22,30 @@ import (
 // layer and are not part of the communication layer.
 type PeerResolver interface {
 	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
-	BranchConfigured(branch uint32) bool
 }
 
-// MasterHandler serves inbound RPCs from the master. It is implemented by
-// the service layer and injected at construction.
-//
-// CREATE/DESTROY of cluster peer connections, ConnectToSlaves and CreateShards
-// are delegated here as well — see the method comments for ownership
-// boundaries.
+// SlaveConnHandler handles master commands for slave-to-slave connections.
+// ConnectToSlaves is pure communication control and is owned by the xshard
+// pool, so it is kept separate from MasterHandler.
+type SlaveConnHandler interface {
+	// ConnectToSlaves connects to the slaves advertised by the master.
+	ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error)
+}
+
+// MasterHandler handles master commands that operate on runtime-owned state.
+// It is implemented by the composition layer and injected at construction.
 //
 // Handler implementations must be safe for concurrent calls.
-//
-// The error return is reserved for connection-level failures: returning an
-// error closes the connection (py: close_with_error). Business failures must
-// be encoded in the response ErrorCode field.
+// Errors are reserved for connection-level failures; business failures should
+// be encoded in the response ErrorCode.
 type MasterHandler interface {
-	// CreateShards handles the RootTip carried by the master's PING.
-	// It owns shard-runtime initialization/update logic
-	// (py: slave_server.create_shards). The PONG handshake itself remains
-	// in MasterConn.
+	// CreateShards initializes or updates shard runtime state from the master's PING.
 	CreateShards(rootTip *wire.RawBytes) error
-	// CreateClusterPeerConnection and DestroyClusterPeerConnection handle
-	// the master's peer-connection management commands. The requests arrive
-	// through MasterConn, but PeerConn ownership belongs to the runtime,
-	// therefore creation and teardown are delegated.
+
+	// CreateClusterPeerConnection and DestroyClusterPeerConnection manage
+	// peer connections owned by the shard runtime.
 	CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error)
 	DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error
-	// ConnectToSlaves dials the fellow slaves advertised by the master. The
-	// resulting slave↔slave connections are owned by the xshard pool, so the
-	// dialing policy is service-layer business
-	// (py: slave_connection_manager.connect_to_slave).
-	ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error)
 
 	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
 	GenTx(req *wire.GenTxRequest) (*wire.GenTxResponse, error)
@@ -99,9 +91,20 @@ type MasterConnConfig struct {
 	LocalID              []byte
 	LocalFullShardIDList []uint32
 
-	// Handler serves inbound RPCs (required). All business operations
-	// (including CREATE/DESTROY of cluster peer connections) are delegated
-	// here; the runtime/service layer implements them.
+	// ClusterShardIDs is the cluster-wide configured full shard id set
+	// (py: env.quark_chain_config.get_full_shard_ids()). routeFrame uses it to
+	// reject frames from a master for a branch outside the global config, which
+	// is fatal for the connection (py: slave.py:123-129 close_with_error).
+	ClusterShardIDs []uint32
+
+	// SlaveConnHandler serves the slave-to-slave topology command
+	// CONNECT_TO_SLAVES (required). It is separate from Handler: the xshard
+	// topology is communication-owned, while Handler is the runtime/business
+	// boundary.
+	SlaveConnHandler SlaveConnHandler
+
+	// Handler serves master commands that operate on runtime-owned state.
+	// The composition layer implements it.
 	Handler MasterHandler
 
 	// PeerResolver resolves virtual peer frames to their PeerConn (required).
@@ -124,8 +127,13 @@ type MasterConn struct {
 	*conn.BaseConn
 
 	handler              MasterHandler
+	slaveConnHandler     SlaveConnHandler
 	localID              []byte
 	localFullShardIDList []uint32
+	// clusterShardIDs is the cluster-wide configured full shard id set
+	// (py: env.quark_chain_config.get_full_shard_ids()); a frame for a branch
+	// outside it closes the connection (see routeFrame).
+	clusterShardIDs map[uint32]struct{}
 
 	// peerResolver resolves virtual peer frames to their PeerConn (Python:
 	// MasterConnection.get_connection_to_forward, slave.py:116-148). Never nil
@@ -139,6 +147,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Conn == nil {
 		return nil, errors.New("master connection must not be nil")
 	}
+	if cfg.SlaveConnHandler == nil {
+		return nil, errors.New("master slave conn handler must not be nil")
+	}
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
@@ -149,10 +160,17 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
 	}
 
+	clusterShardIDs := make(map[uint32]struct{}, len(cfg.ClusterShardIDs))
+	for _, id := range cfg.ClusterShardIDs {
+		clusterShardIDs[id] = struct{}{}
+	}
+
 	mc := &MasterConn{
+		slaveConnHandler:     cfg.SlaveConnHandler,
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
+		clusterShardIDs:      clusterShardIDs,
 		peerResolver:         cfg.PeerResolver,
 	}
 
@@ -343,7 +361,7 @@ func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
 		return false
 	}
 
-	if !mc.peerResolver.BranchConfigured(frame.Meta.Branch) {
+	if _, ok := mc.clusterShardIDs[frame.Meta.Branch]; !ok {
 		mc.Logger().Error(
 			"incorrect forwarding branch",
 			"branch", fmt.Sprintf("0x%x", frame.Meta.Branch),
@@ -377,7 +395,7 @@ func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
 }
 
 func (mc *MasterConn) handleConnectToSlaves(req any) (any, error) {
-	return mc.handler.ConnectToSlaves(req.(*wire.ConnectToSlavesRequest))
+	return mc.slaveConnHandler.ConnectToSlaves(req.(*wire.ConnectToSlavesRequest))
 }
 
 func (mc *MasterConn) handleMine(req any) (any, error) {

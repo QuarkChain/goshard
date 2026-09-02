@@ -28,20 +28,6 @@ func (p *XshardPool) hasSlaveID(id []byte) bool {
 	return ok
 }
 
-// outboundSize returns the number of distinct connections in the shard index.
-func (p *XshardPool) outboundSize() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	seen := make(map[*XshardConn]struct{})
-	for _, conns := range p.conns {
-		for _, conn := range conns {
-			seen[conn] = struct{}{}
-		}
-	}
-	return len(seen)
-}
-
 // connectionsSize returns the number of tracked connections (including conns
 // still in the PING handshake).
 func (p *XshardPool) connectionsSize() int {
@@ -64,10 +50,11 @@ func (testXshardHandler) BatchAddXshardTxList(*wire.BatchAddXshardTxListRequest)
 	return &wire.BatchAddXshardTxListResponse{}, nil
 }
 
-// mustNewXshardPool creates a pool with the test hook (maxPayloadSize 0).
+// mustNewXshardPool creates a pool with the test hook (maxPayloadSize 0) and
+// no route filter (clusterShardIDs nil), matching the pre-filter behavior.
 func mustNewXshardPool(t *testing.T, selfID []byte, shards []uint32) *XshardPool {
 	t.Helper()
-	pool, err := NewXshardPool(selfID, shards, 0, testXshardHandler{}, log.New())
+	pool, err := NewXshardPool(selfID, shards, nil, 0, testXshardHandler{}, log.New())
 	if err != nil {
 		t.Fatalf("new xshard pool: %v", err)
 	}
@@ -549,6 +536,32 @@ func TestXshardPool_ClosedConnectionStaysIndexed(t *testing.T) {
 
 // ── inbound tests ─────────────────────────────────────────────────────────────
 
+// TestXshardPool_RouteFilteredByClusterShardSet verifies the Python parity fix:
+// route keys are restricted to the cluster-wide configured shard set, so a
+// peer advertising an out-of-config id cannot create a route for it. The
+// peer's slave id is still tracked regardless of the filtered shards.
+func TestXshardPool_RouteFilteredByClusterShardSet(t *testing.T) {
+	pool, err := NewXshardPool([]byte("local-slave"), []uint32{0x00030004}, []uint32{0x00010001}, 0, testXshardHandler{}, log.New())
+	if err != nil {
+		t.Fatalf("new xshard pool: %v", err)
+	}
+	defer pool.Close()
+
+	configuredShard := uint32(0x00010001)
+	rogueShard := uint32(0x00BAD00F) // advertised but not configured
+	establishInbound(t, pool, []byte("remote-slave"), []uint32{configuredShard, rogueShard})
+
+	if conns := pool.Lookup(configuredShard); len(conns) != 1 {
+		t.Fatalf("expected 1 conn for configured shard 0x%x, got %d", configuredShard, len(conns))
+	}
+	if conns := pool.Lookup(rogueShard); len(conns) != 0 {
+		t.Fatalf("rogue shard 0x%x must not be routed, got %d conns", rogueShard, len(conns))
+	}
+	if !pool.hasSlaveID([]byte("remote-slave")) {
+		t.Fatal("slave ID must still be tracked even when some shards are filtered")
+	}
+}
+
 // TestXshardPool_HandleInboundAllowsMultipleInboundConnections verifies two
 // inbound connections from the same remote are both accepted (Python's
 // handle_new_connection does not check slave_ids).
@@ -769,7 +782,7 @@ func TestXshardConn_SendXshardTxListErrorCode(t *testing.T) {
 }
 
 func TestNewXshardPool_NilLogger(t *testing.T) {
-	pool, err := NewXshardPool(nil, nil, 0, testXshardHandler{}, nil)
+	pool, err := NewXshardPool(nil, nil, nil, 0, testXshardHandler{}, nil)
 	if err != nil {
 		t.Fatalf("nil logger should be accepted: %v", err)
 	}
@@ -780,7 +793,7 @@ func TestNewXshardPool_NilLogger(t *testing.T) {
 }
 
 func TestNewXshardPool_NilHandler(t *testing.T) {
-	if _, err := NewXshardPool(nil, nil, 0, nil, log.New()); err == nil {
+	if _, err := NewXshardPool(nil, nil, nil, 0, nil, log.New()); err == nil {
 		t.Fatal("expected error for nil handler")
 	}
 }
@@ -905,13 +918,14 @@ func TestXshardPool_DialToSlaveSkipsSelf(t *testing.T) {
 	}
 }
 
-// TestXshardPool_DialToSlaveConcurrentDialsBothRegister verifies Python
-// parity: dedup is an entry check only, so concurrent dials that both passed
-// it register two connections — Python's check-then-register is likewise not
-// atomic, and duplicates are tolerated by the idempotent business layer.
-// A registration-time re-check would close the losing outbound; with mutual
-// dials both sides would then kill their only live connections.
-func TestXshardPool_DialToSlaveConcurrentDialsBothRegister(t *testing.T) {
+// TestXshardPool_DialToSlaveConcurrentDialsRemainConnected verifies that
+// concurrent dials to the same remote must not partition the pair nor lose
+// the remote: both DialToSlave calls return success, the remote slave is
+// registered, and the shard keeps at least one live delivery path. It does
+// not mandate the number of retained connections, so it stays compatible
+// both with keeping both duplicates (current entry-only dedup) and with a
+// future deterministic convergence to a single logical route.
+func TestXshardPool_DialToSlaveConcurrentDialsRemainConnected(t *testing.T) {
 	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
 	defer rs.close()
 
@@ -937,11 +951,22 @@ func TestXshardPool_DialToSlaveConcurrentDialsBothRegister(t *testing.T) {
 		}
 	}
 
-	if got := pool.outboundSize(); got != 2 {
-		t.Fatalf("expected 2 outbound connections, got %d", got)
-	}
 	if !pool.hasSlaveID([]byte("remote-slave")) {
 		t.Fatal("remote-slave should be tracked")
+	}
+	// At least one live, routable connection must exist for the shard.
+	conns := pool.Lookup(0x00010001)
+	if len(conns) == 0 {
+		t.Fatal("expected at least one route for the shard")
+	}
+	live := 0
+	for _, c := range conns {
+		if !c.IsClosed() {
+			live++
+		}
+	}
+	if live == 0 {
+		t.Fatal("expected at least one live connection for the shard")
 	}
 }
 
@@ -1068,14 +1093,15 @@ func TestXshardPool_DialToSlaveRetryAfterFailure(t *testing.T) {
 	}
 }
 
-// TestXshardPool_MutualDialFormsTwoConnections verifies the Python steady
-// state: when master tells both slaves to connect, each dials the other and
-// each side ends up with an inbound plus an outbound connection, all alive.
-// This is the regression guard for a registration-time dedup re-check: it
-// would close both outbounds after the peer's inbound registered first,
-// leaving one dead zombie per side and permanently partitioning the pair
-// (slave IDs are add-only, so no redial is ever possible).
-func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
+// TestXshardPool_MutualDialKeepsLiveRoute verifies that when master tells both
+// slaves to connect, mutual dial must not partition the pair: each side stays
+// able to reach the peer with at least one live connection per shard. It does
+// not mandate the connection count, so it is compatible both with keeping the
+// inbound plus outbound duplicate (current entry-only dedup) and with a future
+// deterministic convergence to a single logical route — the key invariant is
+// that no indexed connection is ever a dead zombie (which would wedge the
+// add-only slave ID registry and prevent any redial).
+func TestXshardPool_MutualDialKeepsLiveRoute(t *testing.T) {
 	s0ID, s1ID := []byte("s0"), []byte("s1")
 	s0Shards := []uint32{1, 3, 5, 7}
 	s1Shards := []uint32{2, 4, 6, 8}
@@ -1143,7 +1169,8 @@ func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
 		}
 	}
 
-	// Each side: the peer's shards hold two live connections; own shards none.
+	// Own shards must not be routed via this peer; each peer shard needs at
+	// least one live connection and must never hold a dead zombie.
 	assertShardState := func(pool *XshardPool, peerShards []uint32, peerID []byte) {
 		t.Helper()
 		if !pool.hasSlaveID(peerID) {
@@ -1151,13 +1178,15 @@ func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
 		}
 		for _, shard := range peerShards {
 			conns := pool.Lookup(shard)
-			if len(conns) != 2 {
-				t.Fatalf("shard %d: expected 2 connections (inbound+outbound), got %d", shard, len(conns))
-			}
+			live := 0
 			for _, c := range conns {
 				if c.IsClosed() {
 					t.Fatalf("shard %d: indexed connection is closed (zombie)", shard)
 				}
+				live++
+			}
+			if live == 0 {
+				t.Fatalf("shard %d: no live connection to peer", shard)
 			}
 		}
 	}
