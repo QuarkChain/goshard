@@ -209,6 +209,7 @@ func newMasterTestConnPairWithIdentity(
 		Conn:                 clientConn,
 		LocalID:              clientID,
 		LocalFullShardIDList: clientShards,
+		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               logger,
 	})
@@ -219,6 +220,7 @@ func newMasterTestConnPairWithIdentity(
 		Conn:                 serverConn,
 		LocalID:              serverID,
 		LocalFullShardIDList: serverShards,
+		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               logger,
 	})
@@ -287,6 +289,7 @@ func newMasterConnWithPeer(t *testing.T, handler MasterHandler) (*MasterConn, *m
 		Conn:                 slaveConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              handler,
 		Logger:               log.New(),
 	})
@@ -694,6 +697,7 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
@@ -777,6 +781,7 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
