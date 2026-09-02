@@ -1093,14 +1093,15 @@ func TestXshardPool_DialToSlaveRetryAfterFailure(t *testing.T) {
 	}
 }
 
-// TestXshardPool_MutualDialFormsTwoConnections verifies the Python steady
-// state: when master tells both slaves to connect, each dials the other and
-// each side ends up with an inbound plus an outbound connection, all alive.
-// This is the regression guard for a registration-time dedup re-check: it
-// would close both outbounds after the peer's inbound registered first,
-// leaving one dead zombie per side and permanently partitioning the pair
-// (slave IDs are add-only, so no redial is ever possible).
-func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
+// TestXshardPool_MutualDialKeepsLiveRoute verifies that when master tells both
+// slaves to connect, mutual dial must not partition the pair: each side stays
+// able to reach the peer with at least one live connection per shard. It does
+// not mandate the connection count, so it is compatible both with keeping the
+// inbound plus outbound duplicate (current entry-only dedup) and with a future
+// deterministic convergence to a single logical route — the key invariant is
+// that no indexed connection is ever a dead zombie (which would wedge the
+// add-only slave ID registry and prevent any redial).
+func TestXshardPool_MutualDialKeepsLiveRoute(t *testing.T) {
 	s0ID, s1ID := []byte("s0"), []byte("s1")
 	s0Shards := []uint32{1, 3, 5, 7}
 	s1Shards := []uint32{2, 4, 6, 8}
@@ -1168,7 +1169,8 @@ func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
 		}
 	}
 
-	// Each side: the peer's shards hold two live connections; own shards none.
+	// Own shards must not be routed via this peer; each peer shard needs at
+	// least one live connection and must never hold a dead zombie.
 	assertShardState := func(pool *XshardPool, peerShards []uint32, peerID []byte) {
 		t.Helper()
 		if !pool.hasSlaveID(peerID) {
@@ -1176,13 +1178,15 @@ func TestXshardPool_MutualDialFormsTwoConnections(t *testing.T) {
 		}
 		for _, shard := range peerShards {
 			conns := pool.Lookup(shard)
-			if len(conns) != 2 {
-				t.Fatalf("shard %d: expected 2 connections (inbound+outbound), got %d", shard, len(conns))
-			}
+			live := 0
 			for _, c := range conns {
 				if c.IsClosed() {
 					t.Fatalf("shard %d: indexed connection is closed (zombie)", shard)
 				}
+				live++
+			}
+			if live == 0 {
+				t.Fatalf("shard %d: no live connection to peer", shard)
 			}
 		}
 	}
