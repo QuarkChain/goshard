@@ -61,6 +61,18 @@ func mustNewXshardPool(t *testing.T, selfID []byte, shards, clusterShardIDs []ui
 	return pool
 }
 
+// waitFor polls cond until it holds or the timeout elapses.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // ── TCP test pair helpers ─────────────────────────────────────────────────────
 
 // newTestConnPair creates a pair of XshardConn connected over a local TCP
@@ -562,54 +574,97 @@ func TestXshardPool_RouteFilteredByClusterShardSet(t *testing.T) {
 	}
 }
 
-// TestXshardPool_HandleInboundAllowsMultipleInboundConnections verifies two
-// inbound connections from the same remote are both accepted (Python's
-// handle_new_connection does not check slave_ids).
-func TestXshardPool_HandleInboundAllowsMultipleInboundConnections(t *testing.T) {
-	pool := mustNewXshardPool(t, []byte("local-slave"), []uint32{0x00030004}, []uint32{0x00010001})
-	defer pool.Close()
+// TestXshardPool_SequentialDialLeavesOneLiveRoute reproduces the Python master's
+// sequential orchestration of mutual xshard routing: first S0 is told to dial S1
+// (producing an S0 outbound and an S1 inbound that register each other over a
+// real TCP connection); only afterwards S1 is told to dial S0. Because S1
+// already knows S0 from the inbound handshake, DialToSlave's pre-check skips the
+// second dial, so each pool keeps exactly one live route and no duplicate TCP
+// connection is opened. Duplicate inbound connections are not a required
+// behavior; the topology to preserve is that skip. Unlike the old helper-based
+// tests (which closed the client before asserting), this keeps both pool-owned
+// ends of the retained connection open and round-trips a real request over it to
+// prove it is live.
+func TestXshardPool_SequentialDialLeavesOneLiveRoute(t *testing.T) {
+	s0ID, s1ID := []byte("s0"), []byte("s1")
+	s0Shards := []uint32{1, 2}
+	s1Shards := []uint32{3, 4}
+	clusterShards := []uint32{1, 2, 3, 4}
 
-	establishInbound(t, pool, []byte("same-slave"), []uint32{0x00010001})
-	establishInbound(t, pool, []byte("same-slave"), []uint32{0x00010001})
-
-	if conns := pool.Lookup(0x00010001); len(conns) != 2 {
-		t.Fatalf("expected 2 connections for shard, got %d", len(conns))
+	ln0, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen s0: %v", err)
 	}
-	if !pool.hasSlaveID([]byte("same-slave")) {
-		t.Fatal("slaveID not tracked")
+	defer ln0.Close()
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen s1: %v", err)
 	}
-}
+	defer ln1.Close()
 
-// TestXshardPool_InboundFirstOutboundSkipped verifies that when inbound
-// registers the remote first, a later outbound to the same remote is silently
-// skipped by DialToSlave's pre-check (Python's connect_to_slave returns "" when
-// the slave is already in slave_ids).
-func TestXshardPool_InboundFirstOutboundSkipped(t *testing.T) {
-	pool := mustNewXshardPool(t, []byte("local"), []uint32{0x00030004}, []uint32{0x00010001})
-	defer pool.Close()
+	pool0 := mustNewXshardPool(t, s0ID, s0Shards, clusterShards)
+	defer pool0.Close()
+	pool1 := mustNewXshardPool(t, s1ID, s1Shards, clusterShards)
+	defer pool1.Close()
 
-	// Inbound first.
-	establishInbound(t, pool, []byte("remote-slave"), []uint32{0x00010001})
-	if !pool.hasSlaveID([]byte("remote-slave")) {
-		t.Fatal("slaveID not registered after inbound")
-	}
-
-	// Outbound should be silently skipped (already known from inbound).
-	rs := startRemoteSlave(t, []byte("remote-slave"), []uint32{0x00010001})
-	defer rs.close()
-	if err := pool.DialToSlave(context.Background(), rs.slaveInfo([]byte("remote-slave"), []uint32{0x00010001})); err != nil {
-		t.Fatalf("outbound should be silently skipped, got error: %v", err)
-	}
-	if rs.acceptedCount() != 0 {
-		t.Fatalf("expected no accepted connection on the remote, got %d", rs.acceptedCount())
+	// Accept loops standing in for each slave's inbound path.
+	for ln, pool := range map[net.Listener]*XshardPool{ln0: pool0, ln1: pool1} {
+		go func(ln net.Listener, pool *XshardPool) {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				pool.HandleInbound(c)
+			}
+		}(ln, pool)
 	}
 
-	// Only the original inbound connection remains indexed.
-	if conns := pool.Lookup(0x00010001); len(conns) != 1 {
-		t.Fatalf("expected 1 connection (inbound only), got %d", len(conns))
+	a0 := ln0.Addr().(*net.TCPAddr)
+	a1 := ln1.Addr().(*net.TCPAddr)
+	info0 := wire.SlaveInfo{ID: s0ID, Host: []byte(a0.IP.String()), Port: uint16(a0.Port), FullShardIDList: s0Shards}
+	info1 := wire.SlaveInfo{ID: s1ID, Host: []byte(a1.IP.String()), Port: uint16(a1.Port), FullShardIDList: s1Shards}
+
+	// Step 1: master tells S0 to dial S1 (S0 outbound / S1 inbound).
+	if err := pool0.DialToSlave(context.Background(), info1); err != nil {
+		t.Fatalf("s0 dial s1: %v", err)
 	}
-	if !pool.hasSlaveID([]byte("remote-slave")) {
-		t.Fatal("slaveID should still be tracked")
+	// Both sides must register the peer (S1 does so asynchronously via the
+	// accept loop) before advancing to step 2.
+	waitFor(t, func() bool { return pool0.hasSlaveID(s1ID) && pool1.hasSlaveID(s0ID) })
+
+	// Step 2: master tells S1 to dial S0; the pre-check skips it because S0 is
+	// already known from the inbound handshake, so no second TCP connection is made.
+	if err := pool1.DialToSlave(context.Background(), info0); err != nil {
+		t.Fatalf("s1 dial s0 should be skipped, got error: %v", err)
+	}
+
+	// Each peer shard keeps exactly one live route in each pool.
+	for _, shard := range s1Shards {
+		conns := pool0.Lookup(shard)
+		if len(conns) != 1 {
+			t.Fatalf("s0 route 0x%x: expected exactly 1 connection, got %d", shard, len(conns))
+		}
+		if conns[0].IsClosed() {
+			t.Fatalf("s0 route 0x%x: retained connection is closed", shard)
+		}
+	}
+	for _, shard := range s0Shards {
+		conns := pool1.Lookup(shard)
+		if len(conns) != 1 {
+			t.Fatalf("s1 route 0x%x: expected exactly 1 connection, got %d", shard, len(conns))
+		}
+		if conns[0].IsClosed() {
+			t.Fatalf("s1 route 0x%x: retained connection is closed", shard)
+		}
+	}
+
+	// The retained route is genuinely live: round-trip a real request from S1's
+	// retained (inbound) end back to S0 across the kept connection.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := pool1.Lookup(s0Shards[0])[0].SendAddXshardTxList(ctx, &wire.AddXshardTxListRequest{Branch: s0Shards[0], TxList: &wire.RawBytes{}}); err != nil {
+		t.Fatalf("round-trip over retained route failed: %v", err)
 	}
 }
 
