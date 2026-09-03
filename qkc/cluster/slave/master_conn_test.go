@@ -4,7 +4,6 @@ package slave
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -28,6 +27,9 @@ type fakeMasterHandler struct {
 	createPeerCalls atomic.Int32
 	// createShardsCalls counts CreateShards invocations.
 	createShardsCalls atomic.Int32
+	// createShardsAndPeerConnsCalls counts the communication-layer
+	// CreateShardsAndPeerConnections invocations (the PING RootTip entry point).
+	createShardsAndPeerConnsCalls atomic.Int32
 	// lastRootTip stores a copy of the most recent CreateShards argument.
 	lastRootTip atomic.Pointer[wire.RawBytes]
 	// destroyCalls counts DestroyClusterPeerConnection invocations.
@@ -37,14 +39,23 @@ type fakeMasterHandler struct {
 	errCreateShards error
 }
 
-func (h *fakeMasterHandler) CreateShards(rootTip *wire.RawBytes) error {
+// CreateShardsAndPeerConnections is the communication-layer entry point for a
+// PING RootTip. It mirrors the real SlaveComm orchestration by driving the
+// business handler's CreateShards.
+func (h *fakeMasterHandler) CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error {
+	h.createShardsAndPeerConnsCalls.Add(1)
+	_, err := h.CreateShards(rootTip)
+	return err
+}
+
+func (h *fakeMasterHandler) CreateShards(rootTip *wire.RawBytes) ([]uint32, error) {
 	h.createShardsCalls.Add(1)
 	if rootTip != nil {
 		cp := make(wire.RawBytes, len(*rootTip))
 		copy(cp, *rootTip)
 		h.lastRootTip.Store(&cp)
 	}
-	return h.errCreateShards
+	return nil, h.errCreateShards
 }
 
 func (h *fakeMasterHandler) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
@@ -169,71 +180,6 @@ func (h *fakeMasterHandler) GetTotalBalance(*wire.GetTotalBalanceRequest) (*wire
 	return &wire.GetTotalBalanceResponse{}, nil
 }
 
-// ── TCP pair helper ──────────────────────────────────────────────────────────
-
-// newMasterTestConnPairWithIdentity creates a pair of MasterConns connected
-// over a local TCP socket with the given identities and the default fake
-// handler. The caller is responsible for calling cleanup.
-func newMasterTestConnPairWithIdentity(
-	t *testing.T,
-	clientID []byte, clientShards []uint32,
-	serverID []byte, serverShards []uint32,
-) (client, server *MasterConn, cleanup func()) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-
-	var serverConn net.Conn
-	var acceptErr error
-	accepted := make(chan struct{})
-	go func() {
-		defer close(accepted)
-		serverConn, acceptErr = ln.Accept()
-		ln.Close()
-	}()
-
-	clientConn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	<-accepted
-	if acceptErr != nil {
-		t.Fatalf("accept: %v", acceptErr)
-	}
-
-	logger := log.New()
-	client, err = NewMasterConn(MasterConnConfig{
-		Conn:                 clientConn,
-		LocalID:              clientID,
-		LocalFullShardIDList: clientShards,
-		SlaveConnHandler:     &fakeMasterHandler{},
-		Handler:              &fakeMasterHandler{},
-		Logger:               logger,
-	})
-	if err != nil {
-		t.Fatalf("new client master conn: %v", err)
-	}
-	server, err = NewMasterConn(MasterConnConfig{
-		Conn:                 serverConn,
-		LocalID:              serverID,
-		LocalFullShardIDList: serverShards,
-		SlaveConnHandler:     &fakeMasterHandler{},
-		Handler:              &fakeMasterHandler{},
-		Logger:               logger,
-	})
-	if err != nil {
-		t.Fatalf("new server master conn: %v", err)
-	}
-	cleanup = func() {
-		client.Close()
-		server.Close()
-	}
-	return
-}
-
 // ── raw master peer helper ───────────────────────────────────────────────────
 
 // masterTestPeer drives the master side of the protocol over a net.Pipe: it
@@ -282,14 +228,14 @@ func (p *masterTestPeer) nextFrame(t *testing.T, timeout time.Duration) *wire.Fr
 // newMasterConnWithPeer creates a started MasterConn over a net.Pipe with a
 // raw master peer on the other end. All frames go through the real wire
 // encode/decode path.
-func newMasterConnWithPeer(t *testing.T, handler MasterHandler) (*MasterConn, *masterTestPeer, func()) {
+func newMasterConnWithPeer(t *testing.T, handler *fakeMasterHandler) (*MasterConn, *masterTestPeer, func()) {
 	t.Helper()
 	peerConn, slaveConn := net.Pipe()
 	mc, err := NewMasterConn(MasterConnConfig{
 		Conn:                 slaveConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
-		SlaveConnHandler:     &fakeMasterHandler{},
+		SlaveConnHandler:     handler,
 		Handler:              handler,
 		Logger:               log.New(),
 	})
@@ -311,36 +257,18 @@ func newMasterConnWithPeer(t *testing.T, handler MasterHandler) (*MasterConn, *m
 // ── construction ─────────────────────────────────────────────────────────────
 
 func TestMasterConn_ConfigValidation(t *testing.T) {
-	// Nil conn / nil handler must be rejected.
+	// Nil conn / nil handlers must be rejected.
 	if _, err := NewMasterConn(MasterConnConfig{}); err == nil {
 		t.Fatal("expected error for nil conn")
 	}
 	if _, err := NewMasterConn(MasterConnConfig{Conn: &net.TCPConn{}}); err == nil {
-		t.Fatal("expected error for nil handler")
+		t.Fatal("expected error for nil slave conn handler")
 	}
-
-	// Identity getters return copies: source slices are stored by value and
-	// later mutation must not leak into the conn.
-	id := []byte("slave-a")
-	shards := []uint32{0x00010001, 0x00020001}
-	client, _, cleanup := newMasterTestConnPairWithIdentity(t, id, shards, []byte("b"), []uint32{0x00010001})
-	defer cleanup()
-
-	if !bytes.Equal(client.LocalID(), id) {
-		t.Fatalf("LocalID: got %s, want %s", client.LocalID(), id)
-	}
-	got := client.LocalFullShardIDList()
-	if len(got) != len(shards) || got[0] != shards[0] || got[1] != shards[1] {
-		t.Fatalf("LocalFullShardIDList: got %v, want %v", got, shards)
-	}
-
-	id[0] = 'X'
-	shards[0] = 0
-	if c := client.LocalID(); !bytes.Equal(c, []byte("slave-a")) {
-		t.Fatalf("LocalID changed after source mutation: got %s", c)
-	}
-	if c := client.LocalFullShardIDList(); c[0] != 0x00010001 {
-		t.Fatalf("LocalFullShardIDList changed after source mutation: %v", c)
+	if _, err := NewMasterConn(MasterConnConfig{
+		Conn:             &net.TCPConn{},
+		SlaveConnHandler: &fakeMasterHandler{},
+	}); err == nil {
+		t.Fatal("expected error for nil master handler")
 	}
 }
 
@@ -348,8 +276,8 @@ func TestMasterConn_ConfigValidation(t *testing.T) {
 
 // TestMasterConn_Ping verifies PING→PONG across the real wire path: it echoes
 // the slave's configured identity (never the PING payload's), delegates a
-// carried RootTip to MasterHandler.CreateShards exactly once (nil RootTip must
-// not trigger it), and keeps the connection open.
+// carried RootTip to SlaveConnHandler.CreateShardsAndPeerConnections exactly
+// once (nil RootTip must not trigger it), and keeps the connection open.
 func TestMasterConn_Ping(t *testing.T) {
 	handler := &fakeMasterHandler{}
 	server, peer, cleanup := newMasterConnWithPeer(t, handler)
@@ -358,7 +286,7 @@ func TestMasterConn_Ping(t *testing.T) {
 	for i, rootTip := range []*wire.RawBytes{nil, {0x01, 0x02}} {
 		payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 			ID:              []byte("master"),
-			FullShardIDList: []uint32{0x00010001},
+			FullShardIDList: []uint32{0x000f0001}, // deliberately differs from the slave's own, to prove PONG never adopts it
 			RootTip:         rootTip,
 		})
 		if err != nil {
@@ -378,6 +306,9 @@ func TestMasterConn_Ping(t *testing.T) {
 		if resp.Opcode != byte(wire.ClusterOpPong) {
 			t.Fatalf("expected pong, got opcode 0x%x", resp.Opcode)
 		}
+		if resp.RPCID != uint64(i+1) {
+			t.Fatalf("pong rpc_id: got %d, want %d", resp.RPCID, uint64(i+1))
+		}
 		var pong wire.PongResponse
 		if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &pong); err != nil {
 			t.Fatalf("deserialize pong: %v", err)
@@ -386,7 +317,7 @@ func TestMasterConn_Ping(t *testing.T) {
 			t.Fatalf("pong id mismatch: got %s, want go-slave", pong.ID)
 		}
 		if len(pong.FullShardIDList) != 1 || pong.FullShardIDList[0] != 0x00010001 {
-			t.Fatalf("pong shard list mismatch: %v", pong.FullShardIDList)
+			t.Fatalf("pong shard list must reflect the slave's own config, not the PING payload: %v", pong.FullShardIDList)
 		}
 	}
 
@@ -396,6 +327,9 @@ func TestMasterConn_Ping(t *testing.T) {
 	default:
 	}
 
+	if got := handler.createShardsAndPeerConnsCalls.Load(); got != 1 {
+		t.Fatalf("CreateShardsAndPeerConnections calls: got %d, want 1 (only the non-nil RootTip)", got)
+	}
 	if got := handler.createShardsCalls.Load(); got != 1 {
 		t.Fatalf("CreateShards calls: got %d, want 1 (only the non-nil RootTip)", got)
 	}
@@ -404,10 +338,11 @@ func TestMasterConn_Ping(t *testing.T) {
 	}
 }
 
-// TestMasterConn_CreateShardsErrorClosesConnection verifies that a CreateShards
-// failure during PING is a connection-level failure: no PONG is written and the
-// connection closes (py: the create_shards exception propagates through
-// handle_ping into close_with_error, so the master never sees a PONG).
+// TestMasterConn_CreateShardsErrorClosesConnection verifies that a
+// CreateShardsAndPeerConnections failure during PING is a connection-level
+// failure: no PONG is written and the connection closes (py: the create_shards
+// exception propagates through handle_ping into close_with_error, so the master
+// never sees a PONG).
 func TestMasterConn_CreateShardsErrorClosesConnection(t *testing.T) {
 	handler := &fakeMasterHandler{errCreateShards: errors.New("boom")}
 	server, peer, cleanup := newMasterConnWithPeer(t, handler)
@@ -445,9 +380,9 @@ func TestMasterConn_CreateShardsErrorClosesConnection(t *testing.T) {
 }
 
 // TestMasterConn_CreateClusterPeerConnectionDelegated verifies that CREATE is
-// dispatched to the MasterHandler (service layer) and its response is written
-// back; the connection stays alive. The peer-connection business itself is
-// owned by the handler's runtime, not by MasterConn.
+// dispatched to the SlaveConnHandler (communication layer) and its response is
+// written back; the connection stays alive. The peer-connection business itself
+// is owned by the communication layer, not by MasterConn.
 func TestMasterConn_CreateClusterPeerConnectionDelegated(t *testing.T) {
 	handler := &fakeMasterHandler{}
 	server, peer, cleanup := newMasterConnWithPeer(t, handler)
