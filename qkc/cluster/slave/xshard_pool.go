@@ -33,8 +33,8 @@ type XshardPool struct {
 	localFullShardIDList []uint32
 	// clusterShardIDs is the immutable membership set derived from the
 	// cluster-wide configured shard ids (py:
-	// env.quark_chain_config.get_full_shard_ids()).
-	// Nil means route filtering is disabled.
+	// env.quark_chain_config.get_full_shard_ids()). A connection's shard is
+	// routed only if it belongs to this set (py: slave.py:830-835).
 	clusterShardIDs map[uint32]struct{}
 	maxPayloadSize  uint32        // 0 disables the payload limit.
 	handler         XshardHandler // Serves inbound xshard requests.
@@ -46,9 +46,9 @@ type XshardPool struct {
 
 // NewXshardPool creates a pool. selfID is this slave's identity. handler
 // serves inbound xshard requests and must not be nil. maxPayloadSize 0
-// disables the payload limit. clusterShardIDs contains the cluster-wide
-// configured shard ids (py: env.quark_chain_config.get_full_shard_ids()).
-// A nil or empty slice disables route filtering.
+// disables the payload limit. clusterShardIDs holds the cluster-wide
+// configured shard ids (py: env.quark_chain_config.get_full_shard_ids());
+// a connection's shard is routed only if it is in this set.
 func NewXshardPool(selfID []byte, localFullShardIDList []uint32, clusterShardIDs []uint32, maxPayloadSize uint32, handler XshardHandler, logger log.Logger) (*XshardPool, error) {
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
@@ -56,12 +56,9 @@ func NewXshardPool(selfID []byte, localFullShardIDList []uint32, clusterShardIDs
 	if logger == nil {
 		logger = log.Root()
 	}
-	var clusterSet map[uint32]struct{}
-	if len(clusterShardIDs) > 0 {
-		clusterSet = make(map[uint32]struct{}, len(clusterShardIDs))
-		for _, id := range clusterShardIDs {
-			clusterSet[id] = struct{}{}
-		}
+	clusterSet := make(map[uint32]struct{}, len(clusterShardIDs))
+	for _, id := range clusterShardIDs {
+		clusterSet[id] = struct{}{}
 	}
 	return &XshardPool{
 		conns:                make(map[uint32][]*XshardConn),
@@ -254,10 +251,8 @@ func (p *XshardPool) addSlaveConnectionLocked(conn *XshardConn) {
 	// env.quark_chain_config.get_full_shard_ids().
 	seen := make(map[uint32]struct{}, len(shardList))
 	for _, shardID := range shardList {
-		if len(p.clusterShardIDs) > 0 {
-			if _, ok := p.clusterShardIDs[shardID]; !ok {
-				continue
-			}
+		if _, ok := p.clusterShardIDs[shardID]; !ok {
+			continue
 		}
 		if _, dup := seen[shardID]; dup {
 			continue
