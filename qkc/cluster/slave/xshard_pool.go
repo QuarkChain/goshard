@@ -144,7 +144,10 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 
 // HandleInbound takes ownership of an accepted xshard connection: it waits
 // for the handshake and indexes the conn. Conns whose handshake fails or
-// times out are discarded and never enter the routing index.
+// times out are discarded and never enter the routing index. Registration
+// happens-before the PONG reply for inbound connections, so a successful
+// handshake observed by the dialing peer implies that the inbound connection
+// has already been indexed by this pool.
 func (p *XshardPool) HandleInbound(nc net.Conn) {
 	// Inbound identity arrives with the first PING (py:845-846 pass None).
 	conn, err := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, nil, nil, p.handler, p.log)
@@ -159,6 +162,10 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 		p.log.Warn("xshard pool closed, closing inbound conn immediately", "remote", conn.RemoteAddr())
 		return
 	}
+
+	// Arm the registration barrier before Start, so the reader goroutine
+	// observes the channel (goroutine creation publishes the write).
+	conn.inboundRegistered = make(chan struct{})
 	conn.Start()
 
 	if !conn.waitUntilPingReceived() {
@@ -170,9 +177,15 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 	// Inbound is not deduplicated — a remote may have multiple connections
 	// (py handle_new_connection never checks slave_ids).
 	if err := p.registerConnection(conn); err != nil {
+		conn.Close() // defensive
 		p.log.Warn("xshard pool closed while registering inbound conn", "remote", conn.RemoteAddr())
 		return
 	}
+	// Release the barrier: the first PING's PONG is written only after this
+	// point, so the dialing peer cannot trigger a reverse dial that this pool
+	// would not know to skip. registerConnection's failure paths close the
+	// conn, which unblocks the barrier with an error instead of a PONG.
+	close(conn.inboundRegistered)
 
 	p.log.Info("indexed inbound xshard connection", "remote_id", string(conn.RemoteID()), "shards", conn.RemoteFullShardIDList())
 }
