@@ -53,6 +53,9 @@ func NewXshardPool(selfID []byte, localFullShardIDList []uint32, clusterShardIDs
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
 	}
+	if len(clusterShardIDs) == 0 {
+		return nil, errors.New("cluster shard IDs must not be empty")
+	}
 	if logger == nil {
 		logger = log.Root()
 	}
@@ -100,9 +103,14 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 	}
 	conn.Start()
 
-	// The peer must confirm the master-advertised identity (py:885-890); the
-	// PONG result is compared and discarded, never written back.
-	id, shardList, err := conn.sendPing(ctx)
+	// The peer must confirm the master-advertised identity (py:885-890).
+	// Bound the handshake independently of the caller's context so a peer
+	// that keeps the TCP connection open but never responds to PING cannot
+	// block DialToSlave indefinitely.
+	pingCtx, cancel := context.WithTimeout(ctx, xshardHandshakeTimeout)
+	defer cancel()
+
+	id, shardList, err := conn.sendPing(pingCtx)
 	if err != nil {
 		p.rejectConnection(conn)
 		return fmt.Errorf("ping failed for %s: %w", conn.RemoteAddr(), err)
@@ -252,6 +260,7 @@ func (p *XshardPool) addSlaveConnectionLocked(conn *XshardConn) {
 	seen := make(map[uint32]struct{}, len(shardList))
 	for _, shardID := range shardList {
 		if _, ok := p.clusterShardIDs[shardID]; !ok {
+			p.log.Warn("peer advertises shard not in configured cluster shards", "remote_id", string(conn.RemoteID()), "shard", shardID)
 			continue
 		}
 		if _, dup := seen[shardID]; dup {
