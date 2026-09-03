@@ -73,6 +73,12 @@ func (h *fakeMasterHandler) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*
 	return resp, nil
 }
 
+// LookupPeer implements SlaveConnHandler. This fake models a slave with no
+// PeerConns at all: every lookup misses, so a peer frame follows MasterConn's
+// NULL_CONNECTION path (dropped, connection kept). Fakes that own a peer
+// registry (fakeSlaveService) shadow this with a real lookup.
+func (h *fakeMasterHandler) LookupPeer(uint64, uint32) *PeerConn { return nil }
+
 func (h *fakeMasterHandler) Mine(*wire.MineRequest) (*wire.MineResponse, error) {
 	return &wire.MineResponse{}, nil
 }
@@ -293,8 +299,10 @@ func TestMasterConn_Ping(t *testing.T) {
 			t.Fatalf("serialize ping: %v", err)
 		}
 		// RPC IDs strictly increase across both pings.
+		// cluster_peer_id 0 keeps the frame on the master-local path; the
+		// branch is echoed untouched by the PONG.
 		if err := peer.send(&wire.Frame{
-			Meta:    wire.ClusterMetadata{},
+			Meta:    wire.ClusterMetadata{Branch: 0x00010001},
 			Opcode:  byte(wire.ClusterOpPing),
 			RPCID:   uint64(i + 1),
 			Payload: payload,
@@ -308,6 +316,12 @@ func TestMasterConn_Ping(t *testing.T) {
 		}
 		if resp.RPCID != uint64(i+1) {
 			t.Fatalf("pong rpc_id: got %d, want %d", resp.RPCID, uint64(i+1))
+		}
+		if resp.Meta.ClusterPeerID != 0 {
+			t.Fatalf("master-local response must keep cluster_peer_id 0, got %d", resp.Meta.ClusterPeerID)
+		}
+		if resp.Meta.Branch != 0x00010001 {
+			t.Fatalf("pong branch: got 0x%x, want 0x%x", resp.Meta.Branch, 0x00010001)
 		}
 		var pong wire.PongResponse
 		if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &pong); err != nil {
