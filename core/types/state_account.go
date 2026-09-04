@@ -20,59 +20,71 @@ import (
 	"bytes"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/holiman/uint256"
 )
 
-//go:generate go run ../../rlp/rlpgen -type StateAccount -out gen_account_rlp.go
-
-// StateAccount is the Ethereum consensus representation of accounts.
-// These objects are stored in the main account trie.
+// StateAccount is the QuarkChain consensus representation of accounts.
+// It uses the codec in state_account_qkc.go because the standard four-field
+// Ethereum codec cannot encode its token and shard fields.
 type StateAccount struct {
-	Nonce    uint64
-	Balance  *uint256.Int
-	Root     common.Hash // merkle root of the storage trie
-	CodeHash []byte
+	Nonce        uint64
+	MntBalances  *qkccommon.TokenBalances // QKC and MNT balances.
+	Root         common.Hash              // merkle root of the storage trie
+	CodeHash     []byte
+	FullShardKey uint32
 }
 
 // NewEmptyStateAccount constructs an empty state account.
 func NewEmptyStateAccount() *StateAccount {
 	return &StateAccount{
-		Balance:  new(uint256.Int),
-		Root:     EmptyRootHash,
-		CodeHash: EmptyCodeHash.Bytes(),
+		MntBalances: qkccommon.NewEmptyTokenBalances(),
+		Root:        EmptyRootHash,
+		CodeHash:    EmptyCodeHash.Bytes(),
 	}
 }
 
 // Copy returns a deep-copied state account object.
 func (acct *StateAccount) Copy() *StateAccount {
-	var balance *uint256.Int
-	if acct.Balance != nil {
-		balance = new(uint256.Int).Set(acct.Balance)
+	var mntBalances *qkccommon.TokenBalances
+	if acct.MntBalances != nil {
+		mntBalances = acct.MntBalances.Copy()
 	}
 	return &StateAccount{
-		Nonce:    acct.Nonce,
-		Balance:  balance,
-		Root:     acct.Root,
-		CodeHash: common.CopyBytes(acct.CodeHash),
+		Nonce:        acct.Nonce,
+		MntBalances:  mntBalances,
+		Root:         acct.Root,
+		CodeHash:     common.CopyBytes(acct.CodeHash),
+		FullShardKey: acct.FullShardKey,
 	}
 }
 
-// SlimAccount is a modified version of an Account, where the root is replaced
-// with a byte slice. This format can be used to represent full-consensus format
-// or slim format which replaces the empty root and code hash as nil byte slice.
+// SlimAccount is retained for the inherited snapshot and pathdb code. QuarkChain
+// nodes support only hashdb-backed state and do not enable those modes. The QKC
+// fields remain lossless here so shared conversion code does not discard them.
+// Empty roots and code hashes are represented by nil slices.
 type SlimAccount struct {
-	Nonce    uint64
-	Balance  *uint256.Int
-	Root     []byte // Nil if root equals to types.EmptyRootHash
-	CodeHash []byte // Nil if hash equals to types.EmptyCodeHash
+	Nonce        uint64
+	MntBal       []byte
+	FullShardKey qkccommon.Uint32
+	Root         []byte // Nil if root equals to types.EmptyRootHash
+	CodeHash     []byte // Nil if hash equals to types.EmptyCodeHash
 }
 
 // SlimAccountRLP encodes the state account in 'slim RLP' format.
 func SlimAccountRLP(account StateAccount) []byte {
+	balances := account.MntBalances
+	if balances == nil {
+		balances = qkccommon.NewEmptyTokenBalances()
+	}
+	mntBal, err := balances.SerializeToBytes()
+	if err != nil {
+		panic(err)
+	}
 	slim := SlimAccount{
-		Nonce:   account.Nonce,
-		Balance: account.Balance,
+		Nonce:        account.Nonce,
+		MntBal:       mntBal,
+		FullShardKey: qkccommon.Uint32(account.FullShardKey),
 	}
 	if account.Root != EmptyRootHash {
 		slim.Root = account.Root[:]
@@ -80,7 +92,7 @@ func SlimAccountRLP(account StateAccount) []byte {
 	if !bytes.Equal(account.CodeHash, EmptyCodeHash[:]) {
 		slim.CodeHash = account.CodeHash
 	}
-	data, err := rlp.EncodeToBytes(slim)
+	data, err := rlp.EncodeToBytes(&slim)
 	if err != nil {
 		panic(err)
 	}
@@ -94,28 +106,31 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		return nil, err
 	}
-	var account StateAccount
-	account.Nonce, account.Balance = slim.Nonce, slim.Balance
-
-	// Interpret the storage root and code hash in slim format.
-	if len(slim.Root) == 0 {
-		account.Root = EmptyRootHash
-	} else {
-		account.Root = common.BytesToHash(slim.Root)
-	}
-	if len(slim.CodeHash) == 0 {
-		account.CodeHash = EmptyCodeHash[:]
-	} else {
-		account.CodeHash = slim.CodeHash
-	}
-	return &account, nil
+	return slim.ToStateAccount()
 }
 
 // FullAccountRLP converts data on the 'slim RLP' format into the full RLP-format.
 func FullAccountRLP(data []byte) ([]byte, error) {
-	account, err := FullAccount(data)
-	if err != nil {
+	var slim SlimAccount
+	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		return nil, err
 	}
-	return rlp.EncodeToBytes(account)
+	if _, err := qkccommon.NewTokenBalances(slim.MntBal); err != nil {
+		return nil, err
+	}
+	root := EmptyRootHash
+	if len(slim.Root) != 0 {
+		root = common.BytesToHash(slim.Root)
+	}
+	codeHash := EmptyCodeHash.Bytes()
+	if len(slim.CodeHash) != 0 {
+		codeHash = slim.CodeHash
+	}
+	return rlp.EncodeToBytes(&qkcAccountRLP{
+		Nonce:        slim.Nonce,
+		TokenBal:     slim.MntBal,
+		Root:         root,
+		CodeHash:     codeHash,
+		FullShardKey: slim.FullShardKey,
+	})
 }
