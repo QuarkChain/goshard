@@ -235,12 +235,12 @@ func (f *fakeSlaveService) peerCount() int {
 func (f *fakeSlaveService) registerPeer(pc *PeerConn) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	bm, ok := f.peers[pc.ClusterPeerID()]
+	bm, ok := f.peers[pc.clusterPeerID]
 	if !ok {
 		bm = make(map[uint32]*PeerConn)
-		f.peers[pc.ClusterPeerID()] = bm
+		f.peers[pc.clusterPeerID] = bm
 	}
-	bm[pc.Branch()] = pc
+	bm[pc.branch] = pc
 }
 
 // newMasterConn creates a MasterConn over a local TCP pair with a fake
@@ -840,7 +840,7 @@ func TestMasterConn_CloseDoesNotClosePeerConns(t *testing.T) {
 	// MasterConn close does not cascade to PeerConns.
 	for _, pc := range peerConns {
 		if pc.IsClosed() {
-			t.Fatalf("peer conn %d/%d closed by MasterConn.Close; peer lifecycle is owned by the service", pc.ClusterPeerID(), pc.Branch())
+			t.Fatalf("peer conn %d/%d closed by MasterConn.Close; peer lifecycle is owned by the service", pc.clusterPeerID, pc.branch)
 		}
 	}
 	if got := fake.peerCount(); got != 2 {
@@ -851,7 +851,7 @@ func TestMasterConn_CloseDoesNotClosePeerConns(t *testing.T) {
 	fake.closeAll()
 	for _, pc := range peerConns {
 		if !pc.IsClosed() {
-			t.Fatalf("peer conn %d/%d was not closed by service closeAll", pc.ClusterPeerID(), pc.Branch())
+			t.Fatalf("peer conn %d/%d was not closed by service closeAll", pc.clusterPeerID, pc.branch)
 		}
 	}
 }

@@ -152,6 +152,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
+	if len(cfg.ClusterShardIDs) == 0 {
+		return nil, errors.New("cluster shard ids is required")
+	}
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
 	}
