@@ -35,6 +35,8 @@ type SlaveConnHandler interface {
 	// DestroyClusterPeerConnection removes the given cluster peer and closes
 	// its PeerConns.
 	DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error
+
+	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
 }
 
 // MasterHandler handles master commands that operate on business-owned
@@ -102,6 +104,12 @@ type MasterConnConfig struct {
 	LocalID              []byte
 	LocalFullShardIDList []uint32
 
+	// ClusterShardIDs is the cluster-wide configured full shard id set
+	// (py: env.quark_chain_config.get_full_shard_ids()). routeFrame uses it to
+	// reject frames from a master for a branch outside the global config, which
+	// is fatal for the connection (py: slave.py:123-129 close_with_error).
+	ClusterShardIDs []uint32
+
 	// SlaveConnHandler handles communication-layer operations dispatched by
 	// MasterConn, including topology and peer-connection lifecycle commands.
 	// Its concrete implementation may be provided by SlaveComm.
@@ -125,6 +133,11 @@ type MasterConn struct {
 	slaveConnHandler     SlaveConnHandler
 	localID              []byte
 	localFullShardIDList []uint32
+
+	// clusterShardIDs is the cluster-wide configured full shard id set
+	// (py: env.quark_chain_config.get_full_shard_ids()); a frame for a branch
+	// outside it closes the connection (see routeFrame).
+	clusterShardIDs map[uint32]struct{}
 }
 
 // NewMasterConn wraps an accepted net.Conn from the master.
@@ -139,8 +152,16 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
+	if len(cfg.ClusterShardIDs) == 0 {
+		return nil, errors.New("cluster shard ids is required")
+	}
 	readFrame := func(r io.Reader) (*wire.Frame, error) {
 		return wire.ReadFrame(r, cfg.MaxPayloadSize)
+	}
+
+	clusterShardIDs := make(map[uint32]struct{}, len(cfg.ClusterShardIDs))
+	for _, id := range cfg.ClusterShardIDs {
+		clusterShardIDs[id] = struct{}{}
 	}
 
 	mc := &MasterConn{
@@ -148,7 +169,14 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
+		clusterShardIDs:      clusterShardIDs,
 	}
+
+	// Forwarder: route cluster_peer_id != 0 frames to virtual PeerConns.
+	// routeFrame returns false for master-local traffic so MasterConn handles
+	// it normally. The forwarder runs on the reader goroutine; it enqueues
+	// frames without blocking (the PeerConn inbound queue is unbounded).
+	forwarder := mc.routeFrame
 
 	mc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport: conn.NewTCPTransport(cfg.Conn, readFrame, wire.WriteFrame),
@@ -237,11 +265,8 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 		NonRPCOps: map[byte]struct{}{
 			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): {},
 		},
-		// Forwarder stays nil: routing peer traffic (cluster_peer_id != 0)
-		// to virtual PeerConns is PR6 (Dispatcher as the frame consumer).
-		// Until then, any peer frame (CommandOp opcode) is unregistered and
-		// closes the connection — MasterConn must not receive peer traffic.
-		Logger: cfg.Logger,
+		Forwarder: forwarder,
+		Logger:    cfg.Logger,
 	})
 	return mc, nil
 }
@@ -302,6 +327,46 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 	}, nil
 }
 
+// ── Frame routing ───────────────────────────────────────────────────────
+
+// routeFrame handles frames addressed to virtual peer connections.
+// cluster_peer_id == 0 is master-local traffic and returns false so the
+// normal MasterConn dispatcher handles it. Peer traffic is validated and
+// forwarded to the corresponding PeerConn.
+// A branch outside the GLOBAL configured shard set is fatal for the
+// connection (py: slave.py:123-129 close_with_error); a branch that is
+// globally valid but not owned/created locally, or an unknown peer id,
+// follows Python's NULL_CONNECTION semantics (slave.py:131-146): the
+// frame is consumed and dropped without closing the connection.
+func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
+	if frame.Meta.ClusterPeerID == 0 {
+		return false
+	}
+
+	if _, ok := mc.clusterShardIDs[frame.Meta.Branch]; !ok {
+		mc.Logger().Error(
+			"incorrect forwarding branch",
+			"branch", fmt.Sprintf("0x%x", frame.Meta.Branch),
+		)
+		mc.Close()
+		return true
+	}
+
+	pc := mc.slaveConnHandler.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
+	if pc == nil {
+		// Covers both "shard valid globally but not created locally"
+		// (slave.py:131-134) and "peer not found" (slave.py:136-146): drop,
+		// keep the connection.
+		mc.Logger().Warn("dropping frame for unknown virtual peer connection",
+			"cluster_peer_id", frame.Meta.ClusterPeerID, "branch", frame.Meta.Branch)
+		return true
+	}
+
+	pc.HandleFrame(frame)
+	return true
+}
+
+// ── Inbound handler dispatch (delegated to MasterHandler) ───────────────
 // ── Inbound handler dispatch ─────────────────────────────────────────────
 // Business RPCs go to MasterHandler; communication/topology commands go to SlaveConnHandler.
 
