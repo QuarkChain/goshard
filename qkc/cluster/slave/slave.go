@@ -26,16 +26,15 @@ type SlaveConfig struct {
 	FullShardIDList []uint32
 	// Port is the TCP port on which the slave listens for cluster connections.
 	Port int
-	// ClusterFullShardIDList is the cluster-wide full shard id set (py:
-	// env.quark_chain_config.get_full_shard_ids()); feeds the xshard pool's
-	// route filter and the MasterConn's branch validator.
+	// ClusterFullShardIDList is the cluster-wide shard id set (py:
+	// get_full_shard_ids()); feeds the xshard pool route filter and the
+	// MasterConn branch validator.
 	ClusterFullShardIDList []uint32
 	// MaxPayloadSize limits incoming frame payload size; 0 disables the limit.
 	MaxPayloadSize uint32
 
-	// Master serves business RPCs routed through the MasterConn. Its
-	// CreateShards creates the local shard runtime and reports the branches
-	// it created.
+	// Master serves business RPCs routed through the MasterConn; CreateShards
+	// creates the local shard runtime and reports its branches.
 	Master MasterHandler
 	// Peer builds and serves slave-to-slave PeerConns for virtual cluster peers.
 	Peer PeerHandler
@@ -78,27 +77,23 @@ func (cfg *SlaveConfig) Validate() error {
 // XshardPool and the virtual cluster-peer topology (py: SlaveServer minus the
 // business state).
 //
-// Lifecycle: New → Start → (master connection established) → Stop.
-// Start-once is an owner contract; Stop is idempotent with two legal triggers
-// (owner and master-loss). Stop only initiates shutdown: it asks every owner to
-// close and returns without waiting for the goroutines it unblocks to exit
-// (py: shutdown issues the closes and returns, it never awaits them). No "ready"
-// state exists: whether the master wire is usable is the MasterConn's own
-// connection state (py: ConnectionState), never mirrored here.
+// Lifecycle: New → Start → Stop. Start is owner-called exactly once before Stop;
+// Stop is idempotent, triggered by either the owner or master loss, and returns
+// without waiting for the goroutines it unblocks. There is no "ready" state:
+// whether the master wire is usable is the MasterConn's own connection state (py:
+// ConnectionState), never mirrored here.
 type SlaveComm struct {
 	cfg    SlaveConfig
 	logger log.Logger
 
 	listener net.Listener
-	// master is the established master connection, published atomically by
-	// runMasterConn for the first inbound and never replaced (py:
-	// slave_server.master). The Send*ToMaster public APIs may run on any
-	// goroutine, so publication is atomic: Load is race-free against the single
-	// Store. A nil read means the master connection does not exist
-	// (ErrNotActive); whether it is still open is answered by the delegate's
-	// own state (BaseConn.state). This field records establishment, not
-	// classification — which inbound is the master is acceptLoop's own loop-local
-	// control flow.
+	// master is the established MasterConn (py: slave_server.master), published
+	// atomically by runMasterConn for the first inbound and never replaced. The
+	// Send*ToMaster APIs may run on any goroutine, so publication is atomic: Load
+	// is race-free against the single Store. nil means not established
+	// (ErrNotActive); open/closed is the delegate's own state. This records
+	// establishment, not classification — which inbound is the master is
+	// acceptLoop's loop-local control flow.
 	master atomic.Pointer[MasterConn]
 
 	xshardPool *XshardPool
@@ -106,38 +101,32 @@ type SlaveComm struct {
 	// Peer topology, guarded by peersMu. Invariant:
 	// peers[p][b] exists ⇒ p ∈ clusterPeerIDs ∧ b ∈ localBranches.
 	peersMu sync.RWMutex
-	// localBranches is the set of branches CreateShards reported as created
-	// (py: slave_server.shards keys) — never inferred from FullShardIDList.
+	// localBranches is the set of branches CreateShards reported (py:
+	// slave_server.shards keys) — never inferred from FullShardIDList.
 	localBranches map[uint32]struct{}
 	// clusterPeerIDs is the set of announced virtual cluster peers (py:
 	// SlaveServer.cluster_peer_ids).
 	clusterPeerIDs map[uint64]struct{}
-	// peers is the (cluster_peer_id, branch) → PeerConn registry (py:
-	// shard.peers).
+	// peers is the (cluster_peer_id, branch) → PeerConn registry (py: shard.peers).
 	peers map[uint64]map[uint32]*PeerConn
 
-	// shutdownOnce guards only the shutdown notification (py:
-	// shutdown_future.done() guard): close(stopped) must happen exactly once
-	// even though Stop has several potentially concurrent triggers (owner Stop,
-	// master loss, startup failure). The resource closes below are individually
-	// idempotent and are NOT once-guarded — they repeat on every Stop call,
-	// exactly as py's close_all()/server.close() do.
+	// shutdownOnce guards only the shutdown notification (py: shutdown_future.done()):
+	// close(stopped) must happen exactly once across Stop's concurrent triggers (owner,
+	// master loss, startup failure). The resource closes below are NOT once-guarded —
+	// each is individually idempotent and repeats on every Stop call, as in py.
 	shutdownOnce sync.Once
-	// stopped is the shutdown notification (py: SlaveServer.shutdown_future).
-	// It is closed once by Stop after every close request has been issued; it
-	// does NOT wait for the goroutines unblocked by those closes to exit. The
-	// slave process main and tests consume it to learn that shutdown has been
-	// triggered, exactly as py awaits do_loop/get_shutdown_future.
+	// stopped is the shutdown notification (py: SlaveServer.shutdown_future), closed
+	// once every close request has been issued, without waiting for the goroutines
+	// those closes unblock. Consumers (process main, tests) read it to learn shutdown
+	// was triggered.
 	stopped chan struct{}
 }
 
 var _ SlaveConnHandler = (*SlaveComm)(nil)
 
-// NewSlaveComm creates a fully-initialized but unstarted SlaveComm: the xshard
-// pool, ready registries and lifecycle primitives are all constructed here, so an
-// error means the object is unusable and discarded. localBranches starts empty
-// and is populated by CreateShardsAndPeerConnections once the business runtime
-// reports the branches it created.
+// NewSlaveComm constructs a fully-initialized but unstarted SlaveComm. An error
+// here means the object is unusable and discarded. localBranches is populated by
+// CreateShardsAndPeerConnections once the business runtime reports its branches.
 func NewSlaveComm(cfg SlaveConfig) (*SlaveComm, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid slave config: %w", err)
@@ -162,10 +151,9 @@ func NewSlaveComm(cfg SlaveConfig) (*SlaveComm, error) {
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
-// Start begins listening for cluster connections and dispatches the event loop.
-// Lifecycle contract: called exactly once by the owner, before Stop; restart is
-// not supported. The xshard pool is already created by the constructor, so the
-// only failure is binding the listener, after which the object must be discarded.
+// Start binds the listener and dispatches the event loop. Owner contract: called
+// exactly once, before Stop; restart is unsupported. The only failure is binding
+// the listener, after which the object must be discarded.
 func (s *SlaveComm) Start() error {
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(s.cfg.Port))
 	ln, err := net.Listen("tcp", addr)
@@ -182,25 +170,17 @@ func (s *SlaveComm) Start() error {
 	return nil
 }
 
-// Stop initiates shutdown: it asks every owner to close — the listener, the
-// xshard pool, every PeerConn, and the established master connection — then
-// resolves the shutdown notification and returns immediately. It does not wait
-// for the goroutines blocked on those resources to exit; the closes unblock
-// Accept/Read/Handshake and those goroutines exit on their own (py: shutdown
-// issues the closes and returns without awaiting; in-flight handler tasks are
-// never cancelled). The listener is closed first so no new connection races the
-// drain.
+// Stop initiates shutdown and returns without waiting for goroutines to exit.
+// Resource closes are intentionally not once-guarded (each is individually
+// idempotent); only the shutdown notification is once-guarded.
 //
-// Two layers, matching py shutdown(): the resource closes are not once-guarded
-// — each is individually idempotent and repeats on every Stop call (py:
-// close_all()/server.close() rerun on every shutdown); only the notification
-// (close(stopped)) is once, guarded by shutdownOnce (py: if not done():
-// set_result). It is delivered after the closes are issued, matching py's
-// observable ordering: asyncio resumes the waiter only after shutdown() has
-// synchronously run its closes.
+// stopped is closed before loading master so runMasterConn can detect a MasterConn
+// published after Stop has already observed master as nil, and close it in its own
+// post-publication compensation.
 func (s *SlaveComm) Stop() {
-	// Resource closes are not once-guarded: each is individually idempotent
-	// and repeats on every Stop call, matching py's close_all()/server.close().
+	s.shutdownOnce.Do(func() {
+		close(s.stopped)
+	})
 	if s.listener != nil {
 		s.listener.Close()
 	}
@@ -209,32 +189,21 @@ func (s *SlaveComm) Stop() {
 	if mc := s.master.Load(); mc != nil {
 		mc.Close()
 	}
-
-	// Shutdown notification (py: shutdown_future): resolve once, after every
-	// close request is issued. Consumers awaiting WaitStopped observe shutdown
-	// as triggered; this is not a drained-goroutine signal. shutdownOnce guards
-	// only this close — sync.Once ignores later Do calls, so the notification
-	// is sticky-once like py's done()/set_result pair.
-	s.shutdownOnce.Do(func() {
-		close(s.stopped)
-		s.logger.Info("slave server stopped")
-	})
+	s.logger.Info("slave server stopped")
 }
 
-// WaitStopped returns the shutdown notification channel (py:
-// SlaveServer.get_shutdown_future). It is closed once Stop has issued every
-// close request, without waiting for the goroutines they unblock to exit. The
-// process main and tests consume it to learn shutdown was triggered.
+// WaitStopped returns the shutdown notification channel (py: get_shutdown_future),
+// closed once Stop has issued every close request, without waiting for the
+// goroutines those closes unblock.
 func (s *SlaveComm) WaitStopped() <-chan struct{} {
 	return s.stopped
 }
 
 // ── Business outbound: master sends ──────────────────────────────────────────
 
-// SendMinorBlockHeaderToMaster reports a new minor block header to the master
-// (py: SlaveServer.send_minor_block_header_to_master). Before the master
-// connection exists it returns ErrNotActive (py crashes with AttributeError);
-// after it closes the delegate returns ErrConnectionClosed.
+// SendMinorBlockHeaderToMaster reports a new minor block header (py:
+// send_minor_block_header_to_master). Returns ErrNotActive before the master
+// connection exists and ErrConnectionClosed after it closes.
 func (s *SlaveComm) SendMinorBlockHeaderToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderRequest) (*wire.AddMinorBlockHeaderResponse, error) {
 	mc := s.master.Load()
 	if mc == nil {
@@ -257,10 +226,9 @@ func (s *SlaveComm) SendMinorBlockHeaderListToMaster(ctx context.Context, req *w
 
 // ── Business outbound: xshard broadcasts ─────────────────────────────────────
 
-// SendXshardTxList broadcasts an AddXshardTxListRequest to every slave
-// connection serving branch (py: SlaveServer.broadcast_xshard_tx_list, remote
-// leg). Local shard delivery is the caller's (Backend) responsibility. An
-// empty connection set is a no-op, matching py's gather([]).
+// SendXshardTxList broadcasts an AddXshardTxListRequest to every slave connection
+// serving branch (py: broadcast_xshard_tx_list, remote leg); local delivery is the
+// caller's. An empty connection set is a no-op, matching py's gather([]).
 func (s *SlaveComm) SendXshardTxList(ctx context.Context, branch uint32, req *wire.AddXshardTxListRequest) error {
 	for _, conn := range s.xshardPool.Lookup(branch) {
 		if err := conn.SendAddXshardTxList(ctx, req); err != nil {
@@ -283,7 +251,7 @@ func (s *SlaveComm) SendBatchXshardTxList(ctx context.Context, branch uint32, re
 
 // ── Business outbound: peer sends ────────────────────────────────────────────
 //
-// The business layer never holds a *PeerConn: these veneers resolve it by
+// The business layer never holds a *PeerConn; these veneers resolve it by
 // (clusterPeerID, branch) inside SlaveComm.
 
 // SendPeerNewBlock sends a minor block to the peer's (clusterPeerID, branch)
@@ -349,8 +317,8 @@ func (s *SlaveComm) GetPeerMinorBlockHeaderListWithSkip(ctx context.Context, clu
 // ── SlaveConnHandler: master-command orchestration ───────────────────────────
 
 // ConnectToSlaves dials every advertised slave into the xshard pool (py:
-// slave_connection_manager.connect_to_slave). Per-entry failures are recorded
-// in the response result list so the master connection stays up.
+// slave_connection_manager.connect_to_slave). Per-entry failures are recorded in
+// the response result list so the master connection stays up.
 func (s *SlaveComm) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
 	resultList := make([]wire.PrependedSizeBytes4, len(req.SlaveInfoList))
 	for i := range req.SlaveInfoList {
@@ -362,14 +330,12 @@ func (s *SlaveComm) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.Con
 	return &wire.ConnectToSlavesResponse{ResultList: resultList}, nil
 }
 
-// CreateShardsAndPeerConnections orchestrates the master's PING carrying a
-// RootTip (py: handle_ping → slave_server.create_shards): MasterHandler.
-// CreateShards owns the creation decision and reports the branches it
-// created; every reported branch is recorded in localBranches and equipped
-// with a PeerConn for each announced cluster peer (py:
-// Shard.create_peer_shard_connections). The communication layer never
-// re-derives the creation decision from the RootTip or FullShardIDList; a
-// branch already in localBranches is skipped.
+// CreateShardsAndPeerConnections orchestrates the master's PING (py: handle_ping →
+// slave_server.create_shards): MasterHandler.CreateShards owns the creation decision
+// and reports the branches it created; each is recorded in localBranches and equipped
+// with a PeerConn for every announced cluster peer (py:
+// Shard.create_peer_shard_connections). The communication layer never re-derives the
+// creation decision from RootTip or FullShardIDList; an already-present branch is skipped.
 func (s *SlaveComm) CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error {
 	// A business failure fails the PING before any topology change.
 	createdBranches, err := s.cfg.Master.CreateShards(rootTip)
@@ -389,6 +355,7 @@ func (s *SlaveComm) CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error
 		s.localBranches[branch] = struct{}{}
 		newBranches = append(newBranches, branch)
 	}
+	// Snapshot the announced cluster peers to equip each new branch with.
 	peers := make([]uint64, 0, len(s.clusterPeerIDs))
 	for id := range s.clusterPeerIDs {
 		peers = append(peers, id)
@@ -457,9 +424,8 @@ func (s *SlaveComm) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerCon
 	return nil
 }
 
-// LookupPeer routes virtual peer frames from the master to the PeerConn
-// serving (cluster_peer_id, branch), or nil when there is none (py:
-// NULL_CONNECTION).
+// LookupPeer routes virtual peer frames from the master to the PeerConn serving
+// (cluster_peer_id, branch), or nil when there is none (py: NULL_CONNECTION).
 func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
@@ -471,22 +437,18 @@ func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
-// acceptLoop accepts inbound TCP connections and dispatches them. It is the
-// single owner of connection classification and encodes py's "if not
-// self.master" as its own serialized control flow: the first accepted
-// connection is always the master, every later one is xshard. The claim is a
-// loop-local flag, not shared state — no other goroutine classifies
-// connections, so no lock or atomic is needed. This matches py, where the
-// first handler's synchronous "self.master = ..." assignment likewise
-// classifies the first connection before any second connection is processed.
-// Stop closes the listener, which makes Accept return and this loop exit.
+// acceptLoop accepts inbound connections and is the single owner of
+// classification, encoding py's "if not self.master" as its own serialized
+// control flow: the first accepted connection is always the master, every later
+// one is xshard. The claim is a loop-local flag — no other goroutine classifies
+// connections — so no lock or atomic is needed. Stop closes the listener, which
+// makes Accept return and this loop exit.
 func (s *SlaveComm) acceptLoop() {
 	masterClaimed := false
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			// Listener closed by Stop: stop accepting. Any other error is
-			// transient and retried.
+			// Listener closed by Stop; other errors are transient and retried.
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
@@ -504,11 +466,11 @@ func (s *SlaveComm) acceptLoop() {
 }
 
 // runMasterConn runs the first inbound connection as the MasterConn and blocks
-// until that connection is gone. The master pointer is stored before Start so
-// any frame the readLoop processes sees an established master. Its own closure
-// (master loss) triggers Stop; an external Stop reaches it by directly closing
-// the established MasterConn in Stop, which unblocks this read. It is not joined
-// or waited on by Stop: it holds nothing Stop waits for, and Stop is non-blocking.
+// until that connection is gone. The pointer is stored before Start so any frame
+// the readLoop processes sees an established master. Master loss triggers Stop; an
+// external Stop reaches here by closing the established MasterConn directly. Not
+// joined or waited on by Stop: it holds nothing Stop waits for, and Stop is
+// non-blocking.
 func (s *SlaveComm) runMasterConn(conn net.Conn) {
 	mc, err := NewMasterConn(MasterConnConfig{
 		Conn:                 conn,
@@ -556,8 +518,8 @@ func (s *SlaveComm) runXshardConn(conn net.Conn) {
 	s.xshardPool.HandleInbound(conn)
 }
 
-// requirePeer resolves the (clusterPeerID, branch) connection, or fails with
-// the NULL_CONNECTION case: no sendable connection exists.
+// requirePeer resolves the (clusterPeerID, branch) connection or reports the
+// NULL_CONNECTION case: no sendable connection exists.
 func (s *SlaveComm) requirePeer(clusterPeerID uint64, branch uint32) (*PeerConn, error) {
 	if pc := s.LookupPeer(clusterPeerID, branch); pc != nil {
 		return pc, nil
@@ -565,13 +527,12 @@ func (s *SlaveComm) requirePeer(clusterPeerID uint64, branch uint32) (*PeerConn,
 	return nil, fmt.Errorf("no peer connection for cluster_peer_id %d branch 0x%x", clusterPeerID, branch)
 }
 
-// addPeerConnection is the single construction path for every PeerConn: it
-// builds, starts and registers (clusterPeerID, branch), reporting created
-// false when the pair already exists. Ownership stays with SlaveComm; callers
-// are master-command dispatchers, so the master connection is always published
-// when this runs. It does not gate on Stop: a handler already in flight when
-// the registry drains may still complete one registration — the same terminal
-// window py accepts (in-flight handler tasks are never cancelled).
+// addPeerConnection is the single construction path for every PeerConn: it builds,
+// starts and registers (clusterPeerID, branch), reporting created=false on a
+// duplicate. Ownership stays with SlaveComm; callers are master-command
+// dispatchers, so the master connection is always published here. It does not gate
+// on Stop: an in-flight handler may complete one registration after the registry
+// drains — the terminal window py accepts.
 func (s *SlaveComm) addPeerConnection(clusterPeerID uint64, branch uint32) (created bool, err error) {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
@@ -592,10 +553,10 @@ func (s *SlaveComm) addPeerConnection(clusterPeerID uint64, branch uint32) (crea
 	return true, nil
 }
 
-// closeAllPeers removes and closes every registered PeerConn and clears the
-// known-peer set (py: MasterConnection.close, the master-loss leg). PeerConns
-// recorded later by an in-flight handler are a terminal best-effort residue the
-// process is about to exit with (py semantics).
+// closeAllPeers removes and closes every registered PeerConn and clears the known
+// peer set (py: MasterConnection.close, the master-loss leg). PeerConns recorded
+// later by an in-flight handler are a terminal best-effort residue the process is
+// about to exit with (py semantics). Close happens outside peersMu.
 func (s *SlaveComm) closeAllPeers() {
 	s.peersMu.Lock()
 	var all []*PeerConn
