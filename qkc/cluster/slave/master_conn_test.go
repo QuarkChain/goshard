@@ -241,6 +241,7 @@ func newMasterConnWithPeer(t *testing.T, handler *fakeMasterHandler) (*MasterCon
 		Conn:                 slaveConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
 		SlaveConnHandler:     handler,
 		Handler:              handler,
 		Logger:               log.New(),
@@ -275,6 +276,13 @@ func TestMasterConn_ConfigValidation(t *testing.T) {
 		SlaveConnHandler: &fakeMasterHandler{},
 	}); err == nil {
 		t.Fatal("expected error for nil master handler")
+	}
+	if _, err := NewMasterConn(MasterConnConfig{
+		Conn:             &net.TCPConn{},
+		SlaveConnHandler: &fakeMasterHandler{},
+		Handler:          &fakeMasterHandler{},
+	}); err == nil {
+		t.Fatal("expected error for empty cluster shard ids")
 	}
 }
 
@@ -646,6 +654,7 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               log.New(),
@@ -730,6 +739,7 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
 		SlaveConnHandler:     &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               log.New(),

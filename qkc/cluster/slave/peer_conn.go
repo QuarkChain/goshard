@@ -201,12 +201,6 @@ func (pc *PeerConn) HandleFrame(frame *wire.Frame) error {
 	return nil
 }
 
-// ClusterPeerID returns the peer's cluster-scoped identifier.
-func (pc *PeerConn) ClusterPeerID() uint64 { return pc.clusterPeerID }
-
-// Branch returns the shard branch this virtual connection serves.
-func (pc *PeerConn) Branch() uint32 { return pc.branch }
-
 // ── Outbound typed helpers ────────────────────────────────────────────────
 //
 // Each helper serializes a typed message and sends it with the corresponding
@@ -279,6 +273,26 @@ func (pc *PeerConn) GetMinorBlockHeaderList(ctx context.Context, req *wire.GetMi
 	r, ok := resp.(*wire.GetMinorBlockHeaderListResponse)
 	if !ok {
 		return nil, fmt.Errorf("unexpected GetMinorBlockHeaderList response %T", resp)
+	}
+	return r, nil
+}
+
+// GetMinorBlockHeaderListWithSkip issues an active RPC to the peer
+// (CommandOp.GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST) and returns the
+// parsed response.
+// Python: OP_RPC_MAP[GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST] (shard.py:291).
+func (pc *PeerConn) GetMinorBlockHeaderListWithSkip(ctx context.Context, req *wire.GetMinorBlockHeaderListWithSkipRequest) (*wire.GetMinorBlockHeaderListResponse, error) {
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		return nil, fmt.Errorf("serialize GetMinorBlockHeaderListWithSkipRequest: %w", err)
+	}
+	resp, err := pc.SendRPCMeta(ctx, byte(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest), payload, wire.ClusterMetadata{})
+	if err != nil {
+		return nil, err
+	}
+	r, ok := resp.(*wire.GetMinorBlockHeaderListResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected GetMinorBlockHeaderListWithSkip response %T", resp)
 	}
 	return r, nil
 }

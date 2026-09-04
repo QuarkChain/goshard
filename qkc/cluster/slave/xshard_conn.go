@@ -52,6 +52,18 @@ type XshardConn struct {
 	peerFullShardIDList []uint32
 	pingReceived        chan struct{} // closed on the first PING (py: ping_received_event)
 	pingOnce            sync.Once     // keeps the close exactly-once under concurrent PINGs
+
+	// inboundRegistered, set only by the owning pool's HandleInbound before
+	// Start, is closed once the pool has committed the inbound connection to
+	// its routing index. handlePing blocks on it before returning PONG, so a
+	// successful PONG is only observable after registration completes. This
+	// re-establishes explicitly the ordering Python gets implicitly from its
+	// single asyncio event loop (its ready-queue FIFO runs the awakened
+	// handle_new_connection — including _add_slave_connection — before any
+	// command that causally follows the PONG). Nil for outbound connections
+	// and bare test connections: no barrier, DialToSlave registers those
+	// itself after the handshake.
+	inboundRegistered chan struct{}
 }
 
 // newXshardConn creates a slave-to-slave connection. Inbound callers pass nil
@@ -146,7 +158,9 @@ func (x *XshardConn) SendBatchAddXshardTxList(ctx context.Context, req *wire.Bat
 
 // handlePing performs the slave identity handshake. Peer metadata is recorded
 // at most once by pingOnce.Do (see the peerID field); an empty inbound shard
-// list publishes nothing and is rejected below.
+// list publishes nothing and is rejected below. For inbound connections the
+// handler then waits on inboundRegistered before returning PONG, making pool
+// registration happen-before the PONG write (see the field comment).
 func (x *XshardConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 
@@ -166,6 +180,20 @@ func (x *XshardConn) handlePing(req any) (any, error) {
 
 	if len(x.peerFullShardIDList) == 0 {
 		return nil, fmt.Errorf("empty shard list from slave %s", ping.ID)
+	}
+
+	// Inbound-only barrier: the pool must finish registering this connection
+	// before the PONG is written, so the dialing peer can rely on the reverse
+	// dial being skipped by the time it sees PONG. Every PING (not only the
+	// first) must pass it, since any of them may carry the response the peer
+	// observes. Pool failure paths close the connection, which wakes this
+	// select with an error instead of leaking the goroutine.
+	if x.inboundRegistered != nil {
+		select {
+		case <-x.inboundRegistered:
+		case <-x.WaitUntilClosed():
+			return nil, fmt.Errorf("connection closed before inbound registration")
+		}
 	}
 
 	return &wire.PongResponse{

@@ -53,6 +53,9 @@ func NewXshardPool(selfID []byte, localFullShardIDList []uint32, clusterShardIDs
 	if handler == nil {
 		return nil, errors.New("xshard handler must not be nil")
 	}
+	if len(clusterShardIDs) == 0 {
+		return nil, errors.New("cluster shard IDs must not be empty")
+	}
 	if logger == nil {
 		logger = log.Root()
 	}
@@ -100,9 +103,14 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 	}
 	conn.Start()
 
-	// The peer must confirm the master-advertised identity (py:885-890); the
-	// PONG result is compared and discarded, never written back.
-	id, shardList, err := conn.sendPing(ctx)
+	// The peer must confirm the master-advertised identity (py:885-890).
+	// Bound the handshake independently of the caller's context so a peer
+	// that keeps the TCP connection open but never responds to PING cannot
+	// block DialToSlave indefinitely.
+	pingCtx, cancel := context.WithTimeout(ctx, xshardHandshakeTimeout)
+	defer cancel()
+
+	id, shardList, err := conn.sendPing(pingCtx)
 	if err != nil {
 		p.rejectConnection(conn)
 		return fmt.Errorf("ping failed for %s: %w", conn.RemoteAddr(), err)
@@ -136,7 +144,10 @@ func (p *XshardPool) DialToSlave(ctx context.Context, slaveInfo wire.SlaveInfo) 
 
 // HandleInbound takes ownership of an accepted xshard connection: it waits
 // for the handshake and indexes the conn. Conns whose handshake fails or
-// times out are discarded and never enter the routing index.
+// times out are discarded and never enter the routing index. Registration
+// happens-before the PONG reply for inbound connections, so a successful
+// handshake observed by the dialing peer implies that the inbound connection
+// has already been indexed by this pool.
 func (p *XshardPool) HandleInbound(nc net.Conn) {
 	// Inbound identity arrives with the first PING (py:845-846 pass None).
 	conn, err := newXshardConn(nc, p.maxPayloadSize, p.selfID, p.localFullShardIDList, nil, nil, p.handler, p.log)
@@ -151,6 +162,10 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 		p.log.Warn("xshard pool closed, closing inbound conn immediately", "remote", conn.RemoteAddr())
 		return
 	}
+
+	// Arm the registration barrier before Start, so the reader goroutine
+	// observes the channel (goroutine creation publishes the write).
+	conn.inboundRegistered = make(chan struct{})
 	conn.Start()
 
 	if !conn.waitUntilPingReceived() {
@@ -162,9 +177,15 @@ func (p *XshardPool) HandleInbound(nc net.Conn) {
 	// Inbound is not deduplicated — a remote may have multiple connections
 	// (py handle_new_connection never checks slave_ids).
 	if err := p.registerConnection(conn); err != nil {
+		conn.Close() // defensive
 		p.log.Warn("xshard pool closed while registering inbound conn", "remote", conn.RemoteAddr())
 		return
 	}
+	// Release the barrier: the first PING's PONG is written only after this
+	// point, so the dialing peer cannot trigger a reverse dial that this pool
+	// would not know to skip. registerConnection's failure paths close the
+	// conn, which unblocks the barrier with an error instead of a PONG.
+	close(conn.inboundRegistered)
 
 	p.log.Info("indexed inbound xshard connection", "remote_id", string(conn.RemoteID()), "shards", conn.RemoteFullShardIDList())
 }
@@ -252,6 +273,7 @@ func (p *XshardPool) addSlaveConnectionLocked(conn *XshardConn) {
 	seen := make(map[uint32]struct{}, len(shardList))
 	for _, shardID := range shardList {
 		if _, ok := p.clusterShardIDs[shardID]; !ok {
+			p.log.Warn("peer advertises shard not in configured cluster shards", "remote_id", string(conn.RemoteID()), "shard", shardID)
 			continue
 		}
 		if _, dup := seen[shardID]; dup {
