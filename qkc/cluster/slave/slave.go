@@ -201,7 +201,9 @@ func (s *SlaveComm) Start() error {
 func (s *SlaveComm) Stop() {
 	// Resource closes are not once-guarded: each is individually idempotent
 	// and repeats on every Stop call, matching py's close_all()/server.close().
-	s.listener.Close()
+	if s.listener != nil {
+		s.listener.Close()
+	}
 	s.xshardPool.Close()
 	s.closeAllPeers()
 	if mc := s.master.Load(); mc != nil {
@@ -526,6 +528,17 @@ func (s *SlaveComm) runMasterConn(conn net.Conn) {
 	}
 
 	s.master.Store(mc)
+	// If Stop resolved while this connection was being established, the master
+	// pointer was published too late for Stop to close it (its Load saw nil).
+	// Compensate here: close the just-published MasterConn and never Start it,
+	// so no net.Conn / readLoop is owned beyond a resolved shutdown.
+	select {
+	case <-s.stopped:
+		mc.Close()
+		return
+	default:
+	}
+
 	mc.Start()
 	s.logger.Info("master connection established", "remote", conn.RemoteAddr())
 
