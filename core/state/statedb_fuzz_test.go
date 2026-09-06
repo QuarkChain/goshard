@@ -276,19 +276,21 @@ func (test *stateTest) verifyAccountCreation(next common.Hash, db *triedb.Databa
 	if len(nBlob) == 0 {
 		return fmt.Errorf("missing account in new trie, %x", addrHash)
 	}
-	full, err := types.FullAccountRLP(account)
+	// Decode the expected account from slim-RLP and the trie account from QKC format,
+	// then compare logical fields (not raw bytes, since QKC adds extra fields).
+	wantAcct, err := types.FullAccount(account)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(nBlob, full) {
-		return fmt.Errorf("unexpected account data, want: %v, got: %v", full, nBlob)
+	nAcct := new(types.StateAccount)
+	if err := rlp.DecodeBytes(nBlob, nAcct); err != nil {
+		return fmt.Errorf("unexpected account data, want: %v, got: %v", wantAcct, nBlob)
+	}
+	if wantAcct.Nonce != nAcct.Nonce || wantAcct.Balance.Cmp(nAcct.Balance) != 0 ||
+		wantAcct.Root != nAcct.Root || !bytes.Equal(wantAcct.CodeHash, nAcct.CodeHash) {
+		return fmt.Errorf("unexpected account data, want: %v, got: %v", wantAcct, nAcct)
 	}
 
-	// Verify storage changes
-	var nAcct types.StateAccount
-	if err := rlp.DecodeBytes(nBlob, &nAcct); err != nil {
-		return err
-	}
 	// Account has no slot, empty slot set is expected
 	if nAcct.Root == types.EmptyRootHash {
 		if len(storagesOrigin) != 0 {
@@ -347,37 +349,39 @@ func (test *stateTest) verifyAccountUpdate(next common.Hash, db *triedb.Database
 	if len(oBlob) == 0 {
 		return fmt.Errorf("missing account in old trie, %x", addrHash)
 	}
-	full, err := types.FullAccountRLP(accountOrigin)
+	// Decode old and new trie blobs using QKC-aware decoder.
+	// Compare logical fields against the slim-RLP account from the diff,
+	// not raw bytes (QKC format adds extra fields).
+	wantOriginAcct, err := types.FullAccount(accountOrigin)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(full, oBlob) {
+	oAcct := new(types.StateAccount)
+	if err := rlp.DecodeBytes(oBlob, oAcct); err != nil {
+		return fmt.Errorf("failed to decode old trie account %x: %v", addrHash, err)
+	}
+	if wantOriginAcct.Nonce != oAcct.Nonce || wantOriginAcct.Balance.Cmp(oAcct.Balance) != 0 ||
+		wantOriginAcct.Root != oAcct.Root || !bytes.Equal(wantOriginAcct.CodeHash, oAcct.CodeHash) {
 		return fmt.Errorf("account value is not matched, %x", addrHash)
 	}
+	var nRoot common.Hash
 	if len(nBlob) == 0 {
 		if len(account) != 0 {
 			return errors.New("unexpected account data")
 		}
-	} else {
-		full, _ = types.FullAccountRLP(account)
-		if !bytes.Equal(full, nBlob) {
-			return fmt.Errorf("unexpected account data, %x, want %v, got: %v", addrHash, full, nBlob)
-		}
-	}
-	// Decode accounts
-	var (
-		oAcct types.StateAccount
-		nAcct types.StateAccount
-		nRoot common.Hash
-	)
-	if err := rlp.DecodeBytes(oBlob, &oAcct); err != nil {
-		return err
-	}
-	if len(nBlob) == 0 {
 		nRoot = types.EmptyRootHash
 	} else {
-		if err := rlp.DecodeBytes(nBlob, &nAcct); err != nil {
-			return err
+		wantAcct, wantErr := types.FullAccount(account)
+		if wantErr != nil {
+			return wantErr
+		}
+		nAcct := new(types.StateAccount)
+		if decErr := rlp.DecodeBytes(nBlob, nAcct); decErr != nil {
+			return fmt.Errorf("failed to decode new trie account %x: %v", addrHash, decErr)
+		}
+		if wantAcct.Nonce != nAcct.Nonce || wantAcct.Balance.Cmp(nAcct.Balance) != 0 ||
+			wantAcct.Root != nAcct.Root || !bytes.Equal(wantAcct.CodeHash, nAcct.CodeHash) {
+			return fmt.Errorf("unexpected account data, %x, want %v, got: %v", addrHash, wantAcct, nAcct)
 		}
 		nRoot = nAcct.Root
 	}

@@ -55,19 +55,7 @@ func (r *historicStateReader) Account(addr common.Address) (*types.StateAccount,
 	if account == nil {
 		return nil, nil
 	}
-	acct := &types.StateAccount{
-		Nonce:    account.Nonce,
-		Balance:  account.Balance,
-		CodeHash: account.CodeHash,
-		Root:     common.BytesToHash(account.Root),
-	}
-	if len(acct.CodeHash) == 0 {
-		acct.CodeHash = types.EmptyCodeHash.Bytes()
-	}
-	if acct.Root == (common.Hash{}) {
-		acct.Root = types.EmptyRootHash
-	}
-	return acct, nil
+	return slimAccountToStateAccount(account)
 }
 
 // Storage implements StateReader, retrieving the storage slot specified by the
