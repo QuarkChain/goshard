@@ -16,85 +16,50 @@ import (
 )
 
 var (
-	limitedSizeByes = []byte{'\x01', '\x02', '\x03'}
-	tx1             = types.NewEvmTransaction(1, account.BytesToIdentityRecipient([]byte{0x11}), big.NewInt(111), 1111, big.NewInt(11111), 0, 1, 1, 0, []byte{0x11, 0x11, 0x11}, 0, 0)
-	tx2             = types.NewEvmTransaction(2, account.BytesToIdentityRecipient([]byte{0x22}), big.NewInt(222), 2222, big.NewInt(22222), 0, 1, 1, 0, []byte{0x22, 0x22, 0x22}, 0, 0)
-	tx3             = types.NewEvmTransaction(3, account.BytesToIdentityRecipient([]byte{0x33}), big.NewInt(333), 3333, big.NewInt(33333), 0, 1, 1, 0, []byte{0x33, 0x33, 0x33}, 0, 0)
-	txs             = types.Transactions{tx1, tx2, tx3}
+	qkcLimitedSizeBytes = []byte{'\x01', '\x02', '\x03'}
+	qkcTx1              = types.NewEvmTransaction(1, account.BytesToIdentityRecipient([]byte{0x11}), big.NewInt(111), 1111, big.NewInt(11111), 0, 1, 1, 0, []byte{0x11, 0x11, 0x11}, 0, 0)
+	qkcTx2              = types.NewEvmTransaction(2, account.BytesToIdentityRecipient([]byte{0x22}), big.NewInt(222), 2222, big.NewInt(22222), 0, 1, 1, 0, []byte{0x22, 0x22, 0x22}, 0, 0)
+	qkcTx3              = types.NewEvmTransaction(3, account.BytesToIdentityRecipient([]byte{0x33}), big.NewInt(333), 3333, big.NewInt(33333), 0, 1, 1, 0, []byte{0x33, 0x33, 0x33}, 0, 0)
+	qkcTxs              = types.Transactions{qkcTx1, qkcTx2, qkcTx3}
 
-	header1 = &types.MinorBlockHeader{Number: uint64(41)}
-	header2 = &types.MinorBlockHeader{Number: uint64(42)}
-	header3 = &types.MinorBlockHeader{Number: uint64(43)}
-	headers = types.MinorBlockHeaders{header1, header2, header3}
+	qkcHeader1 = &types.MinorBlockHeader{Number: uint64(41)}
+	qkcHeader2 = &types.MinorBlockHeader{Number: uint64(42)}
+	qkcHeader3 = &types.MinorBlockHeader{Number: uint64(43)}
+	qkcHeaders = types.MinorBlockHeaders{qkcHeader1, qkcHeader2, qkcHeader3}
 )
 
-// Tests block header storage and retrieval operations.
-func TestMinorBlockHeaderStorage(t *testing.T) {
-	db := memorydb.New()
-
-	// Create a test header to move around the database and make sure it's really new
-	//todo init header and meta
-	header := &types.MinorBlockHeader{Number: uint64(42)}
-	if entry := ReadMinorBlockHeader(db, header.Hash()); entry != nil {
-		t.Fatalf("Non existent header returned: %v", entry)
+func TestQKCBlockKeys(t *testing.T) {
+	hash := common.HexToHash("0x1234")
+	if got, want := qkcRootBlockKey(hash), append([]byte("q_rb"), hash.Bytes()...); !bytes.Equal(got, want) {
+		t.Fatalf("root block key mismatch: have %x, want %x", got, want)
 	}
-	// Write and verify the header in the database
-	WriteMinorBlockHeader(db, header)
-	if entry := ReadMinorBlockHeader(db, header.Hash()); entry == nil {
-		t.Fatalf("Stored header not found")
-	} else if entry.Hash() != header.Hash() {
-		t.Fatalf("Retrieved header mismatch: have %v, want %v", entry, header)
-	}
-	// Delete the header and verify the execution
-	DeleteMinorBlockHeader(db, header.Hash())
-	if entry := ReadMinorBlockHeader(db, header.Hash()); entry != nil {
-		t.Fatalf("Deleted header returned: %v", entry)
-	}
-}
-
-// Tests block header storage and retrieval operations.
-func TestRootBlockHeaderStorage(t *testing.T) {
-	db := memorydb.New()
-
-	// Create a test header to move around the database and make sure it's really new
-	//todo init header and meta
-	header := &types.RootBlockHeader{Number: uint32(42)}
-	if entry := ReadRootBlockHeader(db, header.Hash()); entry != nil {
-		t.Fatalf("Non existent header returned: %v", entry)
-	}
-	// Write and verify the header in the database
-	WriteRootBlockHeader(db, header)
-	if entry := ReadRootBlockHeader(db, header.Hash()); entry == nil {
-		t.Fatalf("Stored header not found")
-	} else if entry.Hash() != header.Hash() {
-		t.Fatalf("Retrieved header mismatch: have %v, want %v", entry, header)
-	}
-	// Delete the header and verify the execution
-	DeleteRootBlockHeader(db, header.Hash())
-	if entry := ReadRootBlockHeader(db, header.Hash()); entry != nil {
-		t.Fatalf("Deleted header returned: %v", entry)
+	if got, want := qkcMinorBlockKey(hash), append([]byte("q_mb"), hash.Bytes()...); !bytes.Equal(got, want) {
+		t.Fatalf("minor block key mismatch: have %x, want %x", got, want)
 	}
 }
 
 // Tests block storage and retrieval operations.
-func TestRootBlockStorage(t *testing.T) {
+func TestQKCRootBlockStorage(t *testing.T) {
 	db := memorydb.New()
 
 	// Create a test block to move around the database and make sure it's really new
-	block := types.NewRootBlockWithHeader(&types.RootBlockHeader{
-		Extra:           limitedSizeByes,
+	block := types.NewRootBlock(&types.RootBlockHeader{
+		Extra:           qkcLimitedSizeBytes,
 		ParentHash:      types.EmptyHash,
 		MinorHeaderHash: types.EmptyHash,
-	}).WithBody(headers, limitedSizeByes)
+	}, qkcHeaders, qkcLimitedSizeBytes)
 
 	if entry := ReadRootBlock(db, block.Hash()); entry != nil {
 		t.Fatalf("Non existent block returned: %v", entry)
 	}
-	if entry := ReadRootBlockHeader(db, block.Hash()); entry != nil {
-		t.Fatalf("Non existent header returned: %v", entry)
-	}
 	// Write and verify the block in the database
 	WriteRootBlock(db, block)
+	if !HasRootBlock(db, block.Hash()) {
+		t.Fatal("Stored root block key not found")
+	}
+	if HasMinorBlock(db, block.Hash()) {
+		t.Fatal("Root block was written with the minor block key")
+	}
 	if entry := ReadRootBlock(db, block.Hash()); entry == nil {
 		t.Fatalf("Stored block not found")
 	} else if entry.Hash() != block.Hash() {
@@ -108,23 +73,26 @@ func TestRootBlockStorage(t *testing.T) {
 }
 
 // Tests block storage and retrieval operations.
-func TestMinorBlockStorage(t *testing.T) {
+func TestQKCMinorBlockStorage(t *testing.T) {
 	db := memorydb.New()
 
 	// Create a test block to move around the database and make sure it's really new
 	block := types.NewMinorBlockWithHeader(&types.MinorBlockHeader{
-		Extra:      limitedSizeByes,
+		Extra:      qkcLimitedSizeBytes,
 		ParentHash: types.EmptyHash,
-	}, &types.MinorBlockMeta{}).WithBody(txs, limitedSizeByes)
+	}, &types.MinorBlockMeta{}).WithBody(qkcTxs, qkcLimitedSizeBytes)
 
 	if entry := ReadMinorBlock(db, block.Hash()); entry != nil {
 		t.Fatalf("Non existent block returned: %v", entry)
 	}
-	if entry := ReadMinorBlockHeader(db, block.Hash()); entry != nil {
-		t.Fatalf("Non existent header returned: %v", entry)
-	}
 	// Write and verify the block in the database
 	WriteMinorBlock(db, block)
+	if !HasMinorBlock(db, block.Hash()) {
+		t.Fatal("Stored minor block key not found")
+	}
+	if HasRootBlock(db, block.Hash()) {
+		t.Fatal("Minor block was written with the root block key")
+	}
 	if entry := ReadMinorBlock(db, block.Hash()); entry == nil {
 		t.Fatalf("Stored block not found")
 	} else if entry.Hash() != block.Hash() {
@@ -136,39 +104,55 @@ func TestMinorBlockStorage(t *testing.T) {
 	if entry := ReadMinorBlock(db, block.Hash()); entry != nil {
 		t.Fatalf("Deleted block returned: %v", entry)
 	}
-	if entry := ReadMinorBlockHeader(db, block.Hash()); entry != nil {
-		t.Fatalf("Deleted header returned: %v", entry)
-	}
 }
 
 // Tests that canonical numbers can be mapped to hashes and retrieved.
-func TestCanonicalMappingStorage(t *testing.T) {
+func TestQKCCanonicalMappingStorage(t *testing.T) {
 	db := memorydb.New()
 
-	// Create a test canonical number and assinged hash to move around
-	hash, number := common.Hash{0: 0xff}, uint64(314)
-	if entry := ReadCanonicalHash(db, ChainType(0), number); entry != (common.Hash{}) {
-		t.Fatalf("Non existent canonical mapping returned: %v", entry)
+	rootHash := common.Hash{0: 0xff}
+	minorHash := common.Hash{0: 0xee}
+	number := uint64(314)
+	if entry := ReadRootCanonicalHash(db, number); entry != (common.Hash{}) {
+		t.Fatalf("Non existent root canonical mapping returned: %v", entry)
 	}
-	// Write and verify the TD in the database
-	WriteCanonicalHash(db, 0, hash, number)
-	if entry := ReadCanonicalHash(db, ChainType(0), number); entry == (common.Hash{}) {
-		t.Fatalf("Stored canonical mapping not found")
-	} else if entry != hash {
-		t.Fatalf("Retrieved canonical mapping mismatch: have %v, want %v", entry, hash)
+	if entry := ReadMinorCanonicalHash(db, number); entry != (common.Hash{}) {
+		t.Fatalf("Non existent minor canonical mapping returned: %v", entry)
 	}
-	if entry := ReadCanonicalHash(db, ChainType(1), number); entry != (common.Hash{}) {
-		t.Fatalf("Non existent canonical mapping returned: %v", entry)
+
+	WriteRootCanonicalHash(db, rootHash, number)
+	WriteMinorCanonicalHash(db, minorHash, number)
+	if entry := ReadRootCanonicalHash(db, number); entry != rootHash {
+		t.Fatalf("Root canonical mapping mismatch: have %v, want %v", entry, rootHash)
 	}
-	// Delete the TD and verify the execution
-	DeleteCanonicalHash(db, ChainType(0), number)
-	if entry := ReadCanonicalHash(db, ChainType(0), number); entry != (common.Hash{}) {
-		t.Fatalf("Deleted canonical mapping returned: %v", entry)
+	if entry := ReadMinorCanonicalHash(db, number); entry != minorHash {
+		t.Fatalf("Minor canonical mapping mismatch: have %v, want %v", entry, minorHash)
+	}
+	if has, _ := db.Has(append([]byte("rn"), encodeBlockNumber(number)...)); has {
+		t.Fatal("Root canonical mapping was written without the q_ prefix")
+	}
+	if has, _ := db.Has(append([]byte("mn"), encodeBlockNumber(number)...)); has {
+		t.Fatal("Minor canonical mapping was written without the q_ prefix")
+	}
+	if has, _ := db.Has(append([]byte("q_rn"), encodeBlockNumber(number)...)); !has {
+		t.Fatal("Root canonical mapping was not written with the q_ prefix")
+	}
+	if has, _ := db.Has(append([]byte("q_mn"), encodeBlockNumber(number)...)); !has {
+		t.Fatal("Minor canonical mapping was not written with the q_ prefix")
+	}
+
+	DeleteRootCanonicalHash(db, number)
+	DeleteMinorCanonicalHash(db, number)
+	if entry := ReadRootCanonicalHash(db, number); entry != (common.Hash{}) {
+		t.Fatalf("Deleted root canonical mapping returned: %v", entry)
+	}
+	if entry := ReadMinorCanonicalHash(db, number); entry != (common.Hash{}) {
+		t.Fatalf("Deleted minor canonical mapping returned: %v", entry)
 	}
 }
 
 // Tests that head headers and head blocks can be assigned, individually.
-func TestHeadStorage(t *testing.T) {
+func TestQKCHeadStorage(t *testing.T) {
 	db := memorydb.New()
 
 	blockHeadHash := common.BytesToHash([]byte{0x44})
@@ -203,7 +187,7 @@ func TestHeadStorage(t *testing.T) {
 }
 
 // Tests that receipts associated with a single block can be stored and retrieved.
-func TestBlockReceiptStorage(t *testing.T) {
+func TestQKCBlockReceiptStorage(t *testing.T) {
 	db := memorydb.New()
 
 	receipt1 := &types.Receipt{
@@ -241,23 +225,23 @@ func TestBlockReceiptStorage(t *testing.T) {
 
 	// Check that no receipt entries are in a pristine database
 	hash := common.BytesToHash([]byte{0x03, 0x14})
-	if rs := ReadReceipts(db, hash); len(rs) != 0 {
+	if rs := ReadQKCReceipts(db, hash); len(rs) != 0 {
 		t.Fatalf("non existent receipts returned: %v", rs)
 	}
 	// Insert the receipt slice into the database and check presence
-	WriteReceipts(db, hash, receipts)
+	WriteQKCReceipts(db, hash, receipts)
 	wantEncoding, err := rlp.EncodeToBytes(receipts)
 	if err != nil {
 		t.Fatal("encode receipts:", err)
 	}
-	stored, err := db.Get(blockReceiptsKey(hash))
+	stored, err := db.Get(qkcBlockReceiptsKey(hash))
 	if err != nil {
 		t.Fatal("read stored receipts:", err)
 	}
 	if !bytes.Equal(stored, wantEncoding) {
 		t.Fatalf("stored receipt encoding mismatch: have %x, want %x", stored, wantEncoding)
 	}
-	if rs := ReadReceipts(db, hash); len(rs) == 0 {
+	if rs := ReadQKCReceipts(db, hash); len(rs) == 0 {
 		t.Fatalf("no receipts returned")
 	} else {
 		for i := range receipts {
@@ -284,8 +268,8 @@ func TestBlockReceiptStorage(t *testing.T) {
 		}
 	}
 	// Delete the receipt slice and check purge
-	DeleteReceipts(db, hash)
-	if rs := ReadReceipts(db, hash); len(rs) != 0 {
+	DeleteQKCReceipts(db, hash)
+	if rs := ReadQKCReceipts(db, hash); len(rs) != 0 {
 		t.Fatalf("deleted receipts returned: %v", rs)
 	}
 }

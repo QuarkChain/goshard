@@ -12,17 +12,16 @@ import (
 )
 
 // Tests that positional lookup metadata can be stored and retrieved.
-func TestLookupStorage(t *testing.T) {
+func TestQKCLookupStorage(t *testing.T) {
 	db := memorydb.New()
 
 	//nonce uint64, to account.Recipient, amount *big.Int, gasLimit uint64, gasPrice *big.Int, fromFullShardId uint32, toFullShardId uint32, networkId uint32, version uint32, data []byte) *EvmTransaction {
 	tx1 := types.NewEvmTransaction(1, account.BytesToIdentityRecipient([]byte{0x11}), big.NewInt(111), 1111, big.NewInt(11111), 0, 1, 1, 0, []byte{0x11, 0x11, 0x11}, 0, 0)
 	tx2 := types.NewEvmTransaction(2, account.BytesToIdentityRecipient([]byte{0x22}), big.NewInt(222), 2222, big.NewInt(22222), 0, 1, 1, 0, []byte{0x22, 0x22, 0x22}, 0, 0)
 	tx3 := types.NewEvmTransaction(3, account.BytesToIdentityRecipient([]byte{0x33}), big.NewInt(333), 3333, big.NewInt(33333), 0, 1, 1, 0, []byte{0x33, 0x33, 0x33}, 0, 0)
-	receipts := []*types.Receipt{{TxHash: tx1.Hash()}, {TxHash: tx2.Hash()}, {TxHash: tx3.Hash()}}
 	txs := []*types.Transaction{tx1, tx2, tx3}
 
-	block := types.NewMinorBlock(&types.MinorBlockHeader{Number: uint64(314)}, &types.MinorBlockMeta{}, txs, receipts, nil)
+	block := types.NewMinorBlockWithHeader(&types.MinorBlockHeader{Number: uint64(314)}, &types.MinorBlockMeta{}).WithBody(txs, nil)
 
 	// Check that no transactions entries are in a pristine database
 	for i, tx := range txs {
@@ -35,6 +34,12 @@ func TestLookupStorage(t *testing.T) {
 	WriteBlockContentLookupEntriesWithCrossShardHashList(db, block, nil)
 
 	for i, tx := range txs {
+		if has, _ := db.Has(txLookupKey(tx.Hash())); !has {
+			t.Fatalf("tx #%d [%x]: lookup was not written with the existing geth key", i, tx.Hash())
+		}
+		if has, _ := db.Has(qkcKey(txLookupPrefix, tx.Hash().Bytes())); has {
+			t.Fatalf("tx #%d [%x]: lookup was written with a redundant QKC key", i, tx.Hash())
+		}
 		if txn, hash, index := ReadTransaction(db, tx.Hash()); txn == nil {
 			t.Fatalf("tx #%d [%x]: transaction not found", i, tx.Hash())
 		} else {
@@ -48,7 +53,7 @@ func TestLookupStorage(t *testing.T) {
 	}
 	// Delete the transactions and check purge
 	for i, tx := range txs {
-		DeleteBlockContentLookupEntry(db, tx.Hash())
+		DeleteTxLookupEntry(db, tx.Hash())
 		if txn, _, _ := ReadTransaction(db, tx.Hash()); txn != nil {
 			t.Fatalf("tx #%d [%x]: deleted transaction returned: %v", i, tx.Hash(), txn)
 		}
