@@ -10,18 +10,19 @@ import (
 
 // The fields below define the QKC-specific low-level database schema.
 var (
-	qkcPrefix                = []byte("q_")
-	rootHashPrefixQKC        = []byte("rn")
-	minorHashPrefixQKC       = []byte("mn")
-	rootBlockPrefixQKC       = []byte("rb")
-	minorBlockPrefixQKC      = []byte("mb")
-	totalTxCountPrefixQKC    = []byte("txC")
-	confirmedXShardPrefixQKC = []byte("xr")
-	xShardListPrefixQKC      = []byte("xSL")
-	xShardHashListPrefixQKC  = []byte("xSHL")
-	lastMinorAtRootPrefixQKC = []byte("rLM")
-	genesisPrefixQKC         = []byte("genesis")
-	chainConfigPrefixQKC     = []byte("config-")
+	qkcPrefix = []byte("q_") // qkcPrefix + QKC-specific prefix + key parts -> QKC namespaced key
+
+	rootHashPrefixQKC        = []byte("rn")      // qkcPrefix + rootHashPrefixQKC + num (uint64 big endian) -> root canonical hash
+	minorHashPrefixQKC       = []byte("mn")      // qkcPrefix + minorHashPrefixQKC + num (uint64 big endian) -> minor canonical hash
+	rootBlockPrefixQKC       = []byte("rb")      // qkcPrefix + rootBlockPrefixQKC + hash -> root block
+	minorBlockPrefixQKC      = []byte("mb")      // qkcPrefix + minorBlockPrefixQKC + hash -> minor block
+	totalTxCountPrefixQKC    = []byte("txC")     // qkcPrefix + totalTxCountPrefixQKC + hash -> total tx count (uint32 big endian)
+	confirmedXShardPrefixQKC = []byte("xr")      // qkcPrefix + confirmedXShardPrefixQKC + hash -> confirmed cross-shard tx list
+	xShardListPrefixQKC      = []byte("xSL")     // qkcPrefix + xShardListPrefixQKC + hash -> cross-shard tx list
+	xShardHashListPrefixQKC  = []byte("xSHL")    // qkcPrefix + xShardHashListPrefixQKC + hash -> cross-shard deposit hash list
+	lastMinorAtRootPrefixQKC = []byte("rLM")     // qkcPrefix + lastMinorAtRootPrefixQKC + root hash -> last confirmed minor block hash
+	genesisPrefixQKC         = []byte("genesis") // qkcPrefix + genesisPrefixQKC + root hash -> genesis minor block
+	chainConfigPrefixQKC     = []byte("config-") // qkcPrefix + chainConfigPrefixQKC + genesis hash -> QKC chain config
 )
 
 // qkcLookupEntry is positional metadata for looking up block content by hash.
@@ -36,6 +37,8 @@ func qkcEncodeUint32(number uint32) []byte {
 	return enc
 }
 
+// qkcKey builds a QKC-specific database key by prepending qkcPrefix to the
+// record prefix and key parts, keeping QKC additions isolated from geth keys.
 func qkcKey(prefix []byte, parts ...[]byte) []byte {
 	size := len(qkcPrefix) + len(prefix)
 	for _, part := range parts {
