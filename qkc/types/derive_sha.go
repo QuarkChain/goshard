@@ -28,7 +28,9 @@ func DeriveSha(list DerivableList, hasher coretypes.ListHasher) common.Hash {
 	for i := 0; i < list.Len(); i++ {
 		keybuf.Reset()
 		rlp.Encode(keybuf, uint(i))
-		hasher.Update(keybuf.Bytes(), list.Bytes(i))
+		if err := hasher.Update(keybuf.Bytes(), list.Bytes(i)); err != nil {
+			panic(err)
+		}
 	}
 	return hasher.Hash()
 }
