@@ -18,8 +18,9 @@ import (
 
 // ── test handler ─────────────────────────────────────────────────────────────
 
-// fakeMasterHandler stands in for the service-layer MasterHandler: it
-// acknowledges every business request with a zero-value response.
+// fakeMasterHandler is the only handler the tests inject into MasterConn: it
+// implements MasterHandler end to end and acknowledges every request with a
+// zero-value response.
 type fakeMasterHandler struct {
 	// errGenTx, if set, is returned by GenTx to simulate a handler failure.
 	errGenTx error
@@ -27,37 +28,36 @@ type fakeMasterHandler struct {
 	createPeerCalls atomic.Int32
 	// destroyCalls counts DestroyClusterPeerConnection invocations.
 	destroyCalls atomic.Int32
-	// createShardsAndPeerConnsCalls counts CreateShardsAndPeerConnections
-	// invocations (the PING RootTip entry point).
-	createShardsAndPeerConnsCalls atomic.Int32
-	// lastRootTip stores a copy of the most recent CreateShardsAndPeerConnections
+	// createShardsCalls counts CreateShards invocations (the PING RootTip
+	// callback).
+	createShardsCalls atomic.Int32
+	// lastRootTip stores a copy of the most recent CreateShards
 	// RootTip argument.
 	lastRootTip atomic.Pointer[wire.RawBytes]
-	// errCreateShardsAndPeerConns, if set, is returned by
-	// CreateShardsAndPeerConnections to simulate an orchestration failure.
-	errCreateShardsAndPeerConns error
-	// addRootBlockCalls counts AddRootBlockAndCreateShards invocations
+	// errCreateShards, if set, is returned by CreateShards to simulate a
+	// shard-activation failure.
+	errCreateShards error
+	// addRootBlockCalls counts AddRootBlock invocations
 	// (the ADD_ROOT_BLOCK entry point).
 	addRootBlockCalls atomic.Int32
 	// lastAddRootBlockReq stores a copy of the most recent
-	// AddRootBlockAndCreateShards request argument.
+	// AddRootBlock request argument.
 	lastAddRootBlockReq atomic.Pointer[wire.AddRootBlockRequest]
-	// respAddRootBlock, if set, is returned by AddRootBlockAndCreateShards
+	// respAddRootBlock, if set, is returned by AddRootBlock
 	// instead of the zero-value response, letting tests assert write-back.
 	respAddRootBlock *wire.AddRootBlockResponse
 }
 
-// CreateShardsAndPeerConnections is the communication-layer entry point for a
-// PING RootTip. It is a PR5-owned orchestration: it creates local shards and
-// equips them with PeerConns without delegating to a MasterHandler method.
-func (h *fakeMasterHandler) CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error {
-	h.createShardsAndPeerConnsCalls.Add(1)
+// CreateShards is the shard-creation callback invoked by MasterConn.handlePing
+// when the PING carries a RootTip.
+func (h *fakeMasterHandler) CreateShards(rootTip *wire.RawBytes) error {
+	h.createShardsCalls.Add(1)
 	if rootTip != nil {
 		cp := make(wire.RawBytes, len(*rootTip))
 		copy(cp, *rootTip)
 		h.lastRootTip.Store(&cp)
 	}
-	return h.errCreateShardsAndPeerConns
+	return h.errCreateShards
 }
 
 func (h *fakeMasterHandler) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
@@ -86,7 +86,7 @@ func (h *fakeMasterHandler) GenTx(*wire.GenTxRequest) (*wire.GenTxResponse, erro
 	return &wire.GenTxResponse{}, nil
 }
 
-func (h *fakeMasterHandler) AddRootBlockAndCreateShards(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error) {
+func (h *fakeMasterHandler) AddRootBlock(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error) {
 	h.addRootBlockCalls.Add(1)
 	if req != nil {
 		cp := *req
@@ -250,7 +250,6 @@ func newMasterConnWithPeer(t *testing.T, handler *fakeMasterHandler) (*MasterCon
 		Conn:                 slaveConn,
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
-		CommHandler:          handler,
 		Handler:              handler,
 		Logger:               log.New(),
 	})
@@ -272,26 +271,75 @@ func newMasterConnWithPeer(t *testing.T, handler *fakeMasterHandler) (*MasterCon
 // ── construction ─────────────────────────────────────────────────────────────
 
 func TestMasterConn_ConfigValidation(t *testing.T) {
-	// Nil conn / nil handlers must be rejected.
+	// Nil conn / nil handler must be rejected.
 	if _, err := NewMasterConn(MasterConnConfig{}); err == nil {
 		t.Fatal("expected error for nil conn")
 	}
 	if _, err := NewMasterConn(MasterConnConfig{Conn: &net.TCPConn{}}); err == nil {
-		t.Fatal("expected error for nil slave conn handler")
-	}
-	if _, err := NewMasterConn(MasterConnConfig{
-		Conn:        &net.TCPConn{},
-		CommHandler: &fakeMasterHandler{},
-	}); err == nil {
 		t.Fatal("expected error for nil master handler")
 	}
 }
 
-// ── communication handlers ───────────────────────────────────────────────────
+// TestMasterConn_IdentitySnapshot verifies that LocalID and
+// LocalFullShardIDList are copied at construction: mutating the caller's
+// slices afterwards must not change what PONG reports. MasterConn reads them
+// from the reader goroutine, so sharing the caller's backing array would be a
+// data race as well as a correctness bug.
+func TestMasterConn_IdentitySnapshot(t *testing.T) {
+	peerConn, slaveConn := net.Pipe()
+	defer peerConn.Close()
+	defer slaveConn.Close()
+
+	localID := []byte("go-slave")
+	shardList := []uint32{0x00010001}
+	server, err := NewMasterConn(MasterConnConfig{
+		Conn:                 slaveConn,
+		LocalID:              localID,
+		LocalFullShardIDList: shardList,
+		Handler:              &fakeMasterHandler{},
+		Logger:               log.New(),
+	})
+	if err != nil {
+		t.Fatalf("new master conn: %v", err)
+	}
+	server.Start()
+	defer server.Close()
+
+	// Mutate the caller's slices after the connection was built.
+	localID[0] = 'X'
+	shardList[0] = 0xdeadbeef
+
+	peer := newMasterTestPeer(peerConn)
+	payload, err := serialize.SerializeToBytes(&wire.PingRequest{ID: []byte("master")})
+	if err != nil {
+		t.Fatalf("serialize ping: %v", err)
+	}
+	if err := peer.send(&wire.Frame{
+		Opcode:  byte(wire.ClusterOpPing),
+		RPCID:   1,
+		Payload: payload,
+	}); err != nil {
+		t.Fatalf("send ping: %v", err)
+	}
+
+	resp := peer.nextFrame(t, 2*time.Second)
+	var pong wire.PongResponse
+	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &pong); err != nil {
+		t.Fatalf("deserialize pong: %v", err)
+	}
+	if string(pong.ID) != "go-slave" {
+		t.Fatalf("pong id must be the construction-time copy, got %s", pong.ID)
+	}
+	if len(pong.FullShardIDList) != 1 || pong.FullShardIDList[0] != 0x00010001 {
+		t.Fatalf("pong shard list must be the construction-time copy, got %v", pong.FullShardIDList)
+	}
+}
+
+// ── topology & shard activation handlers ────────────────────────────────────
 
 // TestMasterConn_Ping verifies PING→PONG across the real wire path: it echoes
 // the slave's configured identity (never the PING payload's), delegates a
-// carried RootTip to CommHandler.CreateShardsAndPeerConnections exactly
+// carried RootTip to MasterHandler.CreateShards exactly
 // once (nil RootTip must not trigger it), and keeps the connection open.
 func TestMasterConn_Ping(t *testing.T) {
 	handler := &fakeMasterHandler{}
@@ -342,21 +390,21 @@ func TestMasterConn_Ping(t *testing.T) {
 	default:
 	}
 
-	if got := handler.createShardsAndPeerConnsCalls.Load(); got != 1 {
-		t.Fatalf("CreateShardsAndPeerConnections calls: got %d, want 1 (only the non-nil RootTip)", got)
+	if got := handler.createShardsCalls.Load(); got != 1 {
+		t.Fatalf("CreateShards calls: got %d, want 1 (only the non-nil RootTip)", got)
 	}
 	if got := handler.lastRootTip.Load(); got == nil || len(*got) != 2 || (*got)[0] != 0x01 || (*got)[1] != 0x02 {
-		t.Fatalf("CreateShardsAndPeerConnections RootTip mismatch: got %v, want [2]byte{0x01, 0x02}", got)
+		t.Fatalf("CreateShards RootTip mismatch: got %v, want [2]byte{0x01, 0x02}", got)
 	}
 }
 
 // TestMasterConn_CreateShardsErrorClosesConnection verifies that a
-// CreateShardsAndPeerConnections failure during PING is a connection-level
+// CreateShards failure during PING is a connection-level
 // failure: no PONG is written and the connection closes (py: the create_shards
 // exception propagates through handle_ping into close_with_error, so the master
 // never sees a PONG).
 func TestMasterConn_CreateShardsErrorClosesConnection(t *testing.T) {
-	handler := &fakeMasterHandler{errCreateShardsAndPeerConns: errors.New("boom")}
+	handler := &fakeMasterHandler{errCreateShards: errors.New("boom")}
 	server, peer, cleanup := newMasterConnWithPeer(t, handler)
 	defer cleanup()
 
@@ -380,21 +428,21 @@ func TestMasterConn_CreateShardsErrorClosesConnection(t *testing.T) {
 	select {
 	case <-server.WaitUntilClosed():
 	case <-time.After(2 * time.Second):
-		t.Fatal("server did not close after CreateShardsAndPeerConnections error")
+		t.Fatal("server did not close after CreateShards error")
 	}
 
 	// No PONG (or any other frame) may have been written before the close.
 	select {
 	case f := <-peer.frames:
-		t.Fatalf("unexpected frame after CreateShardsAndPeerConnections failure: opcode 0x%x", f.Opcode)
+		t.Fatalf("unexpected frame after CreateShards failure: opcode 0x%x", f.Opcode)
 	default:
 	}
 }
 
 // TestMasterConn_CreateClusterPeerConnectionDelegated verifies that CREATE is
-// dispatched to the CommHandler (communication layer) and its response is
-// written back; the connection stays alive. The peer-connection business itself
-// is owned by the communication layer, not by MasterConn.
+// dispatched to MasterHandler and its response is written back; the connection
+// stays alive. The peer-connection business itself is owned by the handler,
+// not by MasterConn.
 func TestMasterConn_CreateClusterPeerConnectionDelegated(t *testing.T) {
 	handler := &fakeMasterHandler{}
 	server, peer, cleanup := newMasterConnWithPeer(t, handler)
@@ -422,71 +470,6 @@ func TestMasterConn_CreateClusterPeerConnectionDelegated(t *testing.T) {
 	select {
 	case <-server.WaitUntilClosed():
 		t.Fatal("connection closed by CREATE")
-	default:
-	}
-}
-
-// TestMasterConn_AddRootBlockDelegated verifies that ADD_ROOT_BLOCK is
-// dispatched to CommHandler.AddRootBlockAndCreateShards — not to the business
-// MasterHandler — with the request passed through and the returned
-// AddRootBlockResponse written back; the connection stays alive.
-//
-// MasterHandler carries no AddRootBlock method in the current handler shape,
-// so a business-layer leak is structurally impossible; the assertions below
-// lock the ADD_ROOT_BLOCK routing onto the communication layer.
-func TestMasterConn_AddRootBlockDelegated(t *testing.T) {
-	handler := &fakeMasterHandler{
-		respAddRootBlock: &wire.AddRootBlockResponse{ErrorCode: 7, Switched: true},
-	}
-	server, peer, cleanup := newMasterConnWithPeer(t, handler)
-	defer cleanup()
-
-	req := &wire.AddRootBlockRequest{
-		RootBlock:    &wire.RawBytes{0xde, 0xad, 0xbe, 0xef},
-		ExpectSwitch: true,
-	}
-	payload, err := serialize.SerializeToBytes(req)
-	if err != nil {
-		t.Fatalf("serialize add root block: %v", err)
-	}
-	if err := peer.send(&wire.Frame{
-		Meta:    wire.ClusterMetadata{},
-		Opcode:  byte(wire.ClusterOpAddRootBlockRequest),
-		RPCID:   1,
-		Payload: payload,
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	resp := peer.nextFrame(t, 2*time.Second)
-	if resp.Opcode != byte(wire.ClusterOpAddRootBlockResponse) {
-		t.Fatalf("expected add root block response opcode 0x%x, got 0x%x", wire.ClusterOpAddRootBlockResponse, resp.Opcode)
-	}
-	if resp.RPCID != 1 {
-		t.Fatalf("rpc_id echo: got %d, want 1", resp.RPCID)
-	}
-	var gotResp wire.AddRootBlockResponse
-	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &gotResp); err != nil {
-		t.Fatalf("deserialize response: %v", err)
-	}
-	if gotResp.ErrorCode != 7 || !gotResp.Switched {
-		t.Fatalf("AddRootBlockResponse write-back mismatch: got %+v, want {ErrorCode:7 Switched:true}", gotResp)
-	}
-
-	// The request must reach CommHandler.AddRootBlockAndCreateShards exactly
-	// once, with the original request object passed through intact.
-	if got := handler.addRootBlockCalls.Load(); got != 1 {
-		t.Fatalf("AddRootBlockAndCreateShards called %d times, want 1", got)
-	}
-	gotReq := handler.lastAddRootBlockReq.Load()
-	if gotReq == nil || gotReq.RootBlock == nil || len(*gotReq.RootBlock) != 4 ||
-		(*gotReq.RootBlock)[0] != 0xde || (*gotReq.RootBlock)[3] != 0xef || !gotReq.ExpectSwitch {
-		t.Fatalf("AddRootBlockAndCreateShards request mismatch: got %+v, want RootBlock=[de ad be ef] ExpectSwitch=true", gotReq)
-	}
-
-	select {
-	case <-server.WaitUntilClosed():
-		t.Fatal("connection closed by ADD_ROOT_BLOCK")
 	default:
 	}
 }
@@ -547,6 +530,66 @@ func TestMasterConn_NonRPCDispatch(t *testing.T) {
 }
 
 // ── business handler delegation ──────────────────────────────────────────────
+
+// TestMasterConn_AddRootBlockDelegated verifies that ADD_ROOT_BLOCK is
+// dispatched to MasterHandler.AddRootBlock with the request passed through and
+// the returned AddRootBlockResponse written back; the connection stays alive.
+func TestMasterConn_AddRootBlockDelegated(t *testing.T) {
+	handler := &fakeMasterHandler{
+		respAddRootBlock: &wire.AddRootBlockResponse{ErrorCode: 7, Switched: true},
+	}
+	server, peer, cleanup := newMasterConnWithPeer(t, handler)
+	defer cleanup()
+
+	req := &wire.AddRootBlockRequest{
+		RootBlock:    &wire.RawBytes{0xde, 0xad, 0xbe, 0xef},
+		ExpectSwitch: true,
+	}
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		t.Fatalf("serialize add root block: %v", err)
+	}
+	if err := peer.send(&wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  byte(wire.ClusterOpAddRootBlockRequest),
+		RPCID:   1,
+		Payload: payload,
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resp := peer.nextFrame(t, 2*time.Second)
+	if resp.Opcode != byte(wire.ClusterOpAddRootBlockResponse) {
+		t.Fatalf("expected add root block response opcode 0x%x, got 0x%x", wire.ClusterOpAddRootBlockResponse, resp.Opcode)
+	}
+	if resp.RPCID != 1 {
+		t.Fatalf("rpc_id echo: got %d, want 1", resp.RPCID)
+	}
+	var gotResp wire.AddRootBlockResponse
+	if err := serialize.Deserialize(serialize.NewByteBuffer(resp.Payload), &gotResp); err != nil {
+		t.Fatalf("deserialize response: %v", err)
+	}
+	if gotResp.ErrorCode != 7 || !gotResp.Switched {
+		t.Fatalf("AddRootBlockResponse write-back mismatch: got %+v, want {ErrorCode:7 Switched:true}", gotResp)
+	}
+
+	// The request must reach MasterHandler.AddRootBlock exactly once, with the
+	// original request object passed through intact.
+	if got := handler.addRootBlockCalls.Load(); got != 1 {
+		t.Fatalf("AddRootBlock called %d times, want 1", got)
+	}
+	gotReq := handler.lastAddRootBlockReq.Load()
+	if gotReq == nil || gotReq.RootBlock == nil || len(*gotReq.RootBlock) != 4 ||
+		(*gotReq.RootBlock)[0] != 0xde || (*gotReq.RootBlock)[3] != 0xef || !gotReq.ExpectSwitch {
+		t.Fatalf("AddRootBlock request mismatch: got %+v, want RootBlock=[de ad be ef] ExpectSwitch=true", gotReq)
+	}
+
+	select {
+	case <-server.WaitUntilClosed():
+		t.Fatal("connection closed by ADD_ROOT_BLOCK")
+	default:
+	}
+}
 
 // TestMasterConn_BusinessHandlerErrorClosesConnection verifies that a handler
 // error is treated as a connection-level failure.
@@ -709,7 +752,6 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
-		CommHandler:          &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
@@ -756,9 +798,14 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		if r.frame.Opcode != byte(wire.ClusterOpAddMinorBlockHeaderRequest) {
 			t.Fatalf("unexpected request opcode 0x%x", r.frame.Opcode)
 		}
+		// Slave→master requests carry no branch and no cluster peer id
+		// (py: write_rpc_request without metadata → metadata_class()).
+		if r.frame.Meta != (wire.ClusterMetadata{}) {
+			t.Fatalf("request metadata must be empty, got %+v", r.frame.Meta)
+		}
 		respPayload, _ := serialize.SerializeToBytes(&wire.AddMinorBlockHeaderResponse{ErrorCode: 0})
 		if err := wire.WriteFrame(masterConn, &wire.Frame{
-			Meta:    r.frame.Meta,
+			Meta:    wire.ClusterMetadata{},
 			Opcode:  byte(wire.ClusterOpAddMinorBlockHeaderResponse),
 			RPCID:   r.frame.RPCID,
 			Payload: respPayload,
@@ -793,7 +840,6 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		Conn:                 clientConn,
 		LocalID:              []byte("slave"),
 		LocalFullShardIDList: []uint32{0x00010001},
-		CommHandler:          &fakeMasterHandler{},
 		Handler:              &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
@@ -836,9 +882,12 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		if r.frame.Opcode != byte(wire.ClusterOpAddMinorBlockHeaderListRequest) {
 			t.Fatalf("unexpected request opcode 0x%x", r.frame.Opcode)
 		}
+		if r.frame.Meta != (wire.ClusterMetadata{}) {
+			t.Fatalf("request metadata must be empty, got %+v", r.frame.Meta)
+		}
 		respPayload, _ := serialize.SerializeToBytes(&wire.AddMinorBlockHeaderListResponse{ErrorCode: 0})
 		if err := wire.WriteFrame(masterConn, &wire.Frame{
-			Meta:    r.frame.Meta,
+			Meta:    wire.ClusterMetadata{},
 			Opcode:  byte(wire.ClusterOpAddMinorBlockHeaderListResponse),
 			RPCID:   r.frame.RPCID,
 			Payload: respPayload,
@@ -861,7 +910,3 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		t.Fatal("SendAddMinorBlockHeaderList did not return")
 	}
 }
-
-// ── wire format ──────────────────────────────────────────────────────────────
-// Frame layout is covered by the wire package (TestWireFormatLayout); MasterConn
-// exercises it through the real transport in every wire-path test above.
