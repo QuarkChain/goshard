@@ -15,6 +15,17 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
+// PeerResolver resolves the virtual PeerConn a forwarded peer frame is
+// addressed to. It is implemented by the composition layer that owns the peer
+// registry and injected into MasterConn, which uses it only for frame routing
+// — never for request delegation (that is MasterHandler's job).
+type PeerResolver interface {
+	// LookupPeer returns the PeerConn for (clusterPeerID, branch), or nil when
+	// this slave has none; the frame is then dropped (py: slave.py:131-146
+	// NULL_CONNECTION).
+	LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn
+}
+
 // MasterHandler handles master requests delegated by MasterConn.
 // It is implemented by the composition layer and injected into MasterConn.
 type MasterHandler interface {
@@ -69,8 +80,8 @@ type MasterHandler interface {
 	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
 }
 
-// MasterConnConfig configures a MasterConn. Conn and Handler are required;
-// Logger defaults to log.Root().
+// MasterConnConfig configures a MasterConn. Conn, Handler, PeerResolver and
+// ClusterShardIDs are required; Logger defaults to log.Root().
 type MasterConnConfig struct {
 	// Conn is the accepted TCP connection from the master. The slave never
 	// dials the master (py: MasterServer connects, SlaveServer listens).
@@ -94,6 +105,10 @@ type MasterConnConfig struct {
 	// Handler handles master requests delegated by MasterConn.
 	Handler MasterHandler
 
+	// PeerResolver resolves forwarded peer frames (cluster_peer_id != 0) to
+	// their virtual PeerConn. It is consulted by the routing forwarder only.
+	PeerResolver PeerResolver
+
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger
 }
@@ -105,6 +120,7 @@ type MasterConn struct {
 	*conn.BaseConn
 
 	handler              MasterHandler
+	peerResolver         PeerResolver
 	localID              []byte
 	localFullShardIDList []uint32
 
@@ -123,6 +139,9 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
 	}
+	if cfg.PeerResolver == nil {
+		return nil, errors.New("master peer resolver must not be nil")
+	}
 	if len(cfg.ClusterShardIDs) == 0 {
 		return nil, errors.New("cluster shard ids is required")
 	}
@@ -137,6 +156,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 
 	mc := &MasterConn{
 		handler:              cfg.Handler,
+		peerResolver:         cfg.PeerResolver,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
 		clusterShardIDs:      clusterShardIDs,
@@ -302,7 +322,7 @@ func (mc *MasterConn) routeFrame(frame *wire.Frame) bool {
 		return true
 	}
 
-	pc := mc.handler.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
+	pc := mc.peerResolver.LookupPeer(frame.Meta.ClusterPeerID, frame.Meta.Branch)
 	if pc == nil {
 		// Covers both "shard valid globally but not created locally"
 		// (slave.py:131-134) and "peer not found" (slave.py:136-146): drop,

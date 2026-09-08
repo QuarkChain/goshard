@@ -75,7 +75,7 @@ func (h *fakeMasterHandler) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*
 	return resp, nil
 }
 
-// LookupPeer implements SlaveConnHandler. This fake models a slave with no
+// LookupPeer implements PeerResolver. This fake models a slave with no
 // PeerConns at all: every lookup misses, so a peer frame follows MasterConn's
 // NULL_CONNECTION path (dropped, connection kept). Fakes that own a peer
 // registry (fakeSlaveService) shadow this with a real lookup.
@@ -258,6 +258,7 @@ func newMasterConnWithPeer(t *testing.T, handler *fakeMasterHandler) (*MasterCon
 		LocalFullShardIDList: []uint32{0x00010001},
 		ClusterShardIDs:      []uint32{0x00010001},
 		Handler:              handler,
+		PeerResolver:         handler,
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -278,7 +279,7 @@ func newMasterConnWithPeer(t *testing.T, handler *fakeMasterHandler) (*MasterCon
 // ── construction ─────────────────────────────────────────────────────────────
 
 func TestMasterConn_ConfigValidation(t *testing.T) {
-	// Nil conn / nil handler must be rejected.
+	// Nil conn / nil handler / nil peer resolver must be rejected.
 	if _, err := NewMasterConn(MasterConnConfig{}); err == nil {
 		t.Fatal("expected error for nil conn")
 	}
@@ -286,8 +287,15 @@ func TestMasterConn_ConfigValidation(t *testing.T) {
 		t.Fatal("expected error for nil master handler")
 	}
 	if _, err := NewMasterConn(MasterConnConfig{
-		Conn:             &net.TCPConn{},
-		Handler:          &fakeMasterHandler{},
+		Conn:    &net.TCPConn{},
+		Handler: &fakeMasterHandler{},
+	}); err == nil {
+		t.Fatal("expected error for nil peer resolver")
+	}
+	if _, err := NewMasterConn(MasterConnConfig{
+		Conn:         &net.TCPConn{},
+		Handler:      &fakeMasterHandler{},
+		PeerResolver: &fakeMasterHandler{},
 	}); err == nil {
 		t.Fatal("expected error for empty cluster shard ids")
 	}
@@ -309,7 +317,9 @@ func TestMasterConn_IdentitySnapshot(t *testing.T) {
 		Conn:                 slaveConn,
 		LocalID:              localID,
 		LocalFullShardIDList: shardList,
+		ClusterShardIDs:      []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
+		PeerResolver:         &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -775,6 +785,7 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 		LocalFullShardIDList: []uint32{0x00010001},
 		ClusterShardIDs:      []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
+		PeerResolver:         &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
 	if err != nil {
@@ -864,6 +875,7 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 		LocalFullShardIDList: []uint32{0x00010001},
 		ClusterShardIDs:      []uint32{0x00010001},
 		Handler:              &fakeMasterHandler{},
+		PeerResolver:         &fakeMasterHandler{},
 		Logger:               log.New(),
 	})
 	if err != nil {

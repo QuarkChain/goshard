@@ -20,7 +20,7 @@ import (
 // fakeSlaveService is a test double for the future SlaveService: it embeds
 // fakeMasterHandler for the business RPC stubs, implements the cluster-peer
 // CREATE/DESTROY business with a peer registry built via NewPeerConn, and
-// implements SlaveConnHandler.LookupPeer (shadowing the embedded no-peers
+// implements PeerResolver.LookupPeer (shadowing the embedded no-peers
 // stub). masterConn is late-bound after NewMasterConn returns.
 type fakeSlaveService struct {
 	*fakeMasterHandler
@@ -196,7 +196,7 @@ func (f *fakeSlaveService) DestroyPeerConns(clusterPeerID uint64) {
 	}
 }
 
-// LookupPeer implements the SlaveConnHandler lookup used by MasterConn's
+// LookupPeer implements the PeerResolver lookup used by MasterConn's
 // router: (cluster_peer_id, branch) -> PeerConn, nil when there is no match.
 func (f *fakeSlaveService) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
 	f.mu.Lock()
@@ -244,8 +244,8 @@ func (f *fakeSlaveService) registerPeer(pc *PeerConn) {
 }
 
 // newMasterConn creates a MasterConn over a local TCP pair with a fake
-// SlaveService injected as both SlaveConnHandler and Handler (reachable via
-// client.slaveConnHandler.(*fakeSlaveService)).
+// SlaveService injected as both PeerResolver and Handler (reachable via
+// client.peerResolver.(*fakeSlaveService)).
 func newMasterConn(t *testing.T) (client *MasterConn, serverConn net.Conn, cleanup func()) {
 	t.Helper()
 	return newMasterConnWithBranches(t, []uint32{0x00010001, 0x00020001})
@@ -300,7 +300,7 @@ func newMasterConnWithShardSets(t *testing.T, global []uint32, local []uint32) (
 		LocalID:              []byte("go-slave"),
 		LocalFullShardIDList: local,
 		ClusterShardIDs:      global,
-		SlaveConnHandler:     fake,
+		PeerResolver:         fake,
 		Handler:              fake,
 		Logger:               logger,
 	})
@@ -412,7 +412,7 @@ func newRecordingPeerConn(t *testing.T, masterConn *MasterConn, clusterPeerID ui
 	if err != nil {
 		t.Fatalf("new peer conn: %v", err)
 	}
-	masterConn.slaveConnHandler.(*fakeSlaveService).registerPeer(pc)
+	masterConn.peerResolver.(*fakeSlaveService).registerPeer(pc)
 	return pc, handler
 }
 
@@ -508,7 +508,7 @@ func TestMasterConn_UnroutablePeerFrameDropped(t *testing.T) {
 			defer cleanup()
 
 			if c.register != nil {
-				c.register(client.slaveConnHandler.(*fakeSlaveService))
+				c.register(client.peerResolver.(*fakeSlaveService))
 			}
 
 			reqPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockListRequest{
@@ -638,7 +638,7 @@ func TestMasterConn_CreateWithEmptyShardSet(t *testing.T) {
 	}
 
 	// Empty shard set in the runtime: no PeerConns were created.
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	if len(fake.peers) != 0 {
 		t.Fatalf("expected no peer conns with empty shard set, got %d", len(fake.peers))
 	}
@@ -769,7 +769,7 @@ func TestMasterConn_CreateDestroyPeerConnection(t *testing.T) {
 
 	// Capture PeerConn pointers before destroy; the expansion scope is decided
 	// by the runtime (fake), not by MasterConn.
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	branchMap := fake.peers[clusterPeerID]
 	if len(branchMap) != len(fake.branches) {
 		t.Fatalf("expected %d peer conns, got %d", len(fake.branches), len(branchMap))
@@ -820,7 +820,7 @@ func TestMasterConn_CloseDoesNotClosePeerConns(t *testing.T) {
 	client, _, cleanup := newMasterConn(t)
 	defer cleanup()
 
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	fake.createPeerConns(7, []uint32{0x00010001, 0x00020001})
 	fake.createPeerConns(9, []uint32{0x00010001})
 
@@ -876,7 +876,7 @@ func TestMasterConn_DuplicateCreatePeerConn(t *testing.T) {
 		t.Fatalf("serialize create request: %v", err)
 	}
 
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	var original *PeerConn
 	for i, rpcID := range []uint64{1, 2} {
 		writeMasterFrame(t, serverConn, &wire.Frame{
@@ -1035,7 +1035,7 @@ func TestPeerConn_ConcurrentWrites(t *testing.T) {
 	const numPeers = 8
 	const reqPerPeer = 16
 
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	peers := make([]*PeerConn, numPeers)
 	for i := 0; i < numPeers; i++ {
 		cid := uint64(100 + i)
@@ -1162,7 +1162,7 @@ func TestPeerConn_SendNewBlock(t *testing.T) {
 
 	const clusterPeerID uint64 = 91
 	const branch uint32 = 0x00010001
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -1197,7 +1197,7 @@ func TestPeerConn_SendNewMinorBlockHeaderList(t *testing.T) {
 
 	const clusterPeerID uint64 = 92
 	const branch uint32 = 0x00010001
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -1235,7 +1235,7 @@ func TestPeerConn_SendTransactionList(t *testing.T) {
 
 	const clusterPeerID uint64 = 93
 	const branch uint32 = 0x00010001
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -1270,7 +1270,7 @@ func TestPeerConn_GetMinorBlockList(t *testing.T) {
 
 	const clusterPeerID uint64 = 101
 	const branch uint32 = 0x00010001
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
@@ -1312,7 +1312,7 @@ func TestPeerConn_GetMinorBlockHeaderList(t *testing.T) {
 
 	const clusterPeerID uint64 = 102
 	const branch uint32 = 0x00010001
-	fake := client.slaveConnHandler.(*fakeSlaveService)
+	fake := client.peerResolver.(*fakeSlaveService)
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
