@@ -10,7 +10,7 @@ import (
 
 // The fields below define the QKC-specific low-level database schema.
 var (
-	qkcPrefix = []byte("q_") // qkcPrefix + QKC-specific prefix + key parts -> QKC namespaced key
+	qkcPrefix = []byte("qkc_") // qkcPrefix + QKC-specific prefix + key parts -> QKC namespaced key
 
 	rootHashPrefixQKC        = []byte("rn")      // qkcPrefix + rootHashPrefixQKC + num (uint64 big endian) -> root canonical hash
 	minorHashPrefixQKC       = []byte("mn")      // qkcPrefix + minorHashPrefixQKC + num (uint64 big endian) -> minor canonical hash
