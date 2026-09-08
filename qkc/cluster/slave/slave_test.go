@@ -10,7 +10,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,33 +26,24 @@ var (
 	testSlaveShards = []uint32{0x00010001, 0x00020001}
 )
 
-// commTestHandler is the test composition layer: it serves the business RPCs
+// commTestHandler is the test business backend: it serves the business RPCs
 // with the established fakeMasterHandler test double. The master's
 // communication-topology commands (CONNECT_TO_SLAVES,
-// CREATE/DESTROY_CLUSTER_PEER_CONNECTION) are served directly by the SlaveComm
-// under test, not forwarded through this handler.
+// CREATE/DESTROY_CLUSTER_PEER_CONNECTION, PING CreateShards) are served by the
+// SlaveComm under test via the masterHandler facade, not forwarded here.
 type commTestHandler struct {
 	*fakeMasterHandler
-	// reportedBranches is what the next CreateShards reports as created,
-	// standing in for the branches the business runtime reports back.
-	reportedBranches atomic.Pointer[[]uint32]
 }
 
-// reportCreatedBranches arms the branches the next CreateShards reports.
-func (h *commTestHandler) reportCreatedBranches(branches ...uint32) {
-	h.reportedBranches.Store(&branches)
-}
-
-// CreateShards delegates to the embedded double for counting/error injection
-// and returns the armed branch report.
+// CreateShards arms the created-branch report after delegating count/error
+// injection to the embedded double. Under Go's GENESIS.ROOT_HEIGHT 0
+// simplification the business runtime always reports every configured shard as
+// created, unless it fails (errCreateShards).
 func (h *commTestHandler) CreateShards(rootTip *wire.RawBytes) ([]uint32, error) {
-	if _, err := h.fakeMasterHandler.CreateShards(rootTip); err != nil {
+	if err := h.fakeMasterHandler.CreateShards(rootTip); err != nil {
 		return nil, err
 	}
-	if b := h.reportedBranches.Load(); b != nil {
-		return *b, nil
-	}
-	return nil, nil
+	return append([]uint32(nil), testSlaveShards...), nil
 }
 
 // testRootTip returns an opaque RootTip payload. The communication layer never
@@ -98,6 +88,7 @@ func startTestSlaveCommWithBranches(t *testing.T, preCreated []uint32) (*SlaveCo
 			Port:                   port,
 			Logger:                 log.New(),
 			Master:                 handler,
+			ShardCreator:           handler.CreateShards,
 			Peer:                   stubPeerHandler{},
 			Xshard:                 testXshardHandler{},
 		})
@@ -381,10 +372,10 @@ func TestSlaveComm_CreateAndDestroyPeerConn(t *testing.T) {
 }
 
 // TestSlaveComm_PingDelegatesCreateShardsAndBackfills verifies the PING
-// orchestration chain: MasterConn → SlaveComm.CreateShardsAndPeerConnections →
-// business MasterHandler.CreateShards, followed by an idempotent peer-registry
-// convergence (every known cluster peer × every local branch), and that
-// multiple peers coexist without cross-talk.
+// orchestration chain: MasterConn → masterHandler.CreateShards →
+// SlaveComm.createShards → business MasterHandler.CreateShards, followed by an
+// idempotent peer-registry convergence (every known cluster peer × every local
+// branch), and that multiple peers coexist without cross-talk.
 func TestSlaveComm_PingDelegatesCreateShardsAndBackfills(t *testing.T) {
 	comm, addr := startTestSlaveComm(t)
 	masterConn := dialComm(t, addr)
@@ -432,25 +423,6 @@ func TestSlaveComm_PingDelegatesCreateShardsAndBackfills(t *testing.T) {
 	}
 }
 
-// TestSlaveComm_CreateShardsErrorClosesComm verifies that a business
-// CreateShards failure propagates out of CreateShardsAndPeerConnections as a
-// connection-level error: the PING handler fails, the master connection
-// closes, and the shutdown cascade runs.
-func TestSlaveComm_CreateShardsErrorClosesComm(t *testing.T) {
-	comm, addr := startTestSlaveComm(t)
-	handler := comm.cfg.Master.(*commTestHandler)
-	handler.errCreateShards = errors.New("boom")
-
-	masterConn := dialComm(t, addr)
-
-	sendPingRootTipNoResponse(t, masterConn, 1, testRootTip())
-	select {
-	case <-comm.WaitStopped():
-	case <-time.After(10 * time.Second):
-		t.Fatal("CreateShards error did not trigger shutdown")
-	}
-}
-
 // TestSlaveComm_PingAfterDestroyKeepsPeerGone verifies that a later PING
 // (backfill) does not resurrect a destroyed cluster peer id: it has been
 // removed from the known-peer set, so convergence has nothing to create.
@@ -473,9 +445,8 @@ func TestSlaveComm_PingAfterDestroyKeepsPeerGone(t *testing.T) {
 		t.Fatal("PeerConn closed by DESTROY was not closed")
 	}
 
-	// The business runtime reports a fresh branch: there is no known peer
-	// left, so nothing is resurrected.
-	handler.reportCreatedBranches(testSlaveShards...)
+	// The first PING after the DESTROY creates every configured shard, but the
+	// peer id is gone from the known set, so nothing is resurrected.
 	sendPingRootTip(t, masterConn, 2, testRootTip())
 	if got := handler.createShardsCalls.Load(); got != 1 {
 		t.Fatalf("business CreateShards calls: got %d, want 1", got)
@@ -485,53 +456,45 @@ func TestSlaveComm_PingAfterDestroyKeepsPeerGone(t *testing.T) {
 	}
 }
 
-// TestSlaveComm_CreatePeerOnlyOnCreatedBranches verifies the shard/peer model:
-// a cluster peer announced while nothing is created gets no PeerConn (a branch
-// present in FullShardIDList but not created must not be connected), and each
-// branch a later CreateShards reports backfills exactly that branch for the
-// already-known peer (py: Shard.create_peer_shard_connections per new shard).
-func TestSlaveComm_CreatePeerOnlyOnCreatedBranches(t *testing.T) {
+// TestSlaveComm_CreateShardsEquipsEveryConfiguredBranch verifies the shard/peer
+// model under Go's GENESIS.ROOT_HEIGHT 0 simplification: a PING's CreateShards
+// creates every configured shard at once, and each announced cluster peer is
+// equipped with a PeerConn on every local branch (py:
+// Shard.create_peer_shard_connections per shard). A peer announced before any
+// PING gets no PeerConn until the first PING equips it; a peer announced
+// afterwards lands on every already-created branch.
+func TestSlaveComm_CreateShardsEquipsEveryConfiguredBranch(t *testing.T) {
 	comm, addr := startTestSlaveCommWithBranches(t, nil)
 	handler := comm.cfg.Master.(*commTestHandler)
 	masterConn := dialComm(t, addr)
 
-	// CREATE before any branch exists: the peer is registered, nothing is
-	// connected even though both branches are in FullShardIDList.
 	const cid = 21
+	// CREATE before any PING: no branch exists yet, so the peer is registered
+	// but not connected even though both branches are in FullShardIDList.
 	if code := sendCreatePeer(t, masterConn, 1, cid); code != 0 {
 		t.Fatalf("create returned error_code=%d", code)
 	}
 	if got := comm.peerCountFor(cid); got != 0 {
-		t.Fatalf("cluster_peer_id %d has %d PeerConns before any branch exists, want 0", cid, got)
+		t.Fatalf("cluster_peer_id %d has %d PeerConns before any PING, want 0", cid, got)
 	}
 
-	// The business runtime reports b1 only: b2 stays unconnected.
-	handler.reportCreatedBranches(testSlaveShards[0])
+	// The first PING creates every configured shard and backfills the peer.
 	sendPingRootTip(t, masterConn, 2, testRootTip())
-	if pc := comm.lookupPeer(cid, testSlaveShards[0]); pc == nil {
-		t.Fatal("no PeerConn on created branch b1")
+	if got := handler.createShardsCalls.Load(); got != 1 {
+		t.Fatalf("business CreateShards calls: got %d, want 1", got)
 	}
-	if pc := comm.lookupPeer(cid, testSlaveShards[1]); pc != nil {
-		t.Fatal("PeerConn created on branch b2 before the branch existed")
-	}
-	if got := comm.peerCountFor(cid); got != 1 {
-		t.Fatalf("cluster_peer_id %d has %d PeerConns, want 1", cid, got)
-	}
-
-	// The root chain advances: the business runtime creates b2 and reports it,
-	// which backfills the pre-existing peer.
-	handler.reportCreatedBranches(testSlaveShards[1])
-	sendPingRootTip(t, masterConn, 3, testRootTip())
-	if pc := comm.lookupPeer(cid, testSlaveShards[1]); pc == nil {
-		t.Fatal("pre-existing peer was not backfilled after branch b2 was created")
+	for _, branch := range testSlaveShards {
+		if pc := comm.lookupPeer(cid, branch); pc == nil {
+			t.Fatalf("no PeerConn on branch 0x%x after PING", branch)
+		}
 	}
 	if got := comm.peerCountFor(cid); got != len(testSlaveShards) {
-		t.Fatalf("cluster_peer_id %d has %d PeerConns after backfill, want %d", cid, got, len(testSlaveShards))
+		t.Fatalf("cluster_peer_id %d has %d PeerConns, want %d", cid, got, len(testSlaveShards))
 	}
 
-	// A second peer announced afterwards lands on both created branches.
+	// A second peer announced afterwards lands on every created branch.
 	const cid2 = 22
-	if code := sendCreatePeer(t, masterConn, 4, cid2); code != 0 {
+	if code := sendCreatePeer(t, masterConn, 3, cid2); code != 0 {
 		t.Fatalf("create returned error_code=%d", code)
 	}
 	if got := comm.peerCountFor(cid2); got != len(testSlaveShards) {
@@ -542,10 +505,12 @@ func TestSlaveComm_CreatePeerOnlyOnCreatedBranches(t *testing.T) {
 	}
 }
 
-// TestSlaveComm_PingWithoutCreatedBranchesLeavesTopology covers the "root
-// height below every genesis height" case: CreateShards reports no branch, so
-// neither the created-branch set nor the peer registry changes.
-func TestSlaveComm_PingWithoutCreatedBranchesLeavesTopology(t *testing.T) {
+// TestSlaveComm_CreateShardsFailureLeavesTopology verifies that a business
+// CreateShards failure aborts before any branch is recorded or any PeerConn is
+// created: the topology (localBranches, peer registry) is unchanged. The PING
+// handler fails and the connection closes, so the business method runs exactly
+// once (py: the create_shards exception propagates through handle_ping).
+func TestSlaveComm_CreateShardsFailureLeavesTopology(t *testing.T) {
 	comm, addr := startTestSlaveCommWithBranches(t, nil)
 	handler := comm.cfg.Master.(*commTestHandler)
 	masterConn := dialComm(t, addr)
@@ -555,9 +520,13 @@ func TestSlaveComm_PingWithoutCreatedBranchesLeavesTopology(t *testing.T) {
 		t.Fatalf("create returned error_code=%d", code)
 	}
 
-	handler.reportCreatedBranches()
-	sendPingRootTip(t, masterConn, 2, testRootTip())
-
+	handler.errCreateShards = errors.New("boom")
+	sendPingRootTipNoResponse(t, masterConn, 2, testRootTip())
+	select {
+	case <-comm.WaitStopped():
+	case <-time.After(10 * time.Second):
+		t.Fatal("CreateShards error did not trigger shutdown")
+	}
 	if got := handler.createShardsCalls.Load(); got != 1 {
 		t.Fatalf("business CreateShards calls: got %d, want 1", got)
 	}
@@ -583,8 +552,10 @@ func TestSlaveComm_PingCreatesEveryReportedBranch(t *testing.T) {
 		t.Fatalf("create returned error_code=%d", code)
 	}
 
-	handler.reportCreatedBranches(testSlaveShards...)
 	sendPingRootTip(t, masterConn, 2, testRootTip())
+	if got := handler.createShardsCalls.Load(); got != 1 {
+		t.Fatalf("business CreateShards calls: got %d, want 1", got)
+	}
 
 	if got := comm.localBranchCount(); got != len(testSlaveShards) {
 		t.Fatalf("created-branch set holds %d branches, want %d", got, len(testSlaveShards))
@@ -599,6 +570,9 @@ func TestSlaveComm_PingCreatesEveryReportedBranch(t *testing.T) {
 	// A repeated report is a no-op: the branch is already created, so the
 	// existing PeerConn is kept rather than rebuilt.
 	sendPingRootTip(t, masterConn, 3, testRootTip())
+	if got := handler.createShardsCalls.Load(); got != 2 {
+		t.Fatalf("business CreateShards calls: got %d, want 2", got)
+	}
 	if got := comm.peerCountFor(cid); got != len(testSlaveShards) {
 		t.Fatalf("repeated report changed cluster_peer_id %d to %d PeerConns", cid, got)
 	}
@@ -724,6 +698,12 @@ func TestSlaveComm_MasterCloseCascade(t *testing.T) {
 		t.Fatal("master close did not trigger shutdown")
 	}
 
+	// closeAllPeers runs synchronously after WaitStopped resolves; wait for the
+	// registry to actually drain before asserting the cascade closed every
+	// PeerConn.
+	waitFor(t, "peer registry drain after master close", func() bool {
+		return comm.peerCount() == 0
+	})
 	if pc := comm.lookupPeer(cid, testSlaveShards[0]); pc != nil {
 		t.Fatal("PeerConn survived the master close cascade")
 	}

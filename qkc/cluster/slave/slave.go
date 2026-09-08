@@ -16,6 +16,84 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 )
 
+// MasterBackend defines the business operations used by SlaveComm.
+// It is implemented by the external slave runtime; SlaveComm consumes
+// these operations and performs the communication-side orchestration.
+type MasterBackend interface {
+	// ── business RPCs ──
+	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
+	GenTx(req *wire.GenTxRequest) (*wire.GenTxResponse, error)
+	AddRootBlock(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error)
+	GetEcoInfoList(req *wire.GetEcoInfoListRequest) (*wire.GetEcoInfoListResponse, error)
+	GetNextBlockToMine(req *wire.GetNextBlockToMineRequest) (*wire.GetNextBlockToMineResponse, error)
+	AddMinorBlock(req *wire.AddMinorBlockRequest) (*wire.AddMinorBlockResponse, error)
+	GetUnconfirmedHeaders(req *wire.GetUnconfirmedHeadersRequest) (*wire.GetUnconfirmedHeadersResponse, error)
+	GetAccountData(req *wire.GetAccountDataRequest) (*wire.GetAccountDataResponse, error)
+	AddTransaction(req *wire.AddTransactionRequest) (*wire.AddTransactionResponse, error)
+	GetMinorBlock(req *wire.GetMinorBlockRequest) (*wire.GetMinorBlockResponse, error)
+	GetTransaction(req *wire.GetTransactionRequest) (*wire.GetTransactionResponse, error)
+	SyncMinorBlockList(req *wire.SyncMinorBlockListRequest) (*wire.SyncMinorBlockListResponse, error)
+	ExecuteTransaction(req *wire.ExecuteTransactionRequest) (*wire.ExecuteTransactionResponse, error)
+	GetTransactionReceipt(req *wire.GetTransactionReceiptRequest) (*wire.GetTransactionReceiptResponse, error)
+	GetTransactionListByAddress(req *wire.GetTransactionListByAddressRequest) (*wire.GetTransactionListByAddressResponse, error)
+	GetLogs(req *wire.GetLogRequest) (*wire.GetLogResponse, error)
+	EstimateGas(req *wire.EstimateGasRequest) (*wire.EstimateGasResponse, error)
+	GetStorageAt(req *wire.GetStorageRequest) (*wire.GetStorageResponse, error)
+	GetCode(req *wire.GetCodeRequest) (*wire.GetCodeResponse, error)
+	GasPrice(req *wire.GasPriceRequest) (*wire.GasPriceResponse, error)
+	GetWork(req *wire.GetWorkRequest) (*wire.GetWorkResponse, error)
+	SubmitWork(req *wire.SubmitWorkRequest) (*wire.SubmitWorkResponse, error)
+	CheckMinorBlock(req *wire.CheckMinorBlockRequest) (*wire.CheckMinorBlockResponse, error)
+	GetAllTransactions(req *wire.GetAllTransactionsRequest) (*wire.GetAllTransactionsResponse, error)
+	GetRootChainStakes(req *wire.GetRootChainStakesRequest) (*wire.GetRootChainStakesResponse, error)
+	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
+}
+
+// ── masterHandler facade ─────────────────────────────────────────────────────
+//
+// masterHandler is the MasterHandler SlaveComm installs into MasterConn. It
+// combines SlaveComm's communication orchestration with the external business
+// backend: the topology & shard-activation commands below are served by
+// SlaveComm itself; the business RPCs are embedded MasterBackend methods.
+type masterHandler struct {
+	MasterBackend
+	comm *SlaveComm
+}
+
+var _ MasterHandler = (*masterHandler)(nil)
+
+// newMasterHandler builds the MasterHandler MasterConn is configured with.
+func (s *SlaveComm) newMasterHandler() MasterHandler {
+	return &masterHandler{
+		MasterBackend: s.cfg.Master,
+		comm:          s,
+	}
+}
+
+// ── topology & shard activation: served by SlaveComm ──
+
+// CreateShards handles a PING root tip: it creates the local shards and equips
+// them with PeerConns.
+func (h *masterHandler) CreateShards(rootTip *wire.RawBytes) error {
+	return h.comm.createShards(rootTip)
+}
+
+// ConnectToSlaves dials the advertised slaves into the xshard pool.
+func (h *masterHandler) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
+	return h.comm.connectToSlaves(req)
+}
+
+// CreateClusterPeerConnection registers a new cluster peer and creates a
+// PeerConn for it on every local branch.
+func (h *masterHandler) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
+	return h.comm.createClusterPeerConnection(req)
+}
+
+// DestroyClusterPeerConnection removes a cluster peer and closes its PeerConns.
+func (h *masterHandler) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
+	return h.comm.destroyClusterPeerConnection(req)
+}
+
 // SlaveConfig holds the runtime configuration of a SlaveComm together with the
 // handlers it delegates protocol work to. The slave runtime implements the
 // handlers; SlaveComm only wires and owns the communication resources.
@@ -33,9 +111,11 @@ type SlaveConfig struct {
 	// MaxPayloadSize limits incoming frame payload size; 0 disables the limit.
 	MaxPayloadSize uint32
 
-	// Master serves business RPCs routed through the MasterConn; CreateShards
-	// creates the local shard runtime and reports its branches.
-	Master MasterHandler
+	// ShardCreator creates the business runtime's shards for a root tip
+	// and returns the newly-created branches.
+	ShardCreator func(rootTip *wire.RawBytes) ([]uint32, error)
+	// Master handles business RPCs routed through MasterConn.
+	Master MasterBackend
 	// Peer builds and serves slave-to-slave PeerConns for virtual cluster peers.
 	Peer PeerHandler
 	// Xshard serves requests received through XshardConns.
@@ -64,6 +144,9 @@ func (cfg *SlaveConfig) Validate() error {
 	if cfg.Master == nil {
 		return errors.New("master handler must not be nil")
 	}
+	if cfg.ShardCreator == nil {
+		return errors.New("create shards handler must not be nil")
+	}
 	if cfg.Peer == nil {
 		return errors.New("peer handler must not be nil")
 	}
@@ -73,15 +156,11 @@ func (cfg *SlaveConfig) Validate() error {
 	return nil
 }
 
-// SlaveComm owns the slave's communication resources: the listener, MasterConn,
-// XshardPool and the virtual cluster-peer topology (py: SlaveServer minus the
-// business state).
+// SlaveComm owns the slave's communication resources: the listener,
+// MasterConn, XshardPool, and virtual cluster-peer topology.
 //
-// Lifecycle: New → Start → Stop. Start is owner-called exactly once before Stop;
-// Stop is idempotent, triggered by either the owner or master loss, and returns
-// without waiting for the goroutines it unblocks. There is no "ready" state:
-// whether the master wire is usable is the MasterConn's own connection state (py:
-// ConnectionState), never mirrored here.
+// Lifecycle: New → Start → Stop. Start is called once by the owner.
+// Stop is idempotent and returns without waiting for goroutines to exit.
 type SlaveComm struct {
 	cfg    SlaveConfig
 	logger log.Logger
@@ -101,8 +180,7 @@ type SlaveComm struct {
 	// Peer topology, guarded by peersMu. Invariant:
 	// peers[p][b] exists ⇒ p ∈ clusterPeerIDs ∧ b ∈ localBranches.
 	peersMu sync.RWMutex
-	// localBranches is the set of branches CreateShards reported (py:
-	// slave_server.shards keys) — never inferred from FullShardIDList.
+	// localBranches is the set of branches currently served by this slave.
 	localBranches map[uint32]struct{}
 	// clusterPeerIDs is the set of announced virtual cluster peers (py:
 	// SlaveServer.cluster_peer_ids).
@@ -122,11 +200,10 @@ type SlaveComm struct {
 	stopped chan struct{}
 }
 
-var _ SlaveConnHandler = (*SlaveComm)(nil)
+var _ PeerResolver = (*SlaveComm)(nil)
 
 // NewSlaveComm constructs a fully-initialized but unstarted SlaveComm. An error
-// here means the object is unusable and discarded. localBranches is populated by
-// CreateShardsAndPeerConnections once the business runtime reports its branches.
+// here means the object is unusable and discarded.
 func NewSlaveComm(cfg SlaveConfig) (*SlaveComm, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid slave config: %w", err)
@@ -314,12 +391,23 @@ func (s *SlaveComm) GetPeerMinorBlockHeaderListWithSkip(ctx context.Context, clu
 	return pc.GetMinorBlockHeaderListWithSkip(ctx, req)
 }
 
-// ── SlaveConnHandler: master-command orchestration ───────────────────────────
+// LookupPeer routes virtual peer frames from the master to the PeerConn serving
+// (cluster_peer_id, branch), or nil when there is none (py: NULL_CONNECTION).
+func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+	if bm, ok := s.peers[clusterPeerID]; ok {
+		return bm[branch]
+	}
+	return nil
+}
 
-// ConnectToSlaves dials every advertised slave into the xshard pool (py:
-// slave_connection_manager.connect_to_slave). Per-entry failures are recorded in
-// the response result list so the master connection stays up.
-func (s *SlaveComm) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
+// ── Internals ────────────────────────────────────────────────────────────────
+
+// connectToSlaves dials every advertised slave into the xshard pool.
+// Per-entry failures are recorded in the response result list so the master
+// connection stays up.
+func (s *SlaveComm) connectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
 	resultList := make([]wire.PrependedSizeBytes4, len(req.SlaveInfoList))
 	for i := range req.SlaveInfoList {
 		info := req.SlaveInfoList[i]
@@ -330,15 +418,12 @@ func (s *SlaveComm) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.Con
 	return &wire.ConnectToSlavesResponse{ResultList: resultList}, nil
 }
 
-// CreateShardsAndPeerConnections orchestrates the master's PING (py: handle_ping →
-// slave_server.create_shards): MasterHandler.CreateShards owns the creation decision
-// and reports the branches it created; each is recorded in localBranches and equipped
-// with a PeerConn for every announced cluster peer (py:
-// Shard.create_peer_shard_connections). The communication layer never re-derives the
-// creation decision from RootTip or FullShardIDList; an already-present branch is skipped.
-func (s *SlaveComm) CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error {
+// createShards records newly-created branches in localBranches and equips
+// each with a PeerConn for every announced cluster peer. Existing branches
+// are skipped.
+func (s *SlaveComm) createShards(rootTip *wire.RawBytes) error {
 	// A business failure fails the PING before any topology change.
-	createdBranches, err := s.cfg.Master.CreateShards(rootTip)
+	createdBranches, err := s.cfg.ShardCreator(rootTip)
 	if err != nil {
 		return err
 	}
@@ -372,12 +457,11 @@ func (s *SlaveComm) CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error
 	return nil
 }
 
-// CreateClusterPeerConnection registers a new cluster peer and creates a
-// PeerConn for it on every currently-created local branch (py: slave.py
-// CREATE_CLUSTER_PEER_CONNECTION). It always succeeds from the master's point
-// of view (error_code 0); duplicates are logged and skipped. Branches not
-// created yet are equipped later by CreateShardsAndPeerConnections.
-func (s *SlaveComm) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
+// createClusterPeerConnection registers a new cluster peer and creates a
+// PeerConn for it on every currently-created local branch. It always succeeds
+// from the master's point of view (error_code 0); duplicates are logged and
+// skipped. Branches not created yet are equipped later by createShards.
+func (s *SlaveComm) createClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
 	id := req.ClusterPeerID
 
 	s.peersMu.Lock()
@@ -401,11 +485,10 @@ func (s *SlaveComm) CreateClusterPeerConnection(req *wire.CreateClusterPeerConne
 	return &wire.CreateClusterPeerConnectionResponse{}, nil
 }
 
-// DestroyClusterPeerConnection deregisters the cluster peer and closes every
-// PeerConn of it (py: slave.py DESTROY_CLUSTER_PEER_CONNECTION). Fire-and-
-// forget; destroying an unknown id is a no-op. Connections are closed outside
-// peersMu.
-func (s *SlaveComm) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
+// destroyClusterPeerConnection deregisters the cluster peer and closes every
+// PeerConn of it. Fire-and-forget; destroying an unknown id is a no-op.
+// Connections are closed outside peersMu.
+func (s *SlaveComm) destroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
 	id := req.ClusterPeerID
 
 	s.peersMu.Lock()
@@ -423,19 +506,6 @@ func (s *SlaveComm) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerCon
 	}
 	return nil
 }
-
-// LookupPeer routes virtual peer frames from the master to the PeerConn serving
-// (cluster_peer_id, branch), or nil when there is none (py: NULL_CONNECTION).
-func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-	if bm, ok := s.peers[clusterPeerID]; ok {
-		return bm[branch]
-	}
-	return nil
-}
-
-// ── Internals ────────────────────────────────────────────────────────────────
 
 // acceptLoop accepts inbound connections and is the single owner of
 // classification, encoding py's "if not self.master" as its own serialized
@@ -478,8 +548,8 @@ func (s *SlaveComm) runMasterConn(conn net.Conn) {
 		LocalID:              s.cfg.ID,
 		LocalFullShardIDList: s.cfg.FullShardIDList,
 		ClusterShardIDs:      s.cfg.ClusterFullShardIDList,
-		SlaveConnHandler:     s,
-		Handler:              s.cfg.Master,
+		Handler:              s.newMasterHandler(),
+		PeerResolver:         s,
 		Logger:               s.logger,
 	})
 	if err != nil {

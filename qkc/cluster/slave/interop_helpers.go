@@ -83,9 +83,9 @@ func startTestSlave(t *testing.T, id string, shards []uint32) (*SlaveComm, int) 
 		FullShardIDList: append([]uint32(nil), shards...),
 		Port:            port,
 		MaxPayloadSize:  0,
+		Logger:          testlog.Logger(t, log.LvlInfo),
 	}
-	logger := testlog.Logger(t, log.LvlInfo)
-	srv, err := NewSlaveComm(cfg, logger)
+	srv, err := NewSlaveComm(cfg)
 	if err != nil {
 		t.Fatalf("new slave server: %v", err)
 	}
