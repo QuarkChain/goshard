@@ -15,15 +15,26 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
-// SlaveConnHandler handles communication-layer operations dispatched by
-// MasterConn. Implementations may coordinate shard, peer, and xshard
-// connection lifecycle.
-type SlaveConnHandler interface {
-	// CreateShardsAndPeerConnections creates local shards through the business
-	// handler and equips every newly created branch with PeerConns.
-	//
-	// The concrete orchestration is implemented outside MasterConn.
+// CommHandler handles communication-related operations dispatched by
+// MasterConn: topology commands and shard activation.
+//
+// Shard activation has exactly two wire triggers, mirroring Python's
+// quarkchain.cluster.slave (both funnel into SlaveServer.create_shards):
+//
+//	PING(root_tip)             -> CreateShardsAndPeerConnections
+//	ADD_ROOT_BLOCK(root_block) -> AddRootBlockAndCreateShards
+//
+// Both paths express the same shard-activation semantic. A concrete
+// implementation MUST keep both activation paths behaviorally equivalent
+// for the same root block.
+type CommHandler interface {
+	// CreateShardsAndPeerConnections handles shard activation for the
+	// PING(root_tip) path.
 	CreateShardsAndPeerConnections(rootTip *wire.RawBytes) error
+
+	// AddRootBlockAndCreateShards handles an ADD_ROOT_BLOCK request,
+	// including any shard activation triggered by the root block.
+	AddRootBlockAndCreateShards(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error)
 
 	// ConnectToSlaves connects to the slaves advertised by the master.
 	ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error)
@@ -41,26 +52,8 @@ type SlaveConnHandler interface {
 // runtime state. It is implemented by the composition layer and injected
 // into SlaveComm.
 type MasterHandler interface {
-	// CreateShards creates the local shards the master's PING RootTip makes
-	// eligible and returns the full shard ids it actually created in this
-	// call, which become this slave's new local branches.
-	//
-	// The handler owns the shard-creation decision (py: slave_server.create_shards):
-	// it decodes the RootTip, restricts to the shards this slave covers and
-	// those having a GENESIS config, skips shards already created, and keeps
-	// only those whose GENESIS.ROOT_HEIGHT the root height has reached. One
-	// call may therefore create zero, one or several shards. Returning an
-	// empty slice is the normal "nothing became eligible" outcome.
-	//
-	// The return value is a Go-internal contract, not a wire field: Python
-	// shares the created set through slave_server.shards, which the Go
-	// business/communication boundary cannot read, so the fact is handed
-	// over explicitly here.
-	CreateShards(rootTip *wire.RawBytes) ([]uint32, error)
-
 	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
 	GenTx(req *wire.GenTxRequest) (*wire.GenTxResponse, error)
-	AddRootBlock(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error)
 	GetEcoInfoList(req *wire.GetEcoInfoListRequest) (*wire.GetEcoInfoListResponse, error)
 	GetNextBlockToMine(req *wire.GetNextBlockToMineRequest) (*wire.GetNextBlockToMineResponse, error)
 	AddMinorBlock(req *wire.AddMinorBlockRequest) (*wire.AddMinorBlockResponse, error)
@@ -86,7 +79,7 @@ type MasterHandler interface {
 	GetTotalBalance(req *wire.GetTotalBalanceRequest) (*wire.GetTotalBalanceResponse, error)
 }
 
-// MasterConnConfig configures a MasterConn. Conn, SlaveConnHandler and Handler
+// MasterConnConfig configures a MasterConn. Conn, CommHandler and Handler
 // are required; Logger defaults to log.Root().
 type MasterConnConfig struct {
 	// Conn is the accepted TCP connection from the master. The slave never
@@ -102,10 +95,10 @@ type MasterConnConfig struct {
 	LocalID              []byte
 	LocalFullShardIDList []uint32
 
-	// SlaveConnHandler handles communication-layer operations dispatched by
+	// CommHandler handles communication-layer operations dispatched by
 	// MasterConn, including topology and peer-connection lifecycle commands.
 	// Its concrete implementation may be provided by SlaveComm.
-	SlaveConnHandler SlaveConnHandler
+	CommHandler CommHandler
 
 	// Handler handles master commands that operate on runtime-owned state.
 	// The concrete implementation is provided by the composition layer.
@@ -122,7 +115,7 @@ type MasterConn struct {
 	*conn.BaseConn
 
 	handler              MasterHandler
-	slaveConnHandler     SlaveConnHandler
+	commHandler          CommHandler
 	localID              []byte
 	localFullShardIDList []uint32
 }
@@ -133,8 +126,8 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	if cfg.Conn == nil {
 		return nil, errors.New("master connection must not be nil")
 	}
-	if cfg.SlaveConnHandler == nil {
-		return nil, errors.New("master slave conn handler must not be nil")
+	if cfg.CommHandler == nil {
+		return nil, errors.New("master comm handler must not be nil")
 	}
 	if cfg.Handler == nil {
 		return nil, errors.New("master handler must not be nil")
@@ -144,7 +137,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	}
 
 	mc := &MasterConn{
-		slaveConnHandler:     cfg.SlaveConnHandler,
+		commHandler:          cfg.CommHandler,
 		handler:              cfg.Handler,
 		localID:              append([]byte(nil), cfg.LocalID...),
 		localFullShardIDList: append([]uint32(nil), cfg.LocalFullShardIDList...),
@@ -153,7 +146,7 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 	mc.BaseConn = conn.NewBaseConn(conn.Config{
 		Transport: conn.NewTCPTransport(cfg.Conn, readFrame, wire.WriteFrame),
 		Serializers: map[byte]*conn.OpSerializer{
-			// §1 Cluster initialisation
+			// §1 Master → Slave (handshake & runtime)
 			byte(wire.ClusterOpPing):                         conn.OpSerializerFor[wire.PingRequest, wire.PongResponse](byte(wire.ClusterOpPong)),
 			byte(wire.ClusterOpConnectToSlavesRequest):       conn.OpSerializerFor[wire.ConnectToSlavesRequest, wire.ConnectToSlavesResponse](byte(wire.ClusterOpConnectToSlavesResponse)),
 			byte(wire.ClusterOpAddRootBlockRequest):          conn.OpSerializerFor[wire.AddRootBlockRequest, wire.AddRootBlockResponse](byte(wire.ClusterOpAddRootBlockResponse)),
@@ -200,39 +193,39 @@ func NewMasterConn(cfg MasterConnConfig) (*MasterConn, error) {
 			byte(wire.ClusterOpGetTotalBalanceRequest):    conn.OpSerializerFor[wire.GetTotalBalanceRequest, wire.GetTotalBalanceResponse](byte(wire.ClusterOpGetTotalBalanceResponse)),
 		},
 		Handlers: map[byte]conn.TypedHandler{
-			// ── Communication handlers ─────────────────────────────────────
-			byte(wire.ClusterOpPing): mc.handlePing,
-
-			// ── Inbound handlers (delegated to MasterHandler / service layer) ─
+			// Communication / topology handlers (delegated to CommHandler).
+			byte(wire.ClusterOpPing):                                mc.handlePing,
+			byte(wire.ClusterOpConnectToSlavesRequest):              mc.handleConnectToSlaves,
 			byte(wire.ClusterOpCreateClusterPeerConnectionRequest):  mc.handleCreateClusterPeerConnection,
 			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): mc.handleDestroyClusterPeerConnection,
-			byte(wire.ClusterOpConnectToSlavesRequest):              mc.handleConnectToSlaves,
-			byte(wire.ClusterOpMineRequest):                         mc.handleMine,
-			byte(wire.ClusterOpGenTxRequest):                        mc.handleGenTx,
 			byte(wire.ClusterOpAddRootBlockRequest):                 mc.handleAddRootBlock,
-			byte(wire.ClusterOpGetEcoInfoListRequest):               mc.handleGetEcoInfoList,
-			byte(wire.ClusterOpGetNextBlockToMineRequest):           mc.handleGetNextBlockToMine,
-			byte(wire.ClusterOpAddMinorBlockRequest):                mc.handleAddMinorBlock,
-			byte(wire.ClusterOpGetUnconfirmedHeadersRequest):        mc.handleGetUnconfirmedHeaders,
-			byte(wire.ClusterOpGetAccountDataRequest):               mc.handleGetAccountData,
-			byte(wire.ClusterOpAddTransactionRequest):               mc.handleAddTransaction,
-			byte(wire.ClusterOpGetMinorBlockRequest):                mc.handleGetMinorBlock,
-			byte(wire.ClusterOpGetTransactionRequest):               mc.handleGetTransaction,
-			byte(wire.ClusterOpSyncMinorBlockListRequest):           mc.handleSyncMinorBlockList,
-			byte(wire.ClusterOpExecuteTransactionRequest):           mc.handleExecuteTransaction,
-			byte(wire.ClusterOpGetTransactionReceiptRequest):        mc.handleGetTransactionReceipt,
-			byte(wire.ClusterOpGetTransactionListByAddressRequest):  mc.handleGetTransactionListByAddress,
-			byte(wire.ClusterOpGetLogRequest):                       mc.handleGetLogs,
-			byte(wire.ClusterOpEstimateGasRequest):                  mc.handleEstimateGas,
-			byte(wire.ClusterOpGetStorageRequest):                   mc.handleGetStorageAt,
-			byte(wire.ClusterOpGetCodeRequest):                      mc.handleGetCode,
-			byte(wire.ClusterOpGasPriceRequest):                     mc.handleGasPrice,
-			byte(wire.ClusterOpGetWorkRequest):                      mc.handleGetWork,
-			byte(wire.ClusterOpSubmitWorkRequest):                   mc.handleSubmitWork,
-			byte(wire.ClusterOpCheckMinorBlockRequest):              mc.handleCheckMinorBlock,
-			byte(wire.ClusterOpGetAllTransactionsRequest):           mc.handleGetAllTransactions,
-			byte(wire.ClusterOpGetRootChainStakesRequest):           mc.handleGetRootChainStakes,
-			byte(wire.ClusterOpGetTotalBalanceRequest):              mc.handleGetTotalBalance,
+
+			// Business RPC handlers (delegated to MasterHandler).
+			byte(wire.ClusterOpMineRequest):                        mc.handleMine,
+			byte(wire.ClusterOpGenTxRequest):                       mc.handleGenTx,
+			byte(wire.ClusterOpGetEcoInfoListRequest):              mc.handleGetEcoInfoList,
+			byte(wire.ClusterOpGetNextBlockToMineRequest):          mc.handleGetNextBlockToMine,
+			byte(wire.ClusterOpAddMinorBlockRequest):               mc.handleAddMinorBlock,
+			byte(wire.ClusterOpGetUnconfirmedHeadersRequest):       mc.handleGetUnconfirmedHeaders,
+			byte(wire.ClusterOpGetAccountDataRequest):              mc.handleGetAccountData,
+			byte(wire.ClusterOpAddTransactionRequest):              mc.handleAddTransaction,
+			byte(wire.ClusterOpGetMinorBlockRequest):               mc.handleGetMinorBlock,
+			byte(wire.ClusterOpGetTransactionRequest):              mc.handleGetTransaction,
+			byte(wire.ClusterOpSyncMinorBlockListRequest):          mc.handleSyncMinorBlockList,
+			byte(wire.ClusterOpExecuteTransactionRequest):          mc.handleExecuteTransaction,
+			byte(wire.ClusterOpGetTransactionReceiptRequest):       mc.handleGetTransactionReceipt,
+			byte(wire.ClusterOpGetTransactionListByAddressRequest): mc.handleGetTransactionListByAddress,
+			byte(wire.ClusterOpGetLogRequest):                      mc.handleGetLogs,
+			byte(wire.ClusterOpEstimateGasRequest):                 mc.handleEstimateGas,
+			byte(wire.ClusterOpGetStorageRequest):                  mc.handleGetStorageAt,
+			byte(wire.ClusterOpGetCodeRequest):                     mc.handleGetCode,
+			byte(wire.ClusterOpGasPriceRequest):                    mc.handleGasPrice,
+			byte(wire.ClusterOpGetWorkRequest):                     mc.handleGetWork,
+			byte(wire.ClusterOpSubmitWorkRequest):                  mc.handleSubmitWork,
+			byte(wire.ClusterOpCheckMinorBlockRequest):             mc.handleCheckMinorBlock,
+			byte(wire.ClusterOpGetAllTransactionsRequest):          mc.handleGetAllTransactions,
+			byte(wire.ClusterOpGetRootChainStakesRequest):          mc.handleGetRootChainStakes,
+			byte(wire.ClusterOpGetTotalBalanceRequest):             mc.handleGetTotalBalance,
 		},
 		NonRPCOps: map[byte]struct{}{
 			byte(wire.ClusterOpDestroyClusterPeerConnectionCommand): {},
@@ -282,7 +275,7 @@ func (mc *MasterConn) SendAddMinorBlockHeaderList(ctx context.Context, req *wire
 	return r, nil
 }
 
-// ── Communication handlers ─────────────────────────────────────────────
+// ── Communication / topology handlers (delegated to CommHandler) ──────────
 
 // handlePing handles the master's PING.
 //
@@ -292,7 +285,7 @@ func (mc *MasterConn) SendAddMinorBlockHeaderList(ctx context.Context, req *wire
 func (mc *MasterConn) handlePing(req any) (any, error) {
 	ping := req.(*wire.PingRequest)
 	if ping.RootTip != nil {
-		if err := mc.slaveConnHandler.CreateShardsAndPeerConnections(ping.RootTip); err != nil {
+		if err := mc.commHandler.CreateShardsAndPeerConnections(ping.RootTip); err != nil {
 			return nil, err
 		}
 	}
@@ -302,20 +295,34 @@ func (mc *MasterConn) handlePing(req any) (any, error) {
 	}, nil
 }
 
-// ── Inbound handler dispatch ─────────────────────────────────────────────
-// Business RPCs go to MasterHandler; communication/topology commands go to SlaveConnHandler.
-
-func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
-	return mc.slaveConnHandler.CreateClusterPeerConnection(req.(*wire.CreateClusterPeerConnectionRequest))
-}
-
-func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
-	return nil, mc.slaveConnHandler.DestroyClusterPeerConnection(req.(*wire.DestroyClusterPeerConnectionCommand))
-}
-
+// handleConnectToSlaves connects to the slaves advertised by the master.
 func (mc *MasterConn) handleConnectToSlaves(req any) (any, error) {
-	return mc.slaveConnHandler.ConnectToSlaves(req.(*wire.ConnectToSlavesRequest))
+	return mc.commHandler.ConnectToSlaves(req.(*wire.ConnectToSlavesRequest))
 }
+
+// handleCreateClusterPeerConnection creates PeerConns for the given cluster
+// peer on all current local branches.
+func (mc *MasterConn) handleCreateClusterPeerConnection(req any) (any, error) {
+	return mc.commHandler.CreateClusterPeerConnection(req.(*wire.CreateClusterPeerConnectionRequest))
+}
+
+// handleDestroyClusterPeerConnection removes the given cluster peer and
+// closes its PeerConns.
+func (mc *MasterConn) handleDestroyClusterPeerConnection(req any) (any, error) {
+	return nil, mc.commHandler.DestroyClusterPeerConnection(req.(*wire.DestroyClusterPeerConnectionCommand))
+}
+
+// handleAddRootBlock applies the master's root block and any shard activation
+// it triggers (py: handle_add_root_block_request → create_shards). Both the
+// root-chain update and the resulting shard creation belong to the
+// communication layer, not to MasterHandler.
+func (mc *MasterConn) handleAddRootBlock(req any) (any, error) {
+	return mc.commHandler.AddRootBlockAndCreateShards(req.(*wire.AddRootBlockRequest))
+}
+
+// ── Business RPC handlers (delegated to MasterHandler) ─────────────────────
+// Business RPCs operate on business-owned runtime state (mining, accounts,
+// transactions, queries) and delegate to MasterHandler.
 
 func (mc *MasterConn) handleMine(req any) (any, error) {
 	return mc.handler.Mine(req.(*wire.MineRequest))
@@ -323,10 +330,6 @@ func (mc *MasterConn) handleMine(req any) (any, error) {
 
 func (mc *MasterConn) handleGenTx(req any) (any, error) {
 	return mc.handler.GenTx(req.(*wire.GenTxRequest))
-}
-
-func (mc *MasterConn) handleAddRootBlock(req any) (any, error) {
-	return mc.handler.AddRootBlock(req.(*wire.AddRootBlockRequest))
 }
 
 func (mc *MasterConn) handleGetEcoInfoList(req any) (any, error) {
