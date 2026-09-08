@@ -22,31 +22,6 @@ type qkcAccountRLP struct {
 	Optional     []byte
 }
 
-// ToStateAccount expands a slim snapshot account into the consensus account
-// representation without dropping token balances or the full shard key.
-func (acct *SlimAccount) ToStateAccount() (*StateAccount, error) {
-	balances, err := qkccommon.NewTokenBalances(acct.MntBal)
-	if err != nil {
-		return nil, err
-	}
-	full := &StateAccount{
-		Nonce:        acct.Nonce,
-		MntBalances:  balances,
-		FullShardKey: uint32(acct.FullShardKey),
-	}
-	if len(acct.Root) == 0 {
-		full.Root = EmptyRootHash
-	} else {
-		full.Root = common.BytesToHash(acct.Root)
-	}
-	if len(acct.CodeHash) == 0 {
-		full.CodeHash = EmptyCodeHash.Bytes()
-	} else {
-		full.CodeHash = common.CopyBytes(acct.CodeHash)
-	}
-	return full, nil
-}
-
 // GetMntBalance returns the balance of tokenID in the account's unified balance map.
 func (acct *StateAccount) GetMntBalance(tokenID uint64) *uint256.Int {
 	if acct.MntBalances == nil {

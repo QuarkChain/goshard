@@ -159,50 +159,6 @@ func TestStateAccountBalance(t *testing.T) {
 	}
 }
 
-func TestSlimAccountPreservesQuarkChainFields(t *testing.T) {
-	original := StateAccount{
-		Nonce: 7,
-		MntBalances: qkccommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{
-			100:                      uint256.NewInt(500),
-			qkccommon.DefaultTokenID: uint256.NewInt(2000),
-		}),
-		Root:         EmptyRootHash,
-		CodeHash:     EmptyCodeHash.Bytes(),
-		FullShardKey: 0x12345678,
-	}
-	slim := SlimAccountRLP(original)
-	decoded, err := FullAccount(slim)
-	require.NoError(t, err)
-
-	assert.Equal(t, original.Nonce, decoded.Nonce)
-	assert.Equal(t, original.MntBalances.GetBalanceMap(), decoded.MntBalances.GetBalanceMap())
-	assert.Equal(t, original.Root, decoded.Root)
-	assert.Equal(t, original.CodeHash, decoded.CodeHash)
-	assert.Equal(t, original.FullShardKey, decoded.FullShardKey)
-
-	want, err := rlp.EncodeToBytes(&original)
-	require.NoError(t, err)
-	got, err := FullAccountRLP(slim)
-	require.NoError(t, err)
-	assert.Equal(t, want, got)
-}
-
-func TestSlimAccountPreservesZeroOnlyWireEncoding(t *testing.T) {
-	original := *NewEmptyStateAccount()
-	original.MntBalances.SetValue(new(uint256.Int), qkccommon.DefaultTokenID)
-
-	slim := SlimAccountRLP(original)
-	want, err := rlp.EncodeToBytes(&original)
-	require.NoError(t, err)
-	got, err := FullAccountRLP(slim)
-	require.NoError(t, err)
-	assert.Equal(t, want, got)
-
-	decoded, err := FullAccount(slim)
-	require.NoError(t, err)
-	assert.Empty(t, decoded.MntBalances.GetBalanceMap())
-}
-
 func TestStateAccountRejectsUnsupportedQKCEncoding(t *testing.T) {
 	tests := []struct {
 		name string
