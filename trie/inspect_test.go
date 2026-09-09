@@ -182,10 +182,10 @@ func TestInspectContract(t *testing.T) {
 
 	// Build the account trie with the contract account.
 	account := types.StateAccount{
-		Nonce:    1,
-		Balance:  uint256.NewInt(1000),
-		Root:     storageRoot,
-		CodeHash: crypto.Keccak256(nil),
+		Nonce:       1,
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(1000)),
+		Root:        storageRoot,
+		CodeHash:    crypto.Keccak256(nil),
 	}
 	accountRLP, err := rlp.EncodeToBytes(&account)
 	if err != nil {
@@ -245,10 +245,10 @@ func makeAccountsWithStorage(db *testDb, size int, storage bool) (addresses [][2
 		random.Read(balanceBytes)
 		balance := new(uint256.Int).SetBytes(balanceBytes)
 		data, _ := rlp.EncodeToBytes(&types.StateAccount{
-			Nonce:    nonce,
-			Balance:  balance,
-			Root:     root,
-			CodeHash: code,
+			Nonce:       nonce,
+			MntBalances: types.NewQKCTokenBalances(balance),
+			Root:        root,
+			CodeHash:    code,
 		})
 		accounts[i] = data
 	}

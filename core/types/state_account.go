@@ -77,7 +77,7 @@ type SlimAccount struct {
 func SlimAccountRLP(account StateAccount) []byte {
 	slim := SlimAccount{
 		Nonce:   account.Nonce,
-		Balance: account.Balance(),
+		Balance: account.GetBalance(),
 	}
 	if account.Root != EmptyRootHash {
 		slim.Root = account.Root[:]

@@ -30,8 +30,8 @@ func (acct *StateAccount) GetMntBalance(tokenID uint64) *uint256.Int {
 	return acct.MntBalances.GetTokenBalance(tokenID)
 }
 
-// Balance returns the account's QKC balance.
-func (acct *StateAccount) Balance() *uint256.Int {
+// GetBalance returns the account's QKC balance.
+func (acct *StateAccount) GetBalance() *uint256.Int {
 	return acct.GetMntBalance(qkccommon.DefaultTokenID)
 }
 

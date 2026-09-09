@@ -182,10 +182,12 @@ func (t *BinaryTrie) GetWithHashedKey(key []byte) ([]byte, error) {
 }
 
 // GetAccount returns the account information for the given address.
+// QuarkChain supports only hashdb-backed MPT state. This inherited UBT format
+// contains only the default balance and cannot preserve MNT or FullShardKey.
 func (t *BinaryTrie) GetAccount(addr common.Address) (*types.StateAccount, error) {
 	var (
 		err error
-		acc = &types.StateAccount{}
+		acc = types.NewEmptyStateAccount()
 		key = GetBinaryTreeKey(addr, zero[:])
 	)
 
@@ -219,7 +221,7 @@ func (t *BinaryTrie) GetAccount(addr common.Address) (*types.StateAccount, error
 	acc.Nonce = binary.BigEndian.Uint64(values[BasicDataLeafKey][BasicDataNonceOffset:])
 	var balance [16]byte
 	copy(balance[:], values[BasicDataLeafKey][BasicDataBalanceOffset:])
-	acc.Balance = new(uint256.Int).SetBytes(balance[:])
+	acc.SetBalance(new(uint256.Int).SetBytes(balance[:]))
 	acc.CodeHash = values[CodeHashLeafKey]
 
 	return acc, nil
@@ -245,7 +247,7 @@ func (t *BinaryTrie) UpdateAccount(addr common.Address, acc *types.StateAccount,
 	// Because the balance is a max of 16 bytes, truncate
 	// the extra values. This happens in devmode, where
 	// 0xff**HashSize is allocated to the developer account.
-	balanceBytes := acc.Balance.Bytes()
+	balanceBytes := acc.GetBalance().Bytes()
 	// TODO: reduce the size of the allocation in devmode, then panic instead
 	// of truncating.
 	if len(balanceBytes) > 16 {

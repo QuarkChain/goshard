@@ -114,8 +114,8 @@ func TestBintrieConvert(t *testing.T) {
 		t.Errorf("account1 nonce: got %d, want 5", acc1.Nonce)
 	}
 	wantBal1 := uint256.NewInt(1000000)
-	if acc1.Balance.Cmp(wantBal1) != 0 {
-		t.Errorf("account1 balance: got %s, want %s", acc1.Balance, wantBal1)
+	if balance := acc1.GetBalance(); balance.Cmp(wantBal1) != 0 {
+		t.Errorf("account1 balance: got %s, want %s", balance, wantBal1)
 	}
 
 	acc2, err := bt2.GetAccount(addr2)
@@ -129,8 +129,8 @@ func TestBintrieConvert(t *testing.T) {
 		t.Errorf("account2 nonce: got %d, want 10", acc2.Nonce)
 	}
 	wantBal2 := uint256.NewInt(2000000)
-	if acc2.Balance.Cmp(wantBal2) != 0 {
-		t.Errorf("account2 balance: got %s, want %s", acc2.Balance, wantBal2)
+	if balance := acc2.GetBalance(); balance.Cmp(wantBal2) != 0 {
+		t.Errorf("account2 balance: got %s, want %s", balance, wantBal2)
 	}
 
 	treeKey1 := bintrie.GetBinaryTreeKeyStorageSlot(addr2, slotKey1[:])
@@ -222,8 +222,8 @@ func TestBintrieConvertDeleteSource(t *testing.T) {
 		t.Fatal("account not found after MPT deletion")
 	}
 	wantBal := uint256.NewInt(1000000)
-	if acc.Balance.Cmp(wantBal) != 0 {
-		t.Errorf("balance after deletion: got %s, want %s", acc.Balance, wantBal)
+	if balance := acc.GetBalance(); balance.Cmp(wantBal) != 0 {
+		t.Errorf("balance after deletion: got %s, want %s", balance, wantBal)
 	}
 	destTriedb.Close()
 }
