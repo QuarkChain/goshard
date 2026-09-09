@@ -157,7 +157,7 @@ func TestQKCHeadStorage(t *testing.T) {
 
 	blockHeadHash := common.BytesToHash([]byte{0x44})
 	blockFullHash := common.BytesToHash([]byte{0x55})
-	blockFastHash := common.BytesToHash([]byte{0x66})
+	rootHeadHash := common.BytesToHash([]byte{0x66})
 
 	// Check that no head entries are in a pristine database
 	if entry := ReadHeadHeaderHash(db); entry != (common.Hash{}) {
@@ -172,7 +172,7 @@ func TestQKCHeadStorage(t *testing.T) {
 	// Assign separate entries for the head header and block
 	WriteHeadHeaderHash(db, blockHeadHash)
 	WriteHeadBlockHash(db, blockFullHash)
-	WriteHeadFastBlockHash(db, blockFastHash)
+	WriteRootHeadHash(db, rootHeadHash)
 
 	// Check that both heads are present, and different (i.e. two heads maintained)
 	if entry := ReadHeadHeaderHash(db); entry != blockHeadHash {
@@ -181,8 +181,11 @@ func TestQKCHeadStorage(t *testing.T) {
 	if entry := ReadHeadBlockHash(db); entry != blockFullHash {
 		t.Fatalf("Head block hash mismatch: have %v, want %v", entry, blockFullHash)
 	}
-	if entry := ReadHeadFastBlockHash(db); entry != blockFastHash {
-		t.Fatalf("Fast head block hash mismatch: have %v, want %v", entry, blockFastHash)
+	if entry := ReadRootHeadHash(db); entry != rootHeadHash {
+		t.Fatalf("Root head block hash mismatch: have %v, want %v", entry, rootHeadHash)
+	}
+	if key := qkcRootHeadKey(); !bytes.Equal(key, []byte("qkc_LastRoot")) {
+		t.Fatalf("Root head block key mismatch: have %x, want %x", key, []byte("qkc_LastRoot"))
 	}
 }
 

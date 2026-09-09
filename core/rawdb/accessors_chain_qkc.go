@@ -68,7 +68,7 @@ func DeleteMinorCanonicalHash(db ethdb.KeyValueWriter, number uint64) {
 
 // ReadRootHeadHash retrieves the current canonical root block hash for a shard.
 func ReadRootHeadHash(db ethdb.KeyValueReader) common.Hash {
-	data, _ := db.Get(rootHeadKey)
+	data, _ := db.Get(qkcRootHeadKey())
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -77,7 +77,7 @@ func ReadRootHeadHash(db ethdb.KeyValueReader) common.Hash {
 
 // WriteRootHeadHash stores the current canonical root block hash for a shard.
 func WriteRootHeadHash(db ethdb.KeyValueWriter, hash common.Hash) {
-	if err := db.Put(rootHeadKey, hash.Bytes()); err != nil {
+	if err := db.Put(qkcRootHeadKey(), hash.Bytes()); err != nil {
 		log.Crit("Failed to store root head block hash", "err", err)
 	}
 }

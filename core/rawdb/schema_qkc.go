@@ -12,18 +12,18 @@ import (
 var (
 	qkcPrefix = []byte("qkc_") // qkcPrefix + QKC-specific prefix + key parts -> QKC namespaced key
 
-	rootHashPrefixQKC        = []byte("rn")      // qkcPrefix + rootHashPrefixQKC + num (uint64 big endian) -> root canonical hash
-	minorHashPrefixQKC       = []byte("mn")      // qkcPrefix + minorHashPrefixQKC + num (uint64 big endian) -> minor canonical hash
-	rootBlockPrefixQKC       = []byte("rb")      // qkcPrefix + rootBlockPrefixQKC + hash -> root block
-	minorBlockPrefixQKC      = []byte("mb")      // qkcPrefix + minorBlockPrefixQKC + hash -> minor block
-	totalTxCountPrefixQKC    = []byte("txC")     // qkcPrefix + totalTxCountPrefixQKC + hash -> total tx count (uint32 big endian)
-	confirmedXShardPrefixQKC = []byte("xr")      // qkcPrefix + confirmedXShardPrefixQKC + hash -> confirmed cross-shard tx list
-	xShardListPrefixQKC      = []byte("xSL")     // qkcPrefix + xShardListPrefixQKC + hash -> cross-shard tx list
-	xShardHashListPrefixQKC  = []byte("xSHL")    // qkcPrefix + xShardHashListPrefixQKC + hash -> cross-shard deposit hash list
-	lastMinorAtRootPrefixQKC = []byte("rLM")     // qkcPrefix + lastMinorAtRootPrefixQKC + root hash -> last confirmed minor block hash
-	genesisPrefixQKC         = []byte("genesis") // qkcPrefix + genesisPrefixQKC + root hash -> genesis minor block
-	chainConfigPrefixQKC     = []byte("config-") // qkcPrefix + chainConfigPrefixQKC + genesis hash -> QKC chain config
-	rootHeadKey              = []byte("LastRootBlock")
+	rootHashPrefixQKC        = []byte("rn")       // qkcPrefix + rootHashPrefixQKC + num (uint64 big endian) -> root canonical hash
+	minorHashPrefixQKC       = []byte("mn")       // qkcPrefix + minorHashPrefixQKC + num (uint64 big endian) -> minor canonical hash
+	rootBlockPrefixQKC       = []byte("rb")       // qkcPrefix + rootBlockPrefixQKC + hash -> root block
+	minorBlockPrefixQKC      = []byte("mb")       // qkcPrefix + minorBlockPrefixQKC + hash -> minor block
+	totalTxCountPrefixQKC    = []byte("txC")      // qkcPrefix + totalTxCountPrefixQKC + hash -> total tx count (uint32 big endian)
+	confirmedXShardPrefixQKC = []byte("xr")       // qkcPrefix + confirmedXShardPrefixQKC + hash -> confirmed cross-shard tx list
+	xShardListPrefixQKC      = []byte("xSL")      // qkcPrefix + xShardListPrefixQKC + hash -> cross-shard tx list
+	xShardHashListPrefixQKC  = []byte("xSHL")     // qkcPrefix + xShardHashListPrefixQKC + hash -> cross-shard deposit hash list
+	lastMinorAtRootPrefixQKC = []byte("rLM")      // qkcPrefix + lastMinorAtRootPrefixQKC + root hash -> last confirmed minor block hash
+	genesisPrefixQKC         = []byte("genesis")  // qkcPrefix + genesisPrefixQKC + root hash -> genesis minor block
+	chainConfigPrefixQKC     = []byte("config-")  // qkcPrefix + chainConfigPrefixQKC + genesis hash -> QKC chain config
+	rootHeadKey              = []byte("LastRoot") // qkcPrefix + rootHeadPrefixQKC -> canonical root head hash
 )
 
 // qkcLookupEntry is positional metadata for looking up block content by hash.
@@ -102,4 +102,8 @@ func qkcXShardDepositHashListKey(hash common.Hash) []byte {
 
 func qkcChainConfigKey(hash common.Hash) []byte {
 	return qkcKey(chainConfigPrefixQKC, hash.Bytes())
+}
+
+func qkcRootHeadKey() []byte {
+	return qkcKey(rootHeadKey)
 }
