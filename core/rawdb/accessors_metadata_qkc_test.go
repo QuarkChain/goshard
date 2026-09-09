@@ -23,7 +23,7 @@ func TestQKCChainConfigStorage(t *testing.T) {
 	cfg.NetworkID = 123
 	QKCWriteChainConfig(db, hash, cfg)
 
-	wantKey := append([]byte("q_config-"), hash.Bytes()...)
+	wantKey := append([]byte("qkc_config-"), hash.Bytes()...)
 	if key := qkcChainConfigKey(hash); !bytes.Equal(key, wantKey) {
 		t.Fatalf("QKC chain config key mismatch: have %x, want %x", key, wantKey)
 	}

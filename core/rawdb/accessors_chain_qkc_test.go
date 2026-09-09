@@ -30,10 +30,10 @@ var (
 
 func TestQKCBlockKeys(t *testing.T) {
 	hash := common.HexToHash("0x1234")
-	if got, want := qkcRootBlockKey(hash), append([]byte("q_rb"), hash.Bytes()...); !bytes.Equal(got, want) {
+	if got, want := qkcRootBlockKey(hash), append([]byte("qkc_rb"), hash.Bytes()...); !bytes.Equal(got, want) {
 		t.Fatalf("root block key mismatch: have %x, want %x", got, want)
 	}
-	if got, want := qkcMinorBlockKey(hash), append([]byte("q_mb"), hash.Bytes()...); !bytes.Equal(got, want) {
+	if got, want := qkcMinorBlockKey(hash), append([]byte("qkc_mb"), hash.Bytes()...); !bytes.Equal(got, want) {
 		t.Fatalf("minor block key mismatch: have %x, want %x", got, want)
 	}
 }
@@ -129,16 +129,16 @@ func TestQKCCanonicalMappingStorage(t *testing.T) {
 		t.Fatalf("Minor canonical mapping mismatch: have %v, want %v", entry, minorHash)
 	}
 	if has, _ := db.Has(append([]byte("rn"), encodeBlockNumber(number)...)); has {
-		t.Fatal("Root canonical mapping was written without the q_ prefix")
+		t.Fatal("Root canonical mapping was written without the qkc_ prefix")
 	}
 	if has, _ := db.Has(append([]byte("mn"), encodeBlockNumber(number)...)); has {
-		t.Fatal("Minor canonical mapping was written without the q_ prefix")
+		t.Fatal("Minor canonical mapping was written without the qkc_ prefix")
 	}
-	if has, _ := db.Has(append([]byte("q_rn"), encodeBlockNumber(number)...)); !has {
-		t.Fatal("Root canonical mapping was not written with the q_ prefix")
+	if has, _ := db.Has(append([]byte("qkc_rn"), encodeBlockNumber(number)...)); !has {
+		t.Fatal("Root canonical mapping was not written with the qkc_ prefix")
 	}
-	if has, _ := db.Has(append([]byte("q_mn"), encodeBlockNumber(number)...)); !has {
-		t.Fatal("Minor canonical mapping was not written with the q_ prefix")
+	if has, _ := db.Has(append([]byte("qkc_mn"), encodeBlockNumber(number)...)); !has {
+		t.Fatal("Minor canonical mapping was not written with the qkc_ prefix")
 	}
 
 	DeleteRootCanonicalHash(db, number)

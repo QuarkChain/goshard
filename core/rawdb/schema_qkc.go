@@ -23,6 +23,7 @@ var (
 	lastMinorAtRootPrefixQKC = []byte("rLM")     // qkcPrefix + lastMinorAtRootPrefixQKC + root hash -> last confirmed minor block hash
 	genesisPrefixQKC         = []byte("genesis") // qkcPrefix + genesisPrefixQKC + root hash -> genesis minor block
 	chainConfigPrefixQKC     = []byte("config-") // qkcPrefix + chainConfigPrefixQKC + genesis hash -> QKC chain config
+	rootHeadKey              = []byte("LastRootBlock")
 )
 
 // qkcLookupEntry is positional metadata for looking up block content by hash.
