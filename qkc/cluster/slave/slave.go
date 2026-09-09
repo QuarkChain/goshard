@@ -20,6 +20,10 @@ import (
 // It is implemented by the external slave runtime; SlaveComm consumes
 // these operations and performs the communication-side orchestration.
 type MasterBackend interface {
+	// ShardCreator creates the business runtime's shards for a root tip
+	// and returns the newly-created branches.
+	ShardCreator(rootTip *wire.RawBytes) ([]uint32, error)
+
 	// ── business RPCs ──
 	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
 	GenTx(req *wire.GenTxRequest) (*wire.GenTxResponse, error)
@@ -111,9 +115,6 @@ type SlaveConfig struct {
 	// MaxPayloadSize limits incoming frame payload size; 0 disables the limit.
 	MaxPayloadSize uint32
 
-	// ShardCreator creates the business runtime's shards for a root tip
-	// and returns the newly-created branches.
-	ShardCreator func(rootTip *wire.RawBytes) ([]uint32, error)
 	// Master handles business RPCs routed through MasterConn.
 	Master MasterBackend
 	// Peer builds and serves slave-to-slave PeerConns for virtual cluster peers.
@@ -143,9 +144,6 @@ func (cfg *SlaveConfig) Validate() error {
 
 	if cfg.Master == nil {
 		return errors.New("master handler must not be nil")
-	}
-	if cfg.ShardCreator == nil {
-		return errors.New("create shards handler must not be nil")
 	}
 	if cfg.Peer == nil {
 		return errors.New("peer handler must not be nil")
@@ -423,7 +421,7 @@ func (s *SlaveComm) connectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.Con
 // are skipped.
 func (s *SlaveComm) createShards(rootTip *wire.RawBytes) error {
 	// A business failure fails the PING before any topology change.
-	createdBranches, err := s.cfg.ShardCreator(rootTip)
+	createdBranches, err := s.cfg.Master.ShardCreator(rootTip)
 	if err != nil {
 		return err
 	}

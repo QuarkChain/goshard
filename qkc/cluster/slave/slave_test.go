@@ -35,11 +35,11 @@ type commTestHandler struct {
 	*fakeMasterHandler
 }
 
-// CreateShards arms the created-branch report after delegating count/error
+// ShardCreator arms the created-branch report after delegating count/error
 // injection to the embedded double. Under Go's GENESIS.ROOT_HEIGHT 0
 // simplification the business runtime always reports every configured shard as
 // created, unless it fails (errCreateShards).
-func (h *commTestHandler) CreateShards(rootTip *wire.RawBytes) ([]uint32, error) {
+func (h *commTestHandler) ShardCreator(rootTip *wire.RawBytes) ([]uint32, error) {
 	if err := h.fakeMasterHandler.CreateShards(rootTip); err != nil {
 		return nil, err
 	}
@@ -88,7 +88,6 @@ func startTestSlaveCommWithBranches(t *testing.T, preCreated []uint32) (*SlaveCo
 			Port:                   port,
 			Logger:                 log.New(),
 			Master:                 handler,
-			ShardCreator:           handler.CreateShards,
 			Peer:                   stubPeerHandler{},
 			Xshard:                 testXshardHandler{},
 		})
