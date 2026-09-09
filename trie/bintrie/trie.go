@@ -182,10 +182,12 @@ func (t *BinaryTrie) GetWithHashedKey(key []byte) ([]byte, error) {
 }
 
 // GetAccount returns the account information for the given address.
+// QuarkChain supports only hashdb-backed MPT state. This inherited UBT format
+// contains only the default balance and cannot preserve MNT or FullShardKey.
 func (t *BinaryTrie) GetAccount(addr common.Address) (*types.StateAccount, error) {
 	var (
 		err error
-		acc = &types.StateAccount{}
+		acc = types.NewEmptyStateAccount()
 		key = GetBinaryTreeKey(addr, zero[:])
 	)
 
