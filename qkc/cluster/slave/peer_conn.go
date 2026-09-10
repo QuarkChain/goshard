@@ -104,16 +104,17 @@ func (vt *virtualTransport) RemoteAddr() string {
 }
 
 // receive enqueues a frame without blocking; returns false if already closed.
-func (vt *virtualTransport) receive(frame *wire.Frame) bool {
+func (vt *virtualTransport) receive(frame *wire.Frame) error {
 	vt.mu.Lock()
+	defer vt.mu.Unlock()
+
 	if vt.closed {
-		vt.mu.Unlock()
-		return false
+		return conn.ErrConnectionClosed
 	}
+
 	vt.queue = append(vt.queue, frame)
 	vt.cond.Signal()
-	vt.mu.Unlock()
-	return true
+	return nil
 }
 
 // PeerConn is the slave-side virtual endpoint of a forwarded peer connection
@@ -123,10 +124,8 @@ func (vt *virtualTransport) receive(frame *wire.Frame) bool {
 type PeerConn struct {
 	*conn.BaseConn
 
-	clusterPeerID uint64
-	branch        uint32
-	vt            *virtualTransport
-	handler       PeerHandler
+	vt      *virtualTransport
+	handler PeerHandler
 }
 
 // NewPeerConn creates a PeerConn for peer clusterPeerID on branch, tunnelling
@@ -146,10 +145,8 @@ func NewPeerConn(clusterPeerID uint64, branch uint32, masterConn *MasterConn, ha
 
 	vt := newVirtualTransport(clusterPeerID, branch, masterConn)
 	pc := &PeerConn{
-		clusterPeerID: clusterPeerID,
-		branch:        branch,
-		vt:            vt,
-		handler:       handler,
+		vt:      vt,
+		handler: handler,
 	}
 
 	pc.BaseConn = conn.NewBaseConn(conn.Config{
@@ -192,13 +189,7 @@ func NewPeerConn(clusterPeerID uint64, branch uint32, masterConn *MasterConn, ha
 // frames are processed asynchronously by the PeerConn's own reader loop, where
 // PeerHandler panics are recovered and close only this PeerConn.
 func (pc *PeerConn) HandleFrame(frame *wire.Frame) error {
-	if pc.IsClosed() {
-		return conn.ErrConnectionClosed
-	}
-	if !pc.vt.receive(frame) {
-		return conn.ErrConnectionClosed
-	}
-	return nil
+	return pc.vt.receive(frame)
 }
 
 // ── Outbound typed helpers ────────────────────────────────────────────────
