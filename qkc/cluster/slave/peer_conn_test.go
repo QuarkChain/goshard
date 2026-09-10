@@ -32,8 +32,9 @@ type fakeSlaveService struct {
 }
 
 // stubPeerHandler stands in for the not-yet-migrated business layer: every
-// method returns ErrHandlerNotImplemented, so routed frames still exercise
-// the handler-error path (PeerConn closes, MasterConn survives).
+// method returns ErrHandlerNotImplemented, so routed frames exercise the
+// handler-error path (PeerConn closes, MasterConn survives) — see
+// TestMasterConn_HandlerErrorClosesPeerConnOnly.
 type stubPeerHandler struct{}
 
 func (stubPeerHandler) NewMinorBlockHeaderList(*wire.NewMinorBlockHeaderListCommand) error {
@@ -235,12 +236,12 @@ func (f *fakeSlaveService) peerCount() int {
 func (f *fakeSlaveService) registerPeer(pc *PeerConn) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	bm, ok := f.peers[pc.clusterPeerID]
+	bm, ok := f.peers[pc.vt.clusterPeerID]
 	if !ok {
 		bm = make(map[uint32]*PeerConn)
-		f.peers[pc.clusterPeerID] = bm
+		f.peers[pc.vt.clusterPeerID] = bm
 	}
-	bm[pc.branch] = pc
+	bm[pc.vt.branch] = pc
 }
 
 // newMasterConn creates a MasterConn over a local TCP pair with a fake
@@ -840,7 +841,7 @@ func TestMasterConn_CloseDoesNotClosePeerConns(t *testing.T) {
 	// MasterConn close does not cascade to PeerConns.
 	for _, pc := range peerConns {
 		if pc.IsClosed() {
-			t.Fatalf("peer conn %d/%d closed by MasterConn.Close; peer lifecycle is owned by the service", pc.clusterPeerID, pc.branch)
+			t.Fatalf("peer conn %d/%d closed by MasterConn.Close; peer lifecycle is owned by the service", pc.vt.clusterPeerID, pc.vt.branch)
 		}
 	}
 	if got := fake.peerCount(); got != 2 {
@@ -851,7 +852,7 @@ func TestMasterConn_CloseDoesNotClosePeerConns(t *testing.T) {
 	fake.closeAll()
 	for _, pc := range peerConns {
 		if !pc.IsClosed() {
-			t.Fatalf("peer conn %d/%d was not closed by service closeAll", pc.clusterPeerID, pc.branch)
+			t.Fatalf("peer conn %d/%d was not closed by service closeAll", pc.vt.clusterPeerID, pc.vt.branch)
 		}
 	}
 }
@@ -1019,6 +1020,50 @@ func TestPeerConn_CloseStopsReadLoop(t *testing.T) {
 	if err := pc.HandleFrame(&wire.Frame{}); err == nil {
 		t.Fatal("expected error from HandleFrame after Close")
 	}
+}
+
+// TestMasterConn_HandlerErrorClosesPeerConnOnly verifies the failure-isolation
+// half of the routing contract: a business-layer error while dispatching a
+// routed frame shuts down only the PeerConn — the shared MasterConn must keep
+// serving master-local traffic. Python: a handler failure closes the virtual
+// connection, not the proxy (PeerShardConnection is an independent
+// AbstractConnection; the master connection outlives it).
+func TestMasterConn_HandlerErrorClosesPeerConnOnly(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 71
+	const branch uint32 = 0x00010001
+
+	// The harness fake's default handler is stubPeerHandler, which fails every
+	// dispatch with ErrHandlerNotImplemented (see stubPeerHandler).
+	fake := client.peerResolver.(*fakeSlaveService)
+	fake.createPeerConns(clusterPeerID, []uint32{branch})
+	pc := fake.peers[clusterPeerID][branch]
+
+	cmdPayload, err := serialize.SerializeToBytes(&wire.NewTransactionListCommand{TransactionList: []*wire.RawBytes{{}}})
+	if err != nil {
+		t.Fatalf("serialize command: %v", err)
+	}
+	writeMasterFrame(t, serverConn, &wire.Frame{
+		Meta:    wire.ClusterMetadata{Branch: branch, ClusterPeerID: clusterPeerID},
+		Opcode:  byte(wire.CommandOpNewTransactionList),
+		RPCID:   0, // non-RPC command
+		Payload: cmdPayload,
+	})
+
+	select {
+	case <-pc.WaitUntilClosed():
+		// OK: the failing handler closed only this PeerConn.
+	case <-time.After(2 * time.Second):
+		t.Fatal("PeerConn did not close after handler error")
+	}
+
+	// The shared MasterConn must have survived the peer's failure.
+	if client.IsClosed() {
+		t.Fatal("MasterConn closed by a PeerConn handler error")
+	}
+	pingMaster(t, serverConn, 1)
 }
 
 // ── Concurrency, backpressure, handler dispatch ───────────────────────────
@@ -1354,6 +1399,64 @@ func TestPeerConn_GetMinorBlockHeaderList(t *testing.T) {
 	resp, err := pc.GetMinorBlockHeaderList(ctx, req)
 	if err != nil {
 		t.Fatalf("GetMinorBlockHeaderList: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("expected non-nil GetMinorBlockHeaderListResponse")
+	}
+}
+
+// TestPeerConn_GetMinorBlockHeaderListWithSkip verifies the typed
+// GetMinorBlockHeaderListWithSkip wrapper issues a
+// GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST RPC and parses the response,
+// with the peer's branch + cluster_peer_id metadata stamped on the wire.
+// Python: OP_RPC_MAP[GET_MINOR_BLOCK_HEADER_LIST_WITH_SKIP_REQUEST] (shard.py:291).
+func TestPeerConn_GetMinorBlockHeaderListWithSkip(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 103
+	const branch uint32 = 0x00010001
+	fake := client.peerResolver.(*fakeSlaveService)
+	fake.createPeerConns(clusterPeerID, []uint32{branch})
+	pc := fake.peers[clusterPeerID][branch]
+
+	req := &wire.GetMinorBlockHeaderListWithSkipRequest{
+		Branch:    branch,
+		Limit:     1,
+		Direction: wire.DirectionGenesis,
+	}
+
+	go func() {
+		frame := readMasterFrame(t, serverConn)
+		if frame.Meta.ClusterPeerID != clusterPeerID || frame.Meta.Branch != branch {
+			t.Errorf("outbound request meta mismatch: got cid=%d branch=0x%x, want cid=%d branch=0x%x",
+				frame.Meta.ClusterPeerID, frame.Meta.Branch, clusterPeerID, branch)
+		}
+		if frame.Opcode != byte(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest) {
+			t.Errorf("unexpected request opcode 0x%x", frame.Opcode)
+		}
+		respPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockHeaderListResponse{
+			RootTip:  &wire.RawBytes{},
+			ShardTip: &wire.RawBytes{},
+		})
+		if err != nil {
+			t.Errorf("serialize response: %v", err)
+			return
+		}
+		writeMasterFrame(t, serverConn, &wire.Frame{
+			Meta:    frame.Meta,
+			Opcode:  byte(wire.CommandOpGetMinorBlockHeaderListWithSkipResponse),
+			RPCID:   frame.RPCID,
+			Payload: respPayload,
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := pc.GetMinorBlockHeaderListWithSkip(ctx, req)
+	if err != nil {
+		t.Fatalf("GetMinorBlockHeaderListWithSkip: %v", err)
 	}
 	if resp == nil {
 		t.Fatalf("expected non-nil GetMinorBlockHeaderListResponse")
