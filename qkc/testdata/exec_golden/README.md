@@ -46,3 +46,32 @@ QuarkChain's semantics differ from geth's.
 `message_level.json` and `block_level.json` are not op lists. Each case is a
 whole input — one transaction or deposit, or a sequence of minor blocks — and
 the pinned values are listed in the table in the singularity README.
+
+
+## What earns a vector
+
+A golden vector pins the answer to a question where geth's native behaviour and
+QuarkChain's policy disagree, and where that disagreement reaches consensus bytes. 
+A candidate earns a vector when both hold:
+
+- **Divergence.** geth's corresponding primitive, left alone, produces something
+   different from what pyquarkchain does — a different value, a different journal
+   behaviour, a different account lifetime.
+
+- **Consensus-visible.** That difference lands in bytes the network agrees on:
+   the state root, the receipt root, or whether a transaction is accepted at all.
+
+### How the candidate set is enumerated
+
+Two axes, swept mechanically.
+
+- **The op vocabulary.** The ops in the table above are the state-mutating
+entry points. For each one, ask what geth's primitive does by default; where it
+diverges, emit a small family — the op alone, the op combined with an adjacent op,
+the op across a revert, the op across a commit.
+
+- **Configuration.** The same op under a different switch is a different
+question. Every switch that gates execution needs both of its sides covered
+somewhere, by whichever layer can reach it. Shipping configs do not span this axis
+on their own: where mainnet and devnet agree on a setting, a synthetic config is
+the only way to reach the other side.
