@@ -103,7 +103,8 @@ func (vt *virtualTransport) RemoteAddr() string {
 	return ""
 }
 
-// receive enqueues a frame without blocking; returns false if already closed.
+// receive enqueues a frame without blocking; returns ErrConnectionClosed if
+// already closed.
 func (vt *virtualTransport) receive(frame *wire.Frame) error {
 	vt.mu.Lock()
 	defer vt.mu.Unlock()
@@ -121,6 +122,12 @@ func (vt *virtualTransport) receive(frame *wire.Frame) error {
 // (Python: PeerShardConnection). All wire traffic tunnels through MasterConn;
 // it keeps an independent RPC ID namespace and carries no business logic —
 // business handling is injected via PeerHandler.
+//
+// Lifecycle ownership: PeerConn does not observe MasterConn's state. When the
+// master connection closes, the owner of the peer registry (the future
+// SlaveService) must close its PeerConns itself (py: slave.py:155-162
+// MasterConnection.close cascades to all peer connections); leaving them open
+// leaks their reader goroutines on vt.ReadFrame.
 type PeerConn struct {
 	*conn.BaseConn
 
