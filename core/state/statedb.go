@@ -137,6 +137,16 @@ type StateDB struct {
 	// Snapshot and RevertToSnapshot.
 	journal *journal
 
+	// fullShardKey is inherited by accounts first observed in the current message.
+	fullShardKey uint32
+
+	// qkcShardKeys records the shard key under which an absent account was first
+	// read. Pyquarkchain caches that blank account until the block is committed.
+	// For example, if message A with shard key 1 reads an absent account and
+	// message B with shard key 2 later creates it, the account retains shard key
+	// 1 from the first read instead of inheriting 2 from the creating message.
+	qkcShardKeys map[common.Address]uint32
+
 	// State witness if cross validation is needed
 	witness *stateless.Witness
 
@@ -193,6 +203,7 @@ func NewWithReader(root common.Hash, db Database, reader Reader) (*StateDB, erro
 		journal:              newJournal(),
 		accessList:           newAccessList(),
 		transientStorage:     newTransientStorage(),
+		qkcShardKeys:         make(map[common.Address]uint32),
 	}
 	if db.Type().Is(TypeUBT) {
 		sdb.accessEvents = NewAccessEvents()
@@ -460,6 +471,8 @@ func (s *StateDB) SubBalance(addr common.Address, amount *uint256.Int, reason tr
 		return uint256.Int{}
 	}
 	if amount.IsZero() {
+		// Match pyquarkchain, which touches an account for every zero balance delta.
+		stateObject.touch()
 		return *(stateObject.Balance())
 	}
 	return stateObject.SetBalance(new(uint256.Int).Sub(stateObject.Balance(), amount))
@@ -519,7 +532,7 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 	if obj != nil {
 		newObj.SetCode(common.BytesToHash(obj.CodeHash()), obj.code)
 		newObj.SetNonce(obj.Nonce())
-		newObj.SetBalance(obj.Balance())
+		newObj.data.MntBalances = obj.data.MntBalances.Copy()
 	}
 }
 
@@ -611,6 +624,7 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 
 	// Short circuit if the account is not found
 	if acct == nil {
+		s.noteQKCShardKey(addr)
 		return nil
 	}
 	// Schedule the resolved account for prefetching if it's enabled.
@@ -641,7 +655,15 @@ func (s *StateDB) getOrNewStateObject(addr common.Address) *stateObject {
 // createObject creates a new state object. The assumption is held there is no
 // existing account with the given address, otherwise it will be silently overwritten.
 func (s *StateDB) createObject(addr common.Address) *stateObject {
+	prev := s.getStateObject(addr)
 	obj := newObject(s, addr, nil)
+	obj.data.FullShardKey = s.qkcShardKey(addr)
+	if prev == nil {
+		prev = s.stateObjectsDestruct[addr]
+	}
+	if prev != nil {
+		obj.data.FullShardKey = prev.data.FullShardKey
+	}
 	s.journal.createObject(addr)
 	s.setStateObject(obj)
 	return obj
@@ -696,6 +718,8 @@ func (s *StateDB) Copy() *StateDB {
 		logs:                 make(map[common.Hash][]*types.Log, len(s.logs)),
 		logSize:              s.logSize,
 		preimages:            maps.Clone(s.preimages),
+		fullShardKey:         s.fullShardKey,
+		qkcShardKeys:         maps.Clone(s.qkcShardKeys),
 
 		// Do we need to copy the access list and transient storage?
 		// In practice: No. At the start of a transaction, these two lists are empty.
@@ -1324,6 +1348,7 @@ func (s *StateDB) commit(deleteEmptyObjects bool, noStorageWiping bool, blockNum
 	// Clear all internal flags and update state root at the end.
 	s.mutations = make(map[common.Address]*mutation)
 	s.stateObjectsDestruct = make(map[common.Address]*stateObject)
+	s.qkcShardKeys = make(map[common.Address]uint32)
 
 	origin := s.originalRoot
 	s.originalRoot = root
