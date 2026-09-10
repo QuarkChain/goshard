@@ -451,9 +451,8 @@ type SyncMinorBlockListRequest struct {
 //	    ("shard_stats", Optional(ShardStats)),
 //	]
 type SyncMinorBlockListResponse struct {
-	ErrorCode uint32
-	// TODO: Replace with real block_coinbase_map once core.TokenBalanceMap is ported.
-	BlockCoinbaseMap *RawBytes
+	ErrorCode        uint32
+	BlockCoinbaseMap PrependedSizeCoinbaseMap4
 	ShardStats       *ShardStats `ser:"nil"`
 }
 
