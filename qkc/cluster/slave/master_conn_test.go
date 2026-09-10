@@ -6,15 +6,29 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"math/big"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
+
+// ── test helpers ─────────────────────────────────────────────────────────────
+
+// newTestTx builds a minimal valid EVM transaction for wire tests.
+// *types.Transaction is not zero-value serializable (Serialize needs a
+// concrete inner tx), so every request carrying a Tx field must embed one.
+func newTestTx() *types.Transaction {
+	return types.NewEvmTransaction(1, account.Recipient{}, big.NewInt(100), 21000, big.NewInt(10),
+		0x00010001, 0x00010002, 1, 1, []byte{0xAA}, 1, 1)
+}
 
 // ── test handler ─────────────────────────────────────────────────────────────
 
@@ -31,9 +45,10 @@ type fakeMasterHandler struct {
 	// createShardsCalls counts CreateShards invocations (the PING RootTip
 	// callback).
 	createShardsCalls atomic.Int32
-	// lastRootTip stores a copy of the most recent CreateShards
-	// RootTip argument.
-	lastRootTip atomic.Pointer[wire.RawBytes]
+	// lastRootTip stores the most recent CreateShards RootTip argument.
+	// Each inbound frame is deserialized into a fresh RootBlock, so storing
+	// the reference is safe: the wire reader never mutates it afterwards.
+	lastRootTip atomic.Pointer[types.RootBlock]
 	// errCreateShards, if set, is returned by CreateShards to simulate a
 	// shard-activation failure.
 	errCreateShards error
@@ -50,12 +65,10 @@ type fakeMasterHandler struct {
 
 // CreateShards is the shard-creation callback invoked by MasterConn.handlePing
 // when the PING carries a RootTip.
-func (h *fakeMasterHandler) CreateShards(rootTip *wire.RawBytes) error {
+func (h *fakeMasterHandler) CreateShards(rootTip *types.RootBlock) error {
 	h.createShardsCalls.Add(1)
 	if rootTip != nil {
-		cp := make(wire.RawBytes, len(*rootTip))
-		copy(cp, *rootTip)
-		h.lastRootTip.Store(&cp)
+		h.lastRootTip.Store(rootTip)
 	}
 	return h.errCreateShards
 }
@@ -89,13 +102,10 @@ func (h *fakeMasterHandler) GenTx(*wire.GenTxRequest) (*wire.GenTxResponse, erro
 func (h *fakeMasterHandler) AddRootBlock(req *wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error) {
 	h.addRootBlockCalls.Add(1)
 	if req != nil {
-		cp := *req
-		if req.RootBlock != nil {
-			rb := make(wire.RawBytes, len(*req.RootBlock))
-			copy(rb, *req.RootBlock)
-			cp.RootBlock = &rb
-		}
-		h.lastAddRootBlockReq.Store(&cp)
+		// The request is a fresh object per inbound frame and is never
+		// mutated afterwards, so storing the reference preserves the values
+		// the handler observed.
+		h.lastAddRootBlockReq.Store(req)
 	}
 	if h.respAddRootBlock != nil {
 		return h.respAddRootBlock, nil
@@ -346,7 +356,7 @@ func TestMasterConn_Ping(t *testing.T) {
 	server, peer, cleanup := newMasterConnWithPeer(t, handler)
 	defer cleanup()
 
-	for i, rootTip := range []*wire.RawBytes{nil, {0x01, 0x02}} {
+	for i, rootTip := range []*types.RootBlock{nil, types.NewRootBlockWithHeader(&types.RootBlockHeader{Number: 1})} {
 		payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 			ID:              []byte("master"),
 			FullShardIDList: []uint32{0x000f0001}, // deliberately differs from the slave's own, to prove PONG never adopts it
@@ -393,8 +403,8 @@ func TestMasterConn_Ping(t *testing.T) {
 	if got := handler.createShardsCalls.Load(); got != 1 {
 		t.Fatalf("CreateShards calls: got %d, want 1 (only the non-nil RootTip)", got)
 	}
-	if got := handler.lastRootTip.Load(); got == nil || len(*got) != 2 || (*got)[0] != 0x01 || (*got)[1] != 0x02 {
-		t.Fatalf("CreateShards RootTip mismatch: got %v, want [2]byte{0x01, 0x02}", got)
+	if got := handler.lastRootTip.Load(); got == nil || got.Number() != 1 {
+		t.Fatalf("CreateShards RootTip mismatch: got %v, want RootBlock(Number=1)", got)
 	}
 }
 
@@ -411,7 +421,7 @@ func TestMasterConn_CreateShardsErrorClosesConnection(t *testing.T) {
 	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              []byte("master"),
 		FullShardIDList: []uint32{0x00010001},
-		RootTip:         &wire.RawBytes{0x01},
+		RootTip:         types.NewRootBlockWithHeader(&types.RootBlockHeader{Number: 1}),
 	})
 	if err != nil {
 		t.Fatalf("serialize ping: %v", err)
@@ -542,7 +552,7 @@ func TestMasterConn_AddRootBlockDelegated(t *testing.T) {
 	defer cleanup()
 
 	req := &wire.AddRootBlockRequest{
-		RootBlock:    &wire.RawBytes{0xde, 0xad, 0xbe, 0xef},
+		RootBlock:    types.NewRootBlockWithHeader(&types.RootBlockHeader{Number: 0xbeef}),
 		ExpectSwitch: true,
 	}
 	payload, err := serialize.SerializeToBytes(req)
@@ -579,9 +589,8 @@ func TestMasterConn_AddRootBlockDelegated(t *testing.T) {
 		t.Fatalf("AddRootBlock called %d times, want 1", got)
 	}
 	gotReq := handler.lastAddRootBlockReq.Load()
-	if gotReq == nil || gotReq.RootBlock == nil || len(*gotReq.RootBlock) != 4 ||
-		(*gotReq.RootBlock)[0] != 0xde || (*gotReq.RootBlock)[3] != 0xef || !gotReq.ExpectSwitch {
-		t.Fatalf("AddRootBlock request mismatch: got %+v, want RootBlock=[de ad be ef] ExpectSwitch=true", gotReq)
+	if gotReq == nil || gotReq.RootBlock == nil || gotReq.RootBlock.Number() != 0xbeef || !gotReq.ExpectSwitch {
+		t.Fatalf("AddRootBlock request mismatch: got %+v, want RootBlock(Number=0xbeef) ExpectSwitch=true", gotReq)
 	}
 
 	select {
@@ -599,7 +608,7 @@ func TestMasterConn_BusinessHandlerErrorClosesConnection(t *testing.T) {
 	})
 	defer cleanup()
 
-	payload, _ := serialize.SerializeToBytes(&wire.GenTxRequest{})
+	payload, _ := serialize.SerializeToBytes(&wire.GenTxRequest{Tx: newTestTx()})
 	if err := peer.send(&wire.Frame{
 		Meta:    wire.ClusterMetadata{},
 		Opcode:  byte(wire.ClusterOpGenTxRequest),
@@ -632,22 +641,22 @@ func TestMasterConn_MasterToSlaveOpcodeMatrix(t *testing.T) {
 	}{
 		{"ConnectToSlaves", wire.ClusterOpConnectToSlavesRequest, wire.ClusterOpConnectToSlavesResponse, &wire.ConnectToSlavesRequest{}},
 		{"Mine", wire.ClusterOpMineRequest, wire.ClusterOpMineResponse, &wire.MineRequest{}},
-		{"GenTx", wire.ClusterOpGenTxRequest, wire.ClusterOpGenTxResponse, &wire.GenTxRequest{}},
+		{"GenTx", wire.ClusterOpGenTxRequest, wire.ClusterOpGenTxResponse, &wire.GenTxRequest{Tx: newTestTx()}},
 		{"AddRootBlock", wire.ClusterOpAddRootBlockRequest, wire.ClusterOpAddRootBlockResponse, &wire.AddRootBlockRequest{}},
 		{"GetEcoInfoList", wire.ClusterOpGetEcoInfoListRequest, wire.ClusterOpGetEcoInfoListResponse, &wire.GetEcoInfoListRequest{}},
 		{"GetNextBlockToMine", wire.ClusterOpGetNextBlockToMineRequest, wire.ClusterOpGetNextBlockToMineResponse, &wire.GetNextBlockToMineRequest{}},
 		{"AddMinorBlock", wire.ClusterOpAddMinorBlockRequest, wire.ClusterOpAddMinorBlockResponse, &wire.AddMinorBlockRequest{}},
 		{"GetUnconfirmedHeaders", wire.ClusterOpGetUnconfirmedHeadersRequest, wire.ClusterOpGetUnconfirmedHeadersResponse, &wire.GetUnconfirmedHeadersRequest{}},
 		{"GetAccountData", wire.ClusterOpGetAccountDataRequest, wire.ClusterOpGetAccountDataResponse, &wire.GetAccountDataRequest{}},
-		{"AddTransaction", wire.ClusterOpAddTransactionRequest, wire.ClusterOpAddTransactionResponse, &wire.AddTransactionRequest{}},
+		{"AddTransaction", wire.ClusterOpAddTransactionRequest, wire.ClusterOpAddTransactionResponse, &wire.AddTransactionRequest{Tx: newTestTx()}},
 		{"GetMinorBlock", wire.ClusterOpGetMinorBlockRequest, wire.ClusterOpGetMinorBlockResponse, &wire.GetMinorBlockRequest{}},
 		{"GetTransaction", wire.ClusterOpGetTransactionRequest, wire.ClusterOpGetTransactionResponse, &wire.GetTransactionRequest{}},
 		{"SyncMinorBlockList", wire.ClusterOpSyncMinorBlockListRequest, wire.ClusterOpSyncMinorBlockListResponse, &wire.SyncMinorBlockListRequest{}},
-		{"ExecuteTransaction", wire.ClusterOpExecuteTransactionRequest, wire.ClusterOpExecuteTransactionResponse, &wire.ExecuteTransactionRequest{}},
+		{"ExecuteTransaction", wire.ClusterOpExecuteTransactionRequest, wire.ClusterOpExecuteTransactionResponse, &wire.ExecuteTransactionRequest{Tx: newTestTx()}},
 		{"GetTransactionReceipt", wire.ClusterOpGetTransactionReceiptRequest, wire.ClusterOpGetTransactionReceiptResponse, &wire.GetTransactionReceiptRequest{}},
 		{"GetTransactionListByAddress", wire.ClusterOpGetTransactionListByAddressRequest, wire.ClusterOpGetTransactionListByAddressResponse, &wire.GetTransactionListByAddressRequest{}},
 		{"GetLogs", wire.ClusterOpGetLogRequest, wire.ClusterOpGetLogResponse, &wire.GetLogRequest{}},
-		{"EstimateGas", wire.ClusterOpEstimateGasRequest, wire.ClusterOpEstimateGasResponse, &wire.EstimateGasRequest{}},
+		{"EstimateGas", wire.ClusterOpEstimateGasRequest, wire.ClusterOpEstimateGasResponse, &wire.EstimateGasRequest{Tx: newTestTx()}},
 		{"GetStorageAt", wire.ClusterOpGetStorageRequest, wire.ClusterOpGetStorageResponse, &wire.GetStorageRequest{}},
 		{"GetCode", wire.ClusterOpGetCodeRequest, wire.ClusterOpGetCodeResponse, &wire.GetCodeRequest{}},
 		{"GasPrice", wire.ClusterOpGasPriceRequest, wire.ClusterOpGasPriceResponse, &wire.GasPriceRequest{}},
@@ -772,10 +781,10 @@ func TestMasterConn_SendAddMinorBlockHeader(t *testing.T) {
 	}()
 
 	req := &wire.AddMinorBlockHeaderRequest{
-		MinorBlockHeader:  &wire.RawBytes{},
+		MinorBlockHeader:  &types.MinorBlockHeader{},
 		TxCount:           5,
 		XShardTxCount:     0,
-		CoinbaseAmountMap: &wire.RawBytes{},
+		CoinbaseAmountMap: qkcCommon.NewEmptyTokenBalances(),
 		ShardStats:        wire.ShardStats{Branch: 0x00010001},
 	}
 	type sendResult struct {
@@ -859,8 +868,8 @@ func TestMasterConn_SendAddMinorBlockHeaderList(t *testing.T) {
 	}()
 
 	req := &wire.AddMinorBlockHeaderListRequest{
-		MinorBlockHeaderList:  []*wire.RawBytes{{0x01}},
-		CoinbaseAmountMapList: []*wire.RawBytes{{0x02}},
+		MinorBlockHeaderList:  []*types.MinorBlockHeader{{}},
+		CoinbaseAmountMapList: []*qkcCommon.TokenBalances{qkcCommon.NewEmptyTokenBalances()},
 	}
 	type sendResult struct {
 		resp *wire.AddMinorBlockHeaderListResponse
