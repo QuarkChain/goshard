@@ -98,7 +98,7 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 	if acct == nil {
 		acct = types.NewEmptyStateAccount()
 	}
-	obj := &stateObject{
+	return &stateObject{
 		db:                 db,
 		address:            address,
 		origin:             origin,
@@ -108,10 +108,6 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 		pendingStorage:     make(Storage),
 		uncommittedStorage: make(Storage),
 	}
-	if origin != nil && origin.MntBalances != nil {
-		obj.data.MntBalances = origin.MntBalances.Copy()
-	}
-	return obj
 }
 
 func (s *stateObject) addrHash() common.Hash {
@@ -499,8 +495,6 @@ func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
 	return prev
 }
 
-// setBalance updates the QKC balance without adding a journal entry. It is
-// used while reverting a balanceChange journal entry.
 func (s *stateObject) setBalance(amount *uint256.Int) {
 	s.data.SetBalance(amount)
 }
@@ -520,9 +514,6 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 		dirtyCode:          s.dirtyCode,
 		selfDestructed:     s.selfDestructed,
 		newContract:        s.newContract,
-	}
-	if s.data.MntBalances != nil {
-		obj.data.MntBalances = s.data.MntBalances.Copy()
 	}
 
 	switch s.trie.(type) {

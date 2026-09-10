@@ -184,7 +184,7 @@ func (t *testHelper) addTrieAccount(acckey string, acc *types.StateAccount) {
 	t.accTrie.MustUpdate([]byte(acckey), val)
 
 	accHash := hashData([]byte(acckey))
-	t.states.Accounts[accHash] = types.SlimAccountRLP(*acc)
+	t.states.Accounts[accHash] = val
 	t.states.AccountsOrigin[common.BytesToAddress([]byte(acckey))] = nil
 }
 
@@ -441,12 +441,9 @@ func testGenerateCorruptAccountTrie(t *testing.T, scheme string) {
 
 	// Delete an account trie node and ensure the generator chokes
 	targetPath := []byte{0xc}
-	target := helper.nodes.Sets[common.Hash{}].Nodes[string(targetPath)]
-	if target == nil {
-		t.Fatalf("missing account trie node at path %x", targetPath)
-	}
+	targetHash := common.HexToHash("0x65145f923027566669a1ae5ccac66f945b55ff6eaeb17d2ea8e048b7d381f2d7")
 
-	rawdb.DeleteTrieNode(helper.diskdb, common.Hash{}, targetPath, target.Hash, scheme)
+	rawdb.DeleteTrieNode(helper.diskdb, common.Hash{}, targetPath, targetHash, scheme)
 
 	snap := generateSnapshot(helper.diskdb, helper.triedb, 16, root)
 	select {
@@ -570,7 +567,7 @@ func testGenerateWithExtraAccounts(t *testing.T, scheme string) {
 
 		// Identical in the snap
 		key := hashData([]byte("acc-1"))
-		rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
+		rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-1")), []byte("val-1"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-2")), []byte("val-2"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-3")), []byte("val-3"))
@@ -585,8 +582,9 @@ func testGenerateWithExtraAccounts(t *testing.T, scheme string) {
 			true,
 		)
 		acc := &types.StateAccount{MntBalances: types.NewQKCTokenBalances(uint256.NewInt(1)), Root: stRoot, CodeHash: types.EmptyCodeHash.Bytes()}
+		val, _ := rlp.EncodeToBytes(acc)
 		key := hashData([]byte("acc-2"))
-		rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
+		rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("b-key-1")), []byte("b-val-1"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("b-key-2")), []byte("b-val-2"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("b-key-3")), []byte("b-val-3"))
@@ -645,7 +643,7 @@ func testGenerateWithManyExtraAccounts(t *testing.T, scheme string) {
 
 		// Identical in the snap
 		key := hashData([]byte("acc-1"))
-		rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
+		rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-1")), []byte("val-1"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-2")), []byte("val-2"))
 		rawdb.WriteStorageSnapshot(helper.diskdb, key, hashData([]byte("key-3")), []byte("val-3"))
@@ -654,8 +652,9 @@ func testGenerateWithManyExtraAccounts(t *testing.T, scheme string) {
 		// 100 accounts exist only in snapshot
 		for i := 0; i < 1000; i++ {
 			acc := &types.StateAccount{MntBalances: types.NewQKCTokenBalances(uint256.NewInt(uint64(i))), Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash.Bytes()}
+			val, _ := rlp.EncodeToBytes(acc)
 			key := hashData(fmt.Appendf(nil, "acc-%d", i))
-			rawdb.WriteAccountSnapshot(helper.diskdb, key, types.SlimAccountRLP(*acc))
+			rawdb.WriteAccountSnapshot(helper.diskdb, key, val)
 		}
 	}
 	root, snap := helper.CommitAndGenerate()
@@ -699,14 +698,13 @@ func testGenerateWithExtraBeforeAndAfter(t *testing.T, scheme string) {
 		helper.accTrie.MustUpdate(common.HexToHash("0x03").Bytes(), val)
 		helper.accTrie.MustUpdate(common.HexToHash("0x07").Bytes(), val)
 
-		slim := types.SlimAccountRLP(*acc)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x01"), slim)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x02"), slim)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x03"), slim)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x04"), slim)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x05"), slim)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x06"), slim)
-		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x07"), slim)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x01"), val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x02"), val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x03"), val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x04"), val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x05"), val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x06"), val)
+		rawdb.WriteAccountSnapshot(helper.diskdb, common.HexToHash("0x07"), val)
 	}
 	root, snap := helper.CommitAndGenerate()
 	select {
