@@ -460,19 +460,7 @@ func (t *tester) generate(parent common.Hash, rawStorageKey bool) (common.Hash, 
 			t.preimages[addrHash] = addr.Bytes()
 		}
 	}
-	trieAccounts := make(map[common.Hash][]byte, len(ctx.accounts))
-	for addrHash, account := range ctx.accounts {
-		if len(account) == 0 {
-			trieAccounts[addrHash] = nil
-			continue
-		}
-		full, err := types.FullAccountRLP(account)
-		if err != nil {
-			panic(err)
-		}
-		trieAccounts[addrHash] = full
-	}
-	root, set := updateTrie(t.db, parent, common.Hash{}, parent, trieAccounts)
+	root, set := updateTrie(t.db, parent, common.Hash{}, parent, ctx.accounts)
 	ctx.nodes.Merge(set)
 
 	// Save state snapshot before commit
@@ -522,15 +510,8 @@ func (t *tester) verifyState(root common.Hash) error {
 	}
 	for addrHash, account := range t.snapAccounts[root] {
 		blob, err := tr.Get(addrHash.Bytes())
-		if err != nil {
-			return err
-		}
-		full, err := types.FullAccountRLP(account)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(blob, full) {
-			return errors.New("account is mismatched")
+		if err != nil || !bytes.Equal(blob, account) {
+			return fmt.Errorf("account is mismatched: %w", err)
 		}
 	}
 	for addrHash, slots := range t.snapStorages[root] {
@@ -538,8 +519,8 @@ func (t *tester) verifyState(root common.Hash) error {
 		if len(blob) == 0 {
 			return fmt.Errorf("account %x is missing", addrHash)
 		}
-		account, err := types.FullAccount(blob)
-		if err != nil {
+		account := new(types.StateAccount)
+		if err := rlp.DecodeBytes(blob, account); err != nil {
 			return err
 		}
 		storageIt, err := trie.New(trie.StorageTrieID(root, addrHash, account.Root), t.db)
