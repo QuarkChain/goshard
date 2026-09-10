@@ -31,14 +31,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
-	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
-	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"github.com/holiman/uint256"
 )
 
@@ -65,6 +64,21 @@ func newStateTestAction(addr common.Address, r *rand.Rand, index int) testAction
 				s.SetBalance(addr, uint256.NewInt(uint64(a.args[0])), tracing.BalanceChangeUnspecified)
 			},
 			args: make([]int64, 1),
+		},
+		{
+			name: "SetMntBalance",
+			fn: func(a testAction, s *StateDB) {
+				s.SetMntBalance(addr, uint256.NewInt(uint64(a.args[0])), qkccommon.DefaultTokenID+1)
+			},
+			args: make([]int64, 1),
+		},
+		{
+			name: "SetFullShardKey",
+			fn: func(a testAction, s *StateDB) {
+				s.SetFullShardKey(uint32(a.args[0]))
+			},
+			args:   make([]int64, 1),
+			noAddr: true,
 		},
 		{
 			name: "SetNonce",
@@ -175,6 +189,34 @@ func (test *stateTest) String() string {
 	return out.String()
 }
 
+func stateAccountsEqual(a, b *types.StateAccount) bool {
+	if a.Nonce != b.Nonce || a.Root != b.Root || a.FullShardKey != b.FullShardKey || !bytes.Equal(a.CodeHash, b.CodeHash) {
+		return false
+	}
+	var aBalances, bBalances map[uint64]*uint256.Int
+	if a.MntBalances != nil {
+		aBalances = a.MntBalances.GetBalanceMap()
+	}
+	if b.MntBalances != nil {
+		bBalances = b.MntBalances.GetBalanceMap()
+	}
+	for tokenID, balance := range aBalances {
+		if balance != nil && !balance.IsZero() {
+			if other := b.GetMntBalance(tokenID); !other.Eq(balance) {
+				return false
+			}
+		}
+	}
+	for tokenID, balance := range bBalances {
+		if balance != nil && !balance.IsZero() {
+			if other := a.GetMntBalance(tokenID); !other.Eq(balance) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (test *stateTest) run() bool {
 	var (
 		roots         []common.Hash
@@ -183,34 +225,49 @@ func (test *stateTest) run() bool {
 		storages      []map[common.Hash]map[common.Hash][]byte
 		storageOrigin []map[common.Address]map[common.Hash][]byte
 		copyUpdate    = func(update *StateUpdate) {
-			accts, acctOrigin, slots, slotOrigin := update.EncodeMPTState()
+			_, _, slots, slotOrigin := update.EncodeMPTState()
+			accts := make(map[common.Hash][]byte, len(update.Accounts))
+			for addrHash, account := range update.Accounts {
+				if account == nil {
+					accts[addrHash] = nil
+					continue
+				}
+				blob, err := rlp.EncodeToBytes(account)
+				if err != nil {
+					panic(err)
+				}
+				accts[addrHash] = blob
+			}
+			acctOrigin := make(map[common.Address][]byte, len(update.AccountsOrigin))
+			for addr, account := range update.AccountsOrigin {
+				if account == nil {
+					acctOrigin[addr] = nil
+					continue
+				}
+				blob, err := rlp.EncodeToBytes(account)
+				if err != nil {
+					panic(err)
+				}
+				acctOrigin[addr] = blob
+			}
 			accounts = append(accounts, maps.Clone(accts))
 			accountOrigin = append(accountOrigin, maps.Clone(acctOrigin))
 			storages = append(storages, maps.Clone(slots))
 			storageOrigin = append(storageOrigin, maps.Clone(slotOrigin))
 		}
 		disk      = rawdb.NewMemoryDatabase()
-		tdb       = triedb.NewDatabase(disk, &triedb.Config{PathDB: pathdb.Defaults})
+		tdb       = triedb.NewDatabase(disk, nil)
 		byzantium = rand.Intn(2) == 0
 	)
 	defer disk.Close()
 	defer tdb.Close()
 
-	var snaps *snapshot.Tree
-	if rand.Intn(3) == 0 {
-		snaps, _ = snapshot.New(snapshot.Config{
-			CacheSize:  1,
-			Recovery:   false,
-			NoBuild:    false,
-			AsyncBuild: false,
-		}, disk, tdb, types.EmptyRootHash)
-	}
 	for i, actions := range test.actions {
 		root := types.EmptyRootHash
 		if i != 0 {
 			root = roots[len(roots)-1]
 		}
-		state, err := New(root, NewMPTDatabase(tdb, nil).WithSnapshot(snaps))
+		state, err := New(root, NewMPTDatabase(tdb, nil))
 		if err != nil {
 			panic(err)
 		}
@@ -276,19 +333,19 @@ func (test *stateTest) verifyAccountCreation(next common.Hash, db *triedb.Databa
 	if len(nBlob) == 0 {
 		return fmt.Errorf("missing account in new trie, %x", addrHash)
 	}
-	full, err := types.FullAccountRLP(account)
-	if err != nil {
+	var wantAcct types.StateAccount
+	if err := rlp.DecodeBytes(account, &wantAcct); err != nil {
 		return err
 	}
-	if !bytes.Equal(nBlob, full) {
-		return fmt.Errorf("unexpected account data, want: %v, got: %v", full, nBlob)
-	}
-
-	// Verify storage changes
 	var nAcct types.StateAccount
 	if err := rlp.DecodeBytes(nBlob, &nAcct); err != nil {
 		return err
 	}
+	if !stateAccountsEqual(&wantAcct, &nAcct) {
+		return fmt.Errorf("unexpected account data, want: %v, got: %v", &wantAcct, &nAcct)
+	}
+
+	// Verify storage changes
 	// Account has no slot, empty slot set is expected
 	if nAcct.Root == types.EmptyRootHash {
 		if len(storagesOrigin) != 0 {
@@ -347,37 +404,34 @@ func (test *stateTest) verifyAccountUpdate(next common.Hash, db *triedb.Database
 	if len(oBlob) == 0 {
 		return fmt.Errorf("missing account in old trie, %x", addrHash)
 	}
-	full, err := types.FullAccountRLP(accountOrigin)
-	if err != nil {
+	var wantOriginAcct types.StateAccount
+	if err := rlp.DecodeBytes(accountOrigin, &wantOriginAcct); err != nil {
 		return err
 	}
-	if !bytes.Equal(full, oBlob) {
+	var oAcct types.StateAccount
+	if err := rlp.DecodeBytes(oBlob, &oAcct); err != nil {
+		return err
+	}
+	if !stateAccountsEqual(&wantOriginAcct, &oAcct) {
 		return fmt.Errorf("account value is not matched, %x", addrHash)
 	}
+	var nRoot common.Hash
 	if len(nBlob) == 0 {
 		if len(account) != 0 {
 			return errors.New("unexpected account data")
 		}
-	} else {
-		full, _ = types.FullAccountRLP(account)
-		if !bytes.Equal(full, nBlob) {
-			return fmt.Errorf("unexpected account data, %x, want %v, got: %v", addrHash, full, nBlob)
-		}
-	}
-	// Decode accounts
-	var (
-		oAcct types.StateAccount
-		nAcct types.StateAccount
-		nRoot common.Hash
-	)
-	if err := rlp.DecodeBytes(oBlob, &oAcct); err != nil {
-		return err
-	}
-	if len(nBlob) == 0 {
 		nRoot = types.EmptyRootHash
 	} else {
+		var wantAcct types.StateAccount
+		if err := rlp.DecodeBytes(account, &wantAcct); err != nil {
+			return err
+		}
+		var nAcct types.StateAccount
 		if err := rlp.DecodeBytes(nBlob, &nAcct); err != nil {
 			return err
+		}
+		if !stateAccountsEqual(&wantAcct, &nAcct) {
+			return fmt.Errorf("unexpected account data, %x, want %v, got: %v", addrHash, &wantAcct, &nAcct)
 		}
 		nRoot = nAcct.Root
 	}

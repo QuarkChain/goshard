@@ -49,10 +49,10 @@ func NewMPTDatabase(tdb *triedb.Database, codedb *CodeDB) *MPTDatabase {
 	}
 }
 
-// WithSnapshot configures the provided state snapshot. Note that this
-// registration must be performed before the MPTDatabase is used.
-func (db *MPTDatabase) WithSnapshot(snapshot *snapshot.Tree) Database {
-	db.snap = snapshot
+// WithSnapshot ignores the provided snapshot because snapshot state encoding
+// does not support QuarkChain accounts.
+func (db *MPTDatabase) WithSnapshot(_ *snapshot.Tree) Database {
+	db.snap = nil
 	return db
 }
 
@@ -154,6 +154,12 @@ func (db *MPTDatabase) Commit(update *StateUpdate) error {
 		if err := batch.Commit(); err != nil {
 			return err
 		}
+	}
+	// Hash-based MPT persistence only needs trie nodes. Return early instead of
+	// calling EncodeMPTState, which converts accounts to the lossy slim encoding
+	// used solely by snapshot and path databases.
+	if db.triedb.Scheme() == rawdb.HashScheme {
+		return db.triedb.Update(update.Root, update.OriginRoot, update.BlockNumber, update.Nodes, nil)
 	}
 	// Encode the state mutations in the MPT format
 	accounts, accountOrigin, storages, storageOrigin := update.EncodeMPTState()
