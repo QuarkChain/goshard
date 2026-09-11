@@ -61,6 +61,8 @@ type snapshotTestBasic struct {
 }
 
 func (basic *snapshotTestBasic) prepare(t *testing.T) (*BlockChain, []*types.Block) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+
 	// Create a temporary persistent database
 	datadir := t.TempDir()
 	ancient := filepath.Join(datadir, "ancient")
