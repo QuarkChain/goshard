@@ -11,8 +11,6 @@
 //
 //   - This is not an exhaustive byte-level test of all 60+ messages.
 //   - Python/Go golden vectors are added for selected fully concrete messages.
-//   - Messages containing RawBytes placeholders are excluded from byte-level
-//     compatibility checks until their underlying types are migrated.
 //   - Some concrete messages may not have golden vectors yet and will be added
 //     as additional protocol types are validated.
 //
@@ -29,7 +27,10 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/qkc/account"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/holiman/uint256"
 )
 
 // =============================================================================
@@ -94,6 +95,133 @@ func TestPrependedSizeHashList4_RoundTrip(t *testing.T) {
 	}
 }
 
+// tokenBalancesEqual reports whether two TokenBalances hold identical
+// (tokenID, balance) entries. Test-only: TokenBalances itself has no Equal.
+func tokenBalancesEqual(a, b *qkcCommon.TokenBalances) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	ma, mb := a.GetBalanceMap(), b.GetBalanceMap()
+	if len(ma) != len(mb) {
+		return false
+	}
+	for k, va := range ma {
+		vb, ok := mb[k]
+		if !ok || va == nil || vb == nil || va.Cmp(vb) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestPrependedSizeCoinbaseMap4_RoundTrip(t *testing.T) {
+	cases := []PrependedSizeCoinbaseMap4{
+		nil,
+		{},
+		{makeHash(1): qkcCommon.NewEmptyTokenBalances()},
+		{makeHash(1): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{1: uint256.NewInt(100)})},
+		{
+			makeHash(1): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{1: uint256.NewInt(1), 2: uint256.NewInt(2)}),
+			makeHash(2): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{735800: uint256.NewInt(42)}),
+		},
+	}
+	for _, want := range cases {
+		var buf []byte
+		if err := want.Serialize(&buf); err != nil {
+			t.Fatalf("Serialize: %v", err)
+		}
+		bb := serialize.NewByteBuffer(buf)
+		var got PrependedSizeCoinbaseMap4
+		if err := got.Deserialize(bb); err != nil {
+			t.Fatalf("Deserialize: %v", err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("length mismatch: got %d, want %d", len(got), len(want))
+		}
+		for k, wantV := range want {
+			if !tokenBalancesEqual(got[k], wantV) {
+				t.Errorf("value mismatch for key %x", k[:])
+			}
+		}
+		// Re-serialization must reproduce identical bytes (skip-zero symmetry).
+		var buf2 []byte
+		if err := got.Serialize(&buf2); err != nil {
+			t.Fatalf("Re-serialize: %v", err)
+		}
+		if !bytes.Equal(buf, buf2) {
+			t.Errorf("round-trip bytes mismatch")
+		}
+	}
+}
+
+func TestPrependedSizeCoinbaseMap4_EmptyGolden(t *testing.T) {
+	// Python PrependedSizeMapSerializer(4, hash256, TokenBalanceMap).serialize({})
+	// emits a bare 4-byte zero count: block_coinbase_map is never Optional in
+	// pyquarkchain (SyncMinorBlockListResponse.__init__ normalizes None to {}).
+	cases := map[string]PrependedSizeCoinbaseMap4{
+		"nil_map":   nil,
+		"empty_map": {},
+	}
+	for name, m := range cases {
+		t.Run(name, func(t *testing.T) {
+			var buf []byte
+			if err := m.Serialize(&buf); err != nil {
+				t.Fatalf("Serialize: %v", err)
+			}
+			if got := hex.EncodeToString(buf); got != "00000000" {
+				t.Errorf("wire: got %s, want 00000000", got)
+			}
+		})
+	}
+}
+
+func TestPrependedSizeCoinbaseMap4_SortedKeys(t *testing.T) {
+	// Keys are inserted out of order; the wire encoding must emit them in
+	// ascending byte order regardless (Python sorted(item_map) determinism).
+	m := PrependedSizeCoinbaseMap4{
+		makeHash(3): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{3: uint256.NewInt(3)}),
+		makeHash(1): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{1: uint256.NewInt(1)}),
+		makeHash(2): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{2: uint256.NewInt(2)}),
+	}
+	wantHex := "00000003" + // entry count (4B)
+		"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" + // key makeHash(1) (32B)
+		"0000000101010101" + // value TokenBalanceMap{1: 1}
+		"02030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021" + // key makeHash(2) (32B)
+		"0000000101020102" + // value TokenBalanceMap{2: 2}
+		"030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122" + // key makeHash(3) (32B)
+		"0000000101030103" // value TokenBalanceMap{3: 3}
+
+	var buf []byte
+	if err := m.Serialize(&buf); err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	if got := hex.EncodeToString(buf); got != wantHex {
+		t.Errorf("wire: got %s, want %s", got, wantHex)
+	}
+
+	// Determinism: Go map iteration randomness must not leak into the encoding.
+	var buf2 []byte
+	if err := m.Serialize(&buf2); err != nil {
+		t.Fatalf("Serialize (2nd): %v", err)
+	}
+	if !bytes.Equal(buf, buf2) {
+		t.Errorf("encoding not deterministic across serializations")
+	}
+}
+
+func TestPrependedSizeCoinbaseMap4_NilValueError(t *testing.T) {
+	// A nil *TokenBalances value indicates a caller bug: Serialize must return
+	// an error instead of panicking (TokenBalances.Len dereferences nil).
+	m := PrependedSizeCoinbaseMap4{makeHash(1): nil}
+	var buf []byte
+	if err := m.Serialize(&buf); err == nil {
+		t.Fatalf("Serialize: expected error for nil value, got nil")
+	}
+}
+
 // =============================================================================
 // §2 Message round-trips (representative samples)
 // =============================================================================
@@ -103,14 +231,20 @@ func TestMessageRoundTrip(t *testing.T) {
 		name string
 		msg  any
 	}{
-		{"PingRequest_no_RawBytes", PingRequest{
+		{"PingRequest_no_RootTip", PingRequest{
 			ID:              []byte("slave1"),
 			FullShardIDList: []uint32{0x00010001, 0x00020002},
 		}},
-		{"GenTxRequest_RawBytes_last", GenTxRequest{
+		{"PingRequest_with_RootTip", PingRequest{
+			ID:              []byte("slave1"),
+			FullShardIDList: []uint32{0x00010001, 0x00020002},
+			RootTip:         types.NewRootBlockWithHeader(&types.RootBlockHeader{}),
+		}},
+		{"GenTxRequest_Tx_last", GenTxRequest{
 			NumTxPerShard: 10,
 			XShardPercent: 30,
-			Tx:            &RawBytes{0x01, 0x02, 0x03},
+			Tx: types.NewEvmTransaction(1, account.Recipient{}, big.NewInt(100), 21000, big.NewInt(10),
+				0x00010001, 0x00010002, 1, 1, []byte{0xAA}, 1, 1),
 		}},
 	}
 
@@ -281,6 +415,26 @@ func TestPythonCompat_PingRequest(t *testing.T) {
 	assertPythonMatch(t, wantHex, buf)
 }
 
+func TestPythonCompat_PingRequest_WithRootTip(t *testing.T) {
+	// ID="test", FullShardIDList=[1,2], RootTip empty RootBlock.
+	// The leading "01" after full_shard_id_list is Optional's presence marker;
+	// it is emitted when RootTip is non-nil and omitted when nil (the previous
+	// test). Golden generated by pyquarkchain: Ping(b'test', [1,2],
+	// RootBlock(RootBlockHeader())).serialize().hex()
+	wantHex := "000000047465737400000002000000010000000201000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+	ping := PingRequest{
+		ID:              []byte("test"),
+		FullShardIDList: []uint32{1, 2},
+		RootTip:         types.NewRootBlockWithHeader(&types.RootBlockHeader{}),
+	}
+	var buf []byte
+	if err := serialize.Serialize(&buf, &ping); err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	assertPythonMatch(t, wantHex, buf)
+}
+
 func TestPythonCompat_SlaveInfo(t *testing.T) {
 	// ID="s1", Host="localhost", Port=38391, FullShardIDList=[0x00010001]
 	wantHex := "000000027331" +
@@ -397,17 +551,16 @@ func TestPythonCompat_TransactionDetail(t *testing.T) {
 func TestMessageEncoding_SyncMinorBlockListResponse_NonNilShardStats(t *testing.T) {
 	// Tests wire encoding of SyncMinorBlockListResponse.
 	//
-	// NOTE:
-	// BlockCoinbaseMap is currently represented as *RawBytes placeholder.
-	// Its encoding follows Go byte slice serialization and is NOT compatible
-	// with Python's PrependedSizeMapSerializer(4, hash256, TokenBalanceMap).
+	// block_coinbase_map uses PrependedSizeCoinbaseMap4 — a Python-compatible
+	// PrependedSizeMapSerializer(4, hash256, TokenBalanceMap) — with a non-empty
+	// map asserted byte-for-byte against the Python golden.
 	//
 	// Covers:
 	// - BigUint in message context (via ShardStats.Difficulty)
 	// - Optional(struct) non-nil (ShardStats)
 	// - nested struct composition
 	//
-	// Python schema reference (not a golden byte compatibility assertion):
+	// Python schema reference:
 	//   ("error_code", uint32),
 	//   ("block_coinbase_map", PrependedSizeMapSerializer(4, hash256, TokenBalanceMap)),
 	//   ("shard_stats", Optional(ShardStats)),
@@ -424,8 +577,19 @@ func TestMessageEncoding_SyncMinorBlockListResponse_NonNilShardStats(t *testing.
 	//   ("block_count60s", uint32),      # uint32
 	//   ("stale_block_count60s", uint32),# uint32
 	//   ("last_block_time", uint32),     # uint32
+	//
+	// block_coinbase_map = { makeHash(1): TokenBalanceMap({1: 100}) }:
+	//   "00000001"  count=1
+	//   "0102...20" hash key makeHash(1) (32B)
+	//   "00000001"  TokenBalanceMap count=1
+	//   "0101"      biguint key 1
+	//   "0164"      biguint value 100
 	wantHex := "00000000" + // error_code (4B)
-		"02aabb" + // block_coinbase_map: RawBytes placeholder encoding
+		"00000001" + // block_coinbase_map: map count (4B)
+		"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" + // hash key (32B)
+		"00000001" + // TokenBalanceMap count (4B)
+		"0101" + // token id 1 (biguint)
+		"0164" + // balance 100 (biguint)
 		"01" + // shard_stats present marker (1B)
 		"00000001" + // branch (4B)
 		"0000000000000064" + // height (8B)
@@ -440,8 +604,10 @@ func TestMessageEncoding_SyncMinorBlockListResponse_NonNilShardStats(t *testing.
 		"77359400" // last_block_time (4B)
 
 	resp := SyncMinorBlockListResponse{
-		ErrorCode:        0,
-		BlockCoinbaseMap: &RawBytes{0xAA, 0xBB},
+		ErrorCode: 0,
+		BlockCoinbaseMap: PrependedSizeCoinbaseMap4{
+			makeHash(1): qkcCommon.NewTokenBalancesWithMap(map[uint64]*uint256.Int{1: uint256.NewInt(100)}),
+		},
 		ShardStats: &ShardStats{
 			Branch:             1,
 			Height:             100,
