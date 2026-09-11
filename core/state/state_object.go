@@ -571,7 +571,9 @@ func (s *stateObject) CodeSize() int {
 }
 
 func (s *stateObject) SetCode(codeHash common.Hash, code []byte) (prev []byte) {
-	prev = slices.Clone(s.code)
+	// Direct state mutations can replace code before the VM has loaded it.
+	// The journal must retain the stored code, not an empty lazy cache.
+	prev = slices.Clone(s.Code())
 	s.db.journal.setCode(s.address, prev)
 	s.setCode(codeHash, code)
 	return prev

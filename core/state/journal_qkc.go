@@ -8,6 +8,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// touchChange is reversible for every QuarkChain account. geth adds an extra,
+// unjournalled dirty mark for the RIPEMD precompile; preserving that mark after
+// revert would publish otherwise untouched resets at commit.
+func (j *journal) touchChange(address common.Address) {
+	j.append(touchChange{account: address})
+}
+
 // qkcResetStorageChange undoes ResetStorage. pyquarkchain drops the storage by
 // pointing the account's trie at the blank root and emptying its cache
 // (state.py:631), journalling both, so the undo has to put back the caches as
