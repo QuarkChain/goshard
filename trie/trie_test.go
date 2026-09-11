@@ -734,15 +734,15 @@ func TestTinyTrie(t *testing.T) {
 	_, accounts := makeAccounts(5)
 	trie := NewEmpty(newTestDatabase(rawdb.NewMemoryDatabase(), rawdb.HashScheme))
 	trie.MustUpdate(common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000001337"), accounts[3])
-	if exp, root := common.HexToHash("8c6a85a4d9fda98feff88450299e574e5378e32391f75a055d470ac0653f1005"), trie.Hash(); exp != root {
+	if exp, root := common.HexToHash("c6203e83d7934a7636a64ce6bf8bab7d3a8dc38b22fbb032419ce7aca9b897ba"), trie.Hash(); exp != root {
 		t.Errorf("1: got %x, exp %x", root, exp)
 	}
 	trie.MustUpdate(common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000001338"), accounts[4])
-	if exp, root := common.HexToHash("ec63b967e98a5720e7f720482151963982890d82c9093c0d486b7eb8883a66b1"), trie.Hash(); exp != root {
+	if exp, root := common.HexToHash("50e1168611212675251390c1d735bd36d7d01dd716c0ded9cb031c70fcd7c778"), trie.Hash(); exp != root {
 		t.Errorf("2: got %x, exp %x", root, exp)
 	}
 	trie.MustUpdate(common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000001339"), accounts[4])
-	if exp, root := common.HexToHash("0608c1d1dc3905fa22204c7a0e43644831c3b6d3def0f274be623a948197e64a"), trie.Hash(); exp != root {
+	if exp, root := common.HexToHash("999eeb73261ee166ec2228319a19293a07e4bd8fba8cceac7c54da8260734b7a"), trie.Hash(); exp != root {
 		t.Errorf("3: got %x, exp %x", root, exp)
 	}
 	checktr := NewEmpty(newTestDatabase(rawdb.NewMemoryDatabase(), rawdb.HashScheme))
@@ -766,7 +766,7 @@ func TestCommitAfterHash(t *testing.T) {
 	trie.Hash()
 	trie.Commit(false)
 	root := trie.Hash()
-	exp := common.HexToHash("72f9d3f3fe1e1dd7b8936442e7642aef76371472d94319900790053c493f3fe6")
+	exp := common.HexToHash("4cf7df9e849b04c5d5d4b3a9bb8ffb61a81174c2ddc79cfc36e1fcbd0a493e81")
 	if exp != root {
 		t.Errorf("got %x, exp %x", root, exp)
 	}
@@ -893,9 +893,9 @@ func TestCommitSequence(t *testing.T) {
 		count           int
 		expWriteSeqHash []byte
 	}{
-		{20, common.FromHex("330b0afae2853d96b9f015791fbe0fb7f239bf65f335f16dfc04b76c7536276d")},
-		{200, common.FromHex("5162b3735c06b5d606b043a3ee8adbdbbb408543f4966bca9dcc63da82684eeb")},
-		{2000, common.FromHex("4574cd8e6b17f3fe8ad89140d1d0bf4f1bd7a87a8ac3fb623b33550544c77635")},
+		{20, common.FromHex("b7cc152a763ea98f86d8eeb99f5a37e1c9984135dd15149edeac27989b361953")},
+		{200, common.FromHex("5a567e180c3fe2de5bebecf412abde26459bc4dca24123f5e6a1404e5c5a69c6")},
+		{2000, common.FromHex("bf2bee5fe29b476b9937dbd835d6a0257f3cd64ce736e550e320b7917a524acf")},
 	} {
 		addresses, accounts := makeAccounts(tc.count)
 
