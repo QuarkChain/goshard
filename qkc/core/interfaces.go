@@ -22,13 +22,20 @@ type ConnManager interface {
 	GetMinorBlockHeaderList(request *wire.GetMinorBlockHeaderListWithSkipRequest) ([]*types.MinorBlockHeader, error)
 }
 
-// MinorChain exposes only the local-chain operations required by root-chain
-// coordination. Block execution and insertion belong to later integration.
+// InsertOptions controls validation-only and known-block replay behavior.
+type InsertOptions struct {
+	IsCheckDB   bool
+	ForceInsert bool
+}
+
+// MinorChain exposes the local-chain operations required by shard coordination.
+// Its concrete execution and persistence implementation belongs to the next PR.
 type MinorChain interface {
 	CurrentBlock() *types.MinorBlock
 	GetBlock(hash common.Hash) *types.MinorBlock
 	GetBlockByNumber(number uint64) *types.MinorBlock
 	HasState(root common.Hash) bool
+	InsertChainWithXShardInputs(chain []*types.MinorBlock, xShardCursors []*XShardTxCursor, options InsertOptions) (int, [][]*types.CrossShardTransactionDeposit, error)
 	SetCanonicalHead(hash common.Hash) error
 	Stop()
 }

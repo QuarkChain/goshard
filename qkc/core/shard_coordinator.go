@@ -5,6 +5,7 @@ package core
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -14,14 +15,17 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
+// AllowedFutureBlocksTimeBroadcast is the maximum accepted future timestamp skew.
+var AllowedFutureBlocksTimeBroadcast = 15
+
 // XShardBroadcast is the outgoing cross-shard payload produced by one block.
 type XShardBroadcast struct {
 	Block    *types.MinorBlock
 	Deposits []*types.CrossShardTransactionDeposit
 }
 
-// ShardCoordinator applies root-chain fork choice and confirmation policy to a
-// local minor chain. It does not execute or propagate minor blocks.
+// ShardCoordinator applies root-chain policy to local minor-block replay and
+// coordinates propagation with the master, other shards, and peers.
 type ShardCoordinator struct {
 	shardConfig     *config.ShardConfig
 	branch          account.Branch
@@ -343,14 +347,166 @@ func (c *ShardCoordinator) setMinorHeadForCanonicalRoot(root *types.RootBlock, c
 	return nil
 }
 
-// TODO(next PR): implement minor block replay and propagation.
+// AddMinorBlock executes and propagates one block. External submission is
+// intentionally separate from local block/state persistence.
 func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
-	panic("implemented in the next PR")
+	if block == nil {
+		return ErrUnknownBlock
+	}
+	if block.Branch().Value != c.branch.Value {
+		return fmt.Errorf("minor block branch %d does not match shard branch %d: %w", block.Branch().Value, c.branch.Value, ErrWrongShard)
+	}
+	if block.NumberU64() == 0 {
+		return fmt.Errorf("genesis minor block cannot be imported")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return ErrChainStopped
+	}
+	if !c.initialized {
+		return ErrRootChainUninitialized
+	}
+	if c.minorBlockChain.GetBlock(block.Hash()) != nil {
+		return nil
+	}
+	parentBlock := c.minorBlockChain.GetBlock(block.ParentHash())
+	if parentBlock == nil {
+		return fmt.Errorf("parent %s: %w", block.ParentHash(), ErrUnknownParent)
+	}
+	if err := validateMinorBlockTime(block, parentBlock); err != nil {
+		return err
+	}
+	if _, err := c.validateMinorBlockRootChain(block, parentBlock); err != nil {
+		return err
+	}
+	cursor, err := c.xShardExecutionInput(block, parentBlock)
+	if err != nil {
+		return err
+	}
+	previousHead := c.minorBlockChain.CurrentBlock()
+	_, outputs, err := c.minorBlockChain.InsertChainWithXShardInputs([]*types.MinorBlock{block}, []*XShardTxCursor{cursor}, InsertOptions{ForceInsert: true})
+	if err != nil {
+		return err
+	}
+	if len(outputs) != 1 {
+		return fmt.Errorf("minor insertion returned %d x-shard output lists for 1 block", len(outputs))
+	}
+	payload := XShardBroadcast{Block: block, Deposits: outputs[0]}
+	if err := c.connManager.BroadcastXShardTxList(payload); err != nil {
+		return fmt.Errorf("broadcast x-shard transactions: %w", err)
+	}
+	if err := c.connManager.SendMinorBlockHeaderToMaster(block, uint32(len(payload.Deposits))); err != nil {
+		return fmt.Errorf("send minor block header to master: %w", err)
+	}
+	current := c.minorBlockChain.CurrentBlock()
+	if current != nil && (previousHead == nil || current.Hash() != previousHead.Hash()) {
+		if c.rootTip == nil {
+			return ErrRootChainUninitialized
+		}
+		if err := c.connManager.BroadcastNewTip([]*types.MinorBlockHeader{current.Header()}, c.rootTip.Header(), c.branch.Value); err != nil {
+			return fmt.Errorf("broadcast new minor tip: %w", err)
+		}
+	}
+	return nil
 }
 
-// TODO(next PR): implement batched minor block replay and propagation.
+// AddBlockListForSync replays each requested block independently, then propagates
+// its x-shard outputs and headers in batches. The input may contain gaps bridged
+// by locally known blocks.
 func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error {
-	panic("implemented in the next PR")
+	if len(blocks) == 0 {
+		return nil
+	}
+	for index, block := range blocks {
+		if block == nil {
+			return fmt.Errorf("validate sync block %d: %w", index, ErrUnknownBlock)
+		}
+		if block.Branch().Value != c.branch.Value {
+			return fmt.Errorf("sync block %d branch %d does not match shard branch %d: %w", index, block.Branch().Value, c.branch.Value, ErrWrongShard)
+		}
+		if index > 0 && block.NumberU64() <= blocks[index-1].NumberU64() {
+			return fmt.Errorf("sync block %d height %d follows height %d: %w", index, block.NumberU64(), blocks[index-1].NumberU64(), ErrMinorBlockOrder)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return ErrChainStopped
+	}
+	if !c.initialized {
+		return ErrRootChainUninitialized
+	}
+	processedBlocks := make([]*types.MinorBlock, 0, len(blocks))
+	payloads := make([]XShardBroadcast, 0, len(blocks))
+	for index, block := range blocks {
+		parentBlock := c.minorBlockChain.GetBlock(block.ParentHash())
+		if parentBlock == nil {
+			return fmt.Errorf("validate sync block %d parent %s: %w", index, block.ParentHash(), ErrUnknownParent)
+		}
+		if err := validateMinorBlockTime(block, parentBlock); err != nil {
+			return fmt.Errorf("validate sync block %d time: %w", index, err)
+		}
+		if _, err := c.validateMinorBlockRootChain(block, parentBlock); err != nil {
+			return fmt.Errorf("validate root reference for block %d: %w", index, err)
+		}
+		cursor, err := c.xShardExecutionInput(block, parentBlock)
+		if err != nil {
+			return fmt.Errorf("prepare x-shard execution input for block %d: %w", index, err)
+		}
+		_, outputs, err := c.minorBlockChain.InsertChainWithXShardInputs([]*types.MinorBlock{block}, []*XShardTxCursor{cursor}, InsertOptions{ForceInsert: true})
+		if err != nil {
+			return fmt.Errorf("insert sync block %d: %w", index, err)
+		}
+		if len(outputs) != 1 {
+			return fmt.Errorf("minor insertion returned %d x-shard output lists for block %d", len(outputs), index)
+		}
+		processedBlocks = append(processedBlocks, block)
+		payloads = append(payloads, XShardBroadcast{Block: block, Deposits: outputs[0]})
+	}
+	if err := c.connManager.BatchBroadcastXShardTxList(payloads); err != nil {
+		return fmt.Errorf("batch broadcast x-shard transactions: %w", err)
+	}
+	if err := c.connManager.SendMinorBlockHeaderListToMaster(processedBlocks); err != nil {
+		return fmt.Errorf("send minor block header list to master: %w", err)
+	}
+	return nil
+}
+
+// validateMinorBlockRootChain resolves block.PrevRootBlockHash and validates its
+// relationship with the root referenced by the parent minor block. Local
+// minor-chain continuity is owned by MinorBlockChain.
+func (c *ShardCoordinator) validateMinorBlockRootChain(block, parentBlock *types.MinorBlock) (*types.RootBlock, error) {
+	if block == nil {
+		return nil, ErrUnknownBlock
+	}
+	prevRootBlock := c.RootBlockByHash(block.PrevRootBlockHash())
+	if prevRootBlock == nil {
+		return nil, fmt.Errorf("previous root %s: %w", block.PrevRootBlockHash(), ErrUnknownRootBlock)
+	}
+	if parentBlock != nil {
+		parentPrevRootBlock := c.RootBlockByHash(parentBlock.PrevRootBlockHash())
+		if parentPrevRootBlock == nil {
+			return nil, fmt.Errorf("parent previous root %s: %w", parentBlock.PrevRootBlockHash(), ErrUnknownRootBlock)
+		}
+		if prevRootBlock.NumberU64() < parentPrevRootBlock.NumberU64() {
+			return nil, fmt.Errorf("root height %d follows %d: %w", prevRootBlock.NumberU64(), parentPrevRootBlock.NumberU64(), ErrMinorRootOrder)
+		}
+		confirmed, err := c.lastConfirmedMinorBlockAtRootBlock(prevRootBlock.Hash())
+		if err != nil {
+			return nil, err
+		}
+		if confirmed != nil && !c.isMinorDescendant(parentBlock, confirmed) {
+			return nil, ErrMinorNotConfirmedDescendant
+		}
+		if !c.isRootDescendant(prevRootBlock, parentPrevRootBlock) {
+			return nil, ErrMinorRootNotCanonical
+		}
+	}
+	if !c.isRootDescendant(c.CurrentRootBlock(), prevRootBlock) {
+		return nil, ErrMinorRootNotCanonical
+	}
+	return prevRootBlock, nil
 }
 
 func (c *ShardCoordinator) isRootDescendant(descendant, ancestor *types.RootBlock) bool {
@@ -367,9 +523,47 @@ func (c *ShardCoordinator) isRootDescendant(descendant, ancestor *types.RootBloc
 	return current.Hash() == ancestor.Hash()
 }
 
-// TODO(next PR): implement cross-shard transaction list ingestion.
+func (c *ShardCoordinator) isMinorDescendant(descendant, ancestor *types.MinorBlock) bool {
+	if descendant == nil || ancestor == nil || descendant.NumberU64() < ancestor.NumberU64() {
+		return false
+	}
+	current := descendant
+	for current.NumberU64() > ancestor.NumberU64() {
+		current = c.minorBlockChain.GetBlock(current.ParentHash())
+		if current == nil {
+			return false
+		}
+	}
+	return current.Hash() == ancestor.Hash()
+}
+
+// AddXShardTxList stores deposits received from another shard for later replay.
 func (c *ShardCoordinator) AddXShardTxList(hash common.Hash, deposits []*types.CrossShardTransactionDeposit) error {
-	panic("implemented in the next PR")
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.stopped {
+		return ErrChainStopped
+	}
+	rawdb.WriteCrossShardTxList(c.db, hash, types.NewCrossShardTransactionList(deposits))
+	return nil
+}
+
+func (c *ShardCoordinator) xShardExecutionInput(block, parent *types.MinorBlock) (*XShardTxCursor, error) {
+	if parent == nil || parent.Meta() == nil {
+		return nil, ErrUnknownParent
+	}
+	return newXShardTxCursor(c.db, uint64(c.shardConfig.Genesis.RootHeight), block, parent.Meta().XShardTxCursorInfo)
+}
+
+func validateMinorBlockTime(block, parent *types.MinorBlock) error {
+	now := uint64(time.Now().Unix())
+	if block.Time() > now+uint64(AllowedFutureBlocksTimeBroadcast) {
+		return fmt.Errorf("block time %d is too far in the future (now %d)", block.Time(), now)
+	}
+	if parent != nil && block.Time() <= parent.Time() {
+		return fmt.Errorf("block time %d must be after parent time %d", block.Time(), parent.Time())
+	}
+	return nil
 }
 
 func (c *ShardCoordinator) RootBlockByHash(hash common.Hash) *types.RootBlock {
