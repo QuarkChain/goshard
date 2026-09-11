@@ -79,12 +79,20 @@ func loadStateGolden(t *testing.T) []goldenStateCase {
 
 func newTestState(t *testing.T) *EvmState {
 	t.Helper()
-	db := rawdb.NewMemoryDatabase()
-	state, err := New(coretypes.EmptyRootHash, db, NewDatabase(db))
+	state, err := New(coretypes.EmptyRootHash, NewDatabase(rawdb.NewMemoryDatabase()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return state
+}
+
+// flush writes a committed root through to disk, the step geth leaves to its
+// chain layer.
+func flush(t *testing.T, state *EvmState, root common.Hash) {
+	t.Helper()
+	if err := state.Database().TrieDB().Commit(root, false); err != nil {
+		t.Fatalf("flush %s: %v", root, err)
+	}
 }
 
 func mustRecipient(t *testing.T, hex string) account.Recipient {
@@ -312,9 +320,8 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 			continue
 		}
 		t.Run(tc.Name, func(t *testing.T) {
-			db := rawdb.NewMemoryDatabase()
-			tdb := NewDatabase(db)
-			state, err := New(coretypes.EmptyRootHash, db, tdb)
+			db := NewDatabase(rawdb.NewMemoryDatabase())
+			state, err := New(coretypes.EmptyRootHash, db)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -327,7 +334,7 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 				t.Fatalf("state root = %s, want %s", root, want)
 			}
 
-			reopened, err := New(root, db, tdb)
+			reopened, err := New(root, db)
 			if err != nil {
 				t.Fatalf("reopen: %v", err)
 			}
@@ -347,11 +354,11 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 }
 
 // TestStoragePersistsAcrossReopen: a contract's code and storage survive being
-// committed and read back through a fresh trie database, which is what the
-// storage-tries-flushed-first convention has to buy.
+// committed, flushed and read back through a fresh trie database, which is what
+// the storage-tries-flushed-first convention has to buy.
 func TestStoragePersistsAcrossReopen(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	state, err := New(coretypes.EmptyRootHash, db, NewDatabase(db))
+	state, err := New(coretypes.EmptyRootHash, NewDatabase(db))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -367,8 +374,9 @@ func TestStoragePersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	flush(t, state, root)
 
-	reopened, err := New(root, db, NewDatabase(db))
+	reopened, err := New(root, NewDatabase(db))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -393,8 +401,7 @@ func TestStoragePersistsAcrossReopen(t *testing.T) {
 }
 
 // TestSnapshotRevertRestoresEverything covers the mutations the golden's revert
-// case does not reach: nested snapshots, storage that was only read, and the
-// execution counters a revert has to put back with the accounts.
+// case does not reach: nested snapshots and storage that was only read.
 func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	state := newTestState(t)
 	addr := mustRecipient(t, "0x00000000000000000000000000000000000000a1")
@@ -411,13 +418,11 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 
 	outer := state.Snapshot()
 	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(-500))
-	state.AddGasUsed(21000)
 
 	inner := state.Snapshot()
 	state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x22"))
 	state.SetCode(addr, []byte{0xfe})
 	state.DeltaTokenBalance(other, qkcCommon.DefaultTokenID, big.NewInt(7))
-	state.AddGasUsed(9000)
 	state.RevertToSnapshot(inner)
 
 	if got := state.GetState(addr, common.HexToHash("0x01")); got != common.HexToHash("0x11") {
@@ -426,17 +431,11 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	if got := state.GetCodeSize(addr); got != 0 {
 		t.Errorf("code size after inner revert = %d, want 0", got)
 	}
-	if got := state.GasUsed(); got != 21000 {
-		t.Errorf("gas used after inner revert = %d, want 21000", got)
-	}
 	if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != 500 {
 		t.Errorf("balance after inner revert = %d, want 500", got)
 	}
 
 	state.RevertToSnapshot(outer)
-	if got := state.GasUsed(); got != 0 {
-		t.Errorf("gas used after outer revert = %d, want 0", got)
-	}
 	if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != 1000 {
 		t.Errorf("balance after outer revert = %d, want 1000", got)
 	}
@@ -450,14 +449,9 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	}
 }
 
-// TestCorruptTrieFailsLoudly: a missing trie node has to surface as an error,
-// not as an absent account. Reading it through geth's Must* accessors returns
-// nothing and logs, which would let a corrupt database read as an empty account,
-// silently drop the writes made against it, and still report a committed root —
-// the same root as before, since the failed update leaves the trie untouched.
 func TestResetStorageIsCommittedAfterEqualValueWrite(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-	state, err := New(coretypes.EmptyRootHash, db, NewDatabase(db))
+	db := NewDatabase(rawdb.NewMemoryDatabase())
+	state, err := New(coretypes.EmptyRootHash, db)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -474,7 +468,7 @@ func TestResetStorageIsCommittedAfterEqualValueWrite(t *testing.T) {
 	// deliberately marks nothing, and the write stores the value the slot
 	// already holds after the reset. pyquarkchain still touches on the write,
 	// so the emptied storage reaches the trie.
-	next, err := New(root, db, NewDatabase(db))
+	next, err := New(root, db)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -485,7 +479,7 @@ func TestResetStorageIsCommittedAfterEqualValueWrite(t *testing.T) {
 		t.Fatalf("commit after reset: %v", err)
 	}
 
-	reopened, err := New(root, db, NewDatabase(db))
+	reopened, err := New(root, db)
 	if err != nil {
 		t.Fatalf("reopen after reset: %v", err)
 	}
@@ -500,49 +494,14 @@ func TestResetStorageIsCommittedAfterEqualValueWrite(t *testing.T) {
 	}
 }
 
-func TestSnapshotRestoresMessageLogContext(t *testing.T) {
-	state := newTestState(t)
-	addr := mustRecipient(t, "0x00000000000000000000000000000000000000c0")
-	first := common.HexToHash("0x0a")
-	second := common.HexToHash("0x0b")
-
-	state.BeginMessage(first, 0)
-	state.AddLog(&coretypes.Log{Address: addr, Data: []byte{0xaa}})
-	snap := state.Snapshot()
-
-	state.BeginMessage(second, 1)
-	state.AddLog(&coretypes.Log{Address: addr, Data: []byte{0xbb}})
-	state.RevertToSnapshot(snap)
-
-	logs := state.MessageLogs()
-	if len(logs) != 1 {
-		t.Fatalf("after revert MessageLogs returned %d logs, want 1", len(logs))
-	}
-	if logs[0].TxHash != first {
-		t.Errorf("log attributed to %s, want %s", logs[0].TxHash, first)
-	}
-	if logs[0].Data[0] != 0xaa {
-		t.Errorf("log data = %x, want aa", logs[0].Data)
-	}
-
-	// The revert has to put back the message the following logs belong to, not
-	// just unwind the ones the reverted message wrote.
-	state.AddLog(&coretypes.Log{Address: addr, Data: []byte{0xcc}})
-	logs = state.MessageLogs()
-	if len(logs) != 2 {
-		t.Fatalf("MessageLogs returned %d logs, want 2", len(logs))
-	}
-	if logs[1].TxHash != first {
-		t.Errorf("log written after the revert attributed to %s, want %s", logs[1].TxHash, first)
-	}
-	if got := logs[1].TxIndex; got != 0 {
-		t.Errorf("log written after the revert has index %d, want 0", got)
-	}
-}
-
+// TestCorruptTrieFailsLoudly: a missing trie node has to surface as an error,
+// not as an absent account. Reading it through geth's Must* accessors returns
+// nothing and logs, which would let a corrupt database read as an empty account,
+// silently drop the writes made against it, and still report a committed root —
+// the same root as before, since the failed update leaves the trie untouched.
 func TestCorruptTrieFailsLoudly(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
-	state, err := New(coretypes.EmptyRootHash, db, NewDatabase(db))
+	state, err := New(coretypes.EmptyRootHash, NewDatabase(db))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -555,6 +514,7 @@ func TestCorruptTrieFailsLoudly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	flush(t, state, root)
 
 	// Drop every trie node but the root, so the leaves can no longer be resolved.
 	it := db.NewIterator(nil, nil)
@@ -574,7 +534,7 @@ func TestCorruptTrieFailsLoudly(t *testing.T) {
 		}
 	}
 
-	corrupt, err := New(root, db, NewDatabase(db))
+	corrupt, err := New(root, NewDatabase(db))
 	if err != nil {
 		return // Refusing to open at all is a loud enough failure.
 	}

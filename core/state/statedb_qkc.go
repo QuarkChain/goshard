@@ -210,8 +210,12 @@ func (s *StateDB) GetBalanceByTokenID(addr common.Address, tokenID uint64) *uint
 // cross-shard deposit execution use the same boundary in pyquarkchain and
 // goquarkchain.
 func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
+	s.journal.append(qkcFullShardKeyChange{prev: s.fullShardKey})
 	s.fullShardKey = fullShardKey
 }
+
+// FullShardKey is the key set by the last SetFullShardKey.
+func (s *StateDB) FullShardKey() uint32 { return s.fullShardKey }
 
 // noteQKCShardKey records the shard key an address was first looked up with.
 //

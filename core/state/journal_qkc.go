@@ -15,6 +15,25 @@ func (j *journal) touchChange(address common.Address) {
 	j.append(touchChange{account: address})
 }
 
+// qkcFullShardKeyChange undoes SetFullShardKey. full_shard_key is part of
+// STATE_DEFAULTS (state.py:45), which State.revert puts back. The keys already
+// frozen into qkcShardKeys stay: pyquarkchain keeps those blank accounts cached.
+type qkcFullShardKeyChange struct {
+	prev uint32
+}
+
+func (ch qkcFullShardKeyChange) revert(s *StateDB) {
+	s.fullShardKey = ch.prev
+}
+
+func (ch qkcFullShardKeyChange) dirtied() (common.Address, bool) {
+	return common.Address{}, false
+}
+
+func (ch qkcFullShardKeyChange) copy() journalEntry {
+	return ch
+}
+
 // qkcResetStorageChange undoes ResetStorage. pyquarkchain drops the storage by
 // pointing the account's trie at the blank root and emptying its cache
 // (state.py:631), journalling both, so the undo has to put back the caches as
