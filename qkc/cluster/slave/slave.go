@@ -83,7 +83,10 @@ func (h *masterHandler) CreateShards(rootTip *types.RootBlock) error {
 	return h.comm.createShards(rootTip)
 }
 
-// ConnectToSlaves dials the advertised slaves into the xshard pool.
+// ConnectToSlaves dials the advertised slaves into the xshard pool. Per-entry
+// failures are reported in the response's result list and the master
+// connection stays up; the bootstrap shutdown decision belongs to the master
+// side (see SlaveComm.connectToSlaves for the Python evidence chain).
 func (h *masterHandler) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
 	return h.comm.connectToSlaves(req)
 }
@@ -302,27 +305,51 @@ func (s *SlaveComm) SendMinorBlockHeaderListToMaster(ctx context.Context, req *w
 
 // ── Business outbound: xshard broadcasts ─────────────────────────────────────
 
+// broadcastToBranch concurrently sends to every xshard connection serving
+// branch (py: broadcast_xshard_tx_list / batch_broadcast_xshard_tx_list).
+//
+// The delivery set is the full snapshot: all connections are attempted even
+// if some sends fail. The call waits for all sends to complete and returns
+// nil only if all sends succeed; otherwise, all errors are aggregated.
+// An empty connection set is a no-op, matching Python's gather([]).
+func (s *SlaveComm) broadcastToBranch(branch uint32, send func(*XshardConn) error) error {
+	conns := s.xshardPool.Lookup(branch)
+	errs := make([]error, len(conns))
+
+	var wg sync.WaitGroup
+	for i, c := range conns {
+		wg.Add(1)
+		go func(i int, c *XshardConn) {
+			defer wg.Done()
+
+			if err := send(c); err != nil {
+				errs[i] = fmt.Errorf("xshard conn#%d (remote=%x): %w", i, c.RemoteID(), err)
+			}
+		}(i, c)
+	}
+
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
 // SendXshardTxList broadcasts an AddXshardTxListRequest to every slave connection
 // serving branch (py: broadcast_xshard_tx_list, remote leg); local delivery is the
-// caller's. An empty connection set is a no-op, matching py's gather([]).
+// caller's. Delivery is attempt-all — a failing connection never suppresses the
+// others — and the result is binary: nil iff every connection acknowledged. An
+// empty connection set is a no-op, matching py's gather([]).
 func (s *SlaveComm) SendXshardTxList(ctx context.Context, branch uint32, req *wire.AddXshardTxListRequest) error {
-	for _, conn := range s.xshardPool.Lookup(branch) {
-		if err := conn.SendAddXshardTxList(ctx, req); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.broadcastToBranch(branch, func(c *XshardConn) error {
+		return c.SendAddXshardTxList(ctx, req)
+	})
 }
 
 // SendBatchXshardTxList broadcasts a BatchAddXshardTxListRequest to every
-// slave connection serving branch.
+// slave connection serving branch, with the same attempt-all and binary-result
+// semantics (py: batch_broadcast_xshard_tx_list).
 func (s *SlaveComm) SendBatchXshardTxList(ctx context.Context, branch uint32, req *wire.BatchAddXshardTxListRequest) error {
-	for _, conn := range s.xshardPool.Lookup(branch) {
-		if err := conn.SendBatchAddXshardTxList(ctx, req); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.broadcastToBranch(branch, func(c *XshardConn) error {
+		return c.SendBatchAddXshardTxList(ctx, req)
+	})
 }
 
 // ── Business outbound: peer sends ────────────────────────────────────────────
@@ -403,14 +430,17 @@ func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
 
 // ── Internals ────────────────────────────────────────────────────────────────
 
-// connectToSlaves dials every advertised slave into the xshard pool.
-// Per-entry failures are recorded in the response result list so the master
-// connection stays up.
+// connectToSlaves dials every advertised slave into the xshard pool, reporting
+// per-entry failures in the response result list so the master connection
+// stays up.
 func (s *SlaveComm) connectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
 	resultList := make([]wire.PrependedSizeBytes4, len(req.SlaveInfoList))
 	for i := range req.SlaveInfoList {
 		info := req.SlaveInfoList[i]
 		if err := s.xshardPool.DialToSlave(context.Background(), info); err != nil {
+			// Wire semantics stay per-entry (see above); this log only aids
+			// ops, mirroring py:866's per-entry log.
+			s.logger.Warn("connect to slave failed", "remote_id", string(info.ID), "err", err)
 			resultList[i] = wire.PrependedSizeBytes4([]byte(err.Error()))
 		}
 	}

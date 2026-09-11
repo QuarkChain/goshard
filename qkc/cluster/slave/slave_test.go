@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -863,5 +864,109 @@ func TestSlaveComm_DrainPeersOnStop(t *testing.T) {
 
 	if n := comm.peerCount(); n != 0 {
 		t.Fatalf("peerCount after Stop = %d, want 0", n)
+	}
+}
+
+type countingXshardHandler struct {
+	adds atomic.Int32
+}
+
+func (h *countingXshardHandler) AddXshardTxList(
+	*wire.AddXshardTxListRequest,
+) (*wire.AddXshardTxListResponse, error) {
+	h.adds.Add(1)
+	return &wire.AddXshardTxListResponse{}, nil
+}
+
+func (*countingXshardHandler) BatchAddXshardTxList(
+	*wire.BatchAddXshardTxListRequest,
+) (*wire.BatchAddXshardTxListResponse, error) {
+	panic("unexpected call")
+}
+
+func TestSlaveComm_SendXshardTxListAttemptsAllOnFailure(t *testing.T) {
+	comm, addr := startTestSlaveComm(t)
+
+	// first inbound always claims master slot
+	dialComm(t, addr)
+
+	newInbound := func(id string, h *countingXshardHandler) *XshardConn {
+		raw := dialComm(t, addr)
+
+		c, err := newXshardConn(
+			raw,
+			0,
+			[]byte(id),
+			[]uint32{0x00010001},
+			append([]byte(nil), testSlaveID...),
+			append([]uint32(nil), testSlaveShards...),
+			h,
+			log.New(),
+		)
+		if err != nil {
+			t.Fatalf("newXshardConn(%s): %v", id, err)
+		}
+
+		c.Start()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if _, _, err := c.sendPing(ctx); err != nil {
+			t.Fatalf("sendPing(%s): %v", id, err)
+		}
+
+		waitFor(t, "indexed "+id, func() bool {
+			return comm.xshardPool.hasSlaveID([]byte(id))
+		})
+
+		return c
+	}
+
+	h1 := &countingXshardHandler{}
+	h2 := &countingXshardHandler{}
+	h3 := &countingXshardHandler{}
+
+	newInbound("S1", h1)
+	c2 := newInbound("S2", h2)
+	newInbound("S3", h3)
+
+	conns := comm.xshardPool.Lookup(0x00010001)
+	if len(conns) != 3 {
+		t.Fatalf("pool holds %d conns, want 3", len(conns))
+	}
+
+	c2.Close()
+
+	waitFor(t, "conn closed", func() bool {
+		return conns[1].IsClosed()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := comm.SendXshardTxList(
+		ctx,
+		0x00010001,
+		&wire.AddXshardTxListRequest{
+			Branch: 1,
+			TxList: &types.CrossShardTransactionList{},
+		},
+	)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	if got := h1.adds.Load(); got != 1 {
+		t.Fatalf("S1 calls = %d, want 1", got)
+	}
+
+	if got := h2.adds.Load(); got != 0 {
+		t.Fatalf("S2 calls = %d, want 0", got)
+	}
+
+	if got := h3.adds.Load(); got != 1 {
+		t.Fatalf("S3 calls = %d, want 1", got)
 	}
 }
