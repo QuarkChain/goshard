@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // PeerResolver resolves the virtual PeerConn a forwarded peer frame is
@@ -34,7 +35,8 @@ type MasterHandler interface {
 	// CreateShards creates the shards made eligible by the given root tip.
 	//
 	// It is invoked when a PING carries a root tip.
-	CreateShards(rootTip *wire.RawBytes) error
+	// (py: SlaveServer.create_shards(root_block: RootBlock), slave.py:933)
+	CreateShards(rootTip *types.RootBlock) error
 
 	// ConnectToSlaves connects to the slaves advertised by the master.
 	ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error)

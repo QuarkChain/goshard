@@ -3,10 +3,13 @@
 package wire
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 )
 
@@ -90,3 +93,67 @@ func (p *PrependedSizeHashList4) Deserialize(bb *serialize.ByteBuffer) error {
 }
 
 var _ serialize.Serializable = (*PrependedSizeHashList4)(nil)
+
+// PrependedSizeCoinbaseMap4 is a block-hash → TokenBalances map with a 4-byte
+// length prefix (matches Python
+// PrependedSizeMapSerializer(4, hash256, TokenBalanceMap)). Keys are emitted in
+// ascending byte order, mirroring the Python serializer's sorted() iteration.
+//
+// Values must be non-nil: Python map values are never None, and a nil
+// *TokenBalances entry indicates a caller bug. Serialize returns an error for
+// it (encoding it as an empty map would silently lose the distinction).
+type PrependedSizeCoinbaseMap4 map[[HashLength]byte]*qkcCommon.TokenBalances
+
+func (p PrependedSizeCoinbaseMap4) Serialize(w *[]byte) error {
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(p)))
+	*w = append(*w, lenBuf...)
+
+	keys := make([][HashLength]byte, 0, len(p))
+	for k := range p {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return bytes.Compare(keys[i][:], keys[j][:]) < 0 })
+	for _, key := range keys {
+		value := p[key]
+		if value == nil {
+			return fmt.Errorf("PrependedSizeCoinbaseMap4.Serialize: nil TokenBalances value for key %x", key[:])
+		}
+		*w = append(*w, key[:]...)
+		if err := value.Serialize(w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *PrependedSizeCoinbaseMap4) Deserialize(bb *serialize.ByteBuffer) error {
+	length, err := bb.GetUInt32()
+	if err != nil {
+		return err
+	}
+
+	if uint64(length) > math.MaxInt32 || int64(length)*int64(HashLength) > int64(bb.Remaining()) {
+		return fmt.Errorf("PrependedSizeCoinbaseMap4.Deserialize: length %d exceeds remaining %d", length, bb.Remaining())
+	}
+
+	m := make(map[[HashLength]byte]*qkcCommon.TokenBalances, int(length))
+	for i := 0; i < int(length); i++ {
+		hashBytes, err := bb.ReadBytes(HashLength)
+		if err != nil {
+			return err
+		}
+		var hash [HashLength]byte
+		copy(hash[:], hashBytes)
+
+		value := qkcCommon.NewEmptyTokenBalances()
+		if err := value.Deserialize(bb); err != nil {
+			return err
+		}
+		m[hash] = value
+	}
+	*p = m
+	return nil
+}
+
+var _ serialize.Serializable = (*PrependedSizeCoinbaseMap4)(nil)
