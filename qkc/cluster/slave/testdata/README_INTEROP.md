@@ -142,24 +142,3 @@ RPC framing; it never touches MasterServer block-processing state.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PYQUARKCHAIN` | Yes | Path to pyquarkchain checkout |
-
-## CI Integration
-
-Example CI script:
-
-```bash
-#!/bin/bash
-set -e
-
-# Clone pyquarkchain if not present
-if [ ! -d "../pyquarkchain" ]; then
-    git clone --depth 1 https://github.com/QuarkChain/pyquarkchain.git ../pyquarkchain
-fi
-
-# Run interop tests
-# NOTE: the python3 on PATH must have pyquarkchain's requirements.txt
-# installed (use a virtualenv), otherwise the harness fails at import
-# instead of the tests being skipped.
-export PYQUARKCHAIN=../pyquarkchain
-go test -tags interop ./qkc/cluster/slave/
-```
