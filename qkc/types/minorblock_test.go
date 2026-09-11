@@ -25,6 +25,16 @@ func testU256(v uint64) *uint256.Int {
 	return uint256.NewInt(v)
 }
 
+type testListHasher struct{}
+
+func (testListHasher) Reset() {}
+
+func (testListHasher) Update([]byte, []byte) error { return nil }
+
+func (testListHasher) Hash() common.Hash { return EmptyTrieHash }
+
+func newTestListHasher() *testListHasher { return new(testListHasher) }
+
 var (
 	//	reciept, _ = account.BytesToIdentityRecipient(common.Hex2Bytes("b94f5374fce5edbc8e2a8697c15331677e6ebf0b"))
 	tx1 = NewEvmTransaction(
@@ -218,9 +228,10 @@ func TestMinorBlockReceiptCount(t *testing.T) {
 	header, meta := testMinorBlockHeader()
 	tx := goldenTxs()[0]
 	receipt := NewReceipt(false, 0)
+	hasher := newTestListHasher()
 
 	// Incoming cross-shard deposits may add receipts beyond the local tx count.
-	NewMinorBlock(header, meta, []*Transaction{tx}, []*Receipt{receipt, receipt}, nil)
+	NewMinorBlock(header, meta, []*Transaction{tx}, []*Receipt{receipt, receipt}, nil, hasher)
 
 	tests := []struct {
 		name string
@@ -228,13 +239,13 @@ func TestMinorBlockReceiptCount(t *testing.T) {
 	}{
 		{
 			name: "NewMinorBlock",
-			call: func() { NewMinorBlock(header, meta, []*Transaction{tx}, nil, nil) },
+			call: func() { NewMinorBlock(header, meta, []*Transaction{tx}, nil, nil, newTestListHasher()) },
 		},
 		{
 			name: "Finalize",
 			call: func() {
 				block := NewMinorBlockWithHeader(header, meta).WithBody([]*Transaction{tx}, nil)
-				block.Finalize(nil, common.Hash{}, nil, nil, nil, nil)
+				block.Finalize(nil, common.Hash{}, nil, nil, nil, nil, newTestListHasher())
 			},
 		},
 	}
@@ -294,7 +305,7 @@ func TestCalculateMerkleRoot(t *testing.T) {
 func TestNewMinorBlockEmptyDerivedFields(t *testing.T) {
 	header, meta := testMinorBlockHeader()
 	header.Bloom[0] = 1
-	block := NewMinorBlock(header, meta, nil, nil, nil)
+	block := NewMinorBlock(header, meta, nil, nil, nil, newTestListHasher())
 	wantTxRoot := common.HexToHash("0xdaa77426c30c02a43d9fba4e841a6556c524d47030762eb14dc4af897e605d9b")
 	if got := block.TxHash(); got != wantTxRoot {
 		t.Fatalf("empty transaction root mismatch: got %s, want %s", got, wantTxRoot)
@@ -504,7 +515,7 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 		t.Fatal("AddTx did not clear the size cache")
 	}
 	block.Size()
-	block.Finalize(receipts, common.Hash{}, nil, nil, nil, nil)
+	block.Finalize(receipts, common.Hash{}, nil, nil, nil, nil, newTestListHasher())
 	if block.size.Load() != nil {
 		t.Fatal("Finalize did not clear the size cache")
 	}
@@ -513,7 +524,7 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	}
 
 	cursor := &XShardTxCursorInfo{RootBlockHeight: 1, MinorBlockIndex: 2, XShardDepositIndex: 3}
-	block.Finalize(receipts, common.Hash{}, nil, nil, nil, cursor)
+	block.Finalize(receipts, common.Hash{}, nil, nil, nil, cursor, newTestListHasher())
 	wantMetaHash := block.MetaHash()
 	wantHash := block.Hash()
 	cursor.RootBlockHeight = 9
@@ -528,7 +539,7 @@ func TestMinorBlockMutationInvalidatesCaches(t *testing.T) {
 	xShardGasUsed := big.NewInt(12)
 	coinbaseAmount := qkcCommon.NewEmptyTokenBalances()
 	coinbaseAmount.SetValue(uint256.NewInt(13), 1)
-	block.Finalize(receipts, common.Hash{}, gasUsed, xShardGasUsed, coinbaseAmount, nil)
+	block.Finalize(receipts, common.Hash{}, gasUsed, xShardGasUsed, coinbaseAmount, nil, newTestListHasher())
 	wantMetaHash = block.MetaHash()
 	wantHash = block.Hash()
 	gasUsed.SetInt64(21)

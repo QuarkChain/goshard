@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/params"
@@ -155,7 +156,7 @@ type extminorblock struct {
 //
 // TxHash and ReceiptHash in meta, and Bloom and MetaHash in header,
 // are replaced with values derived from the transactions and receipts.
-func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, receipts []*Receipt, trackingdata []byte) *MinorBlock {
+func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transaction, receipts []*Receipt, trackingdata []byte, hasher coretypes.ListHasher) *MinorBlock {
 	// Every local transaction produces a receipt, while incoming cross-shard
 	// deposits may add receipts that have no corresponding local transaction.
 	if len(receipts) < len(txs) {
@@ -168,7 +169,7 @@ func NewMinorBlock(header *MinorBlockHeader, meta *MinorBlockMeta, txs []*Transa
 	}
 	b.meta.TxHash = CalculateMerkleRoot(b.transactions)
 
-	b.meta.ReceiptHash = DeriveSha(Receipts(receipts))
+	b.meta.ReceiptHash = DeriveSha(Receipts(receipts), hasher)
 	b.header.Bloom = CreateBloom(receipts)
 	b.header.MetaHash = b.meta.Hash()
 
@@ -394,7 +395,7 @@ func (b *MinorBlock) GetSize() common.StorageSize {
 	return b.Size()
 }
 
-func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *big.Int, xShardReceiveGasUsed *big.Int, coinbaseAmount *qkcCommon.TokenBalances, xShardTxCursorInfo *XShardTxCursorInfo) {
+func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *big.Int, xShardReceiveGasUsed *big.Int, coinbaseAmount *qkcCommon.TokenBalances, xShardTxCursorInfo *XShardTxCursorInfo, hasher coretypes.ListHasher) {
 	if len(receipts) < len(m.transactions) {
 		panic("receipts count is less than txs count")
 	}
@@ -420,7 +421,7 @@ func (m *MinorBlock) Finalize(receipts Receipts, rootHash common.Hash, gasUsed *
 		m.header.CoinbaseAmount = coinbaseAmount.Copy()
 	}
 	m.meta.TxHash = CalculateMerkleRoot(m.transactions)
-	m.meta.ReceiptHash = DeriveSha(receipts)
+	m.meta.ReceiptHash = DeriveSha(receipts, hasher)
 	m.header.MetaHash = m.meta.Hash()
 	m.header.Bloom = CreateBloom(receipts)
 	hash := m.header.Hash()

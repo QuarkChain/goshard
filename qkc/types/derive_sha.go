@@ -2,10 +2,6 @@
 
 // QKC trie/hash helpers follow pyquarkchain-compatible wire hashing.
 // Modified from go-ethereum under GNU Lesser General Public License
-//
-// Adaptations (hash output identical):
-//   - new(trie.Trie)/trie.Update -> trie.NewEmpty(nil)/MustUpdate.
-//   - sha3.NewKeccak256() -> crypto.NewKeccakState().
 
 package types
 
@@ -14,11 +10,11 @@ import (
 	"reflect"
 
 	"github.com/ethereum/go-ethereum/common"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/ethereum/go-ethereum/trie"
 )
 
 type DerivableList interface {
@@ -26,18 +22,20 @@ type DerivableList interface {
 	Bytes(i int) []byte
 }
 
-func DeriveSha(list DerivableList) common.Hash {
+func DeriveSha(list DerivableList, hasher coretypes.ListHasher) common.Hash {
+	hasher.Reset()
 	keybuf := new(bytes.Buffer)
-	trie := trie.NewEmpty(nil)
 	for i := 0; i < list.Len(); i++ {
 		keybuf.Reset()
 		rlp.Encode(keybuf, uint(i))
-		trie.MustUpdate(keybuf.Bytes(), list.Bytes(i))
+		if err := hasher.Update(keybuf.Bytes(), list.Bytes(i)); err != nil {
+			panic(err)
+		}
 	}
-	return trie.Hash()
+	return hasher.Hash()
 }
 
-var EmptyTrieHash = trie.NewEmpty(nil).Hash()
+var EmptyTrieHash = coretypes.EmptyRootHash
 
 var EmptyHash = common.Hash{}
 
