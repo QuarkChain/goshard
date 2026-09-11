@@ -89,7 +89,7 @@ type stateObject struct {
 
 // empty returns whether the account is considered empty.
 func (s *stateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.Balance.IsZero() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
+	return s.data.Nonce == 0 && s.data.GetBalance().IsZero() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
 }
 
 // newObject creates a state object.
@@ -489,14 +489,14 @@ func (s *stateObject) AddBalance(amount *uint256.Int) uint256.Int {
 
 // SetBalance sets the balance for the object, and returns the previous balance.
 func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
-	prev := *s.data.Balance
-	s.db.journal.balanceChange(s.address, s.data.Balance)
+	prev := *s.data.GetBalance()
+	s.db.journal.balanceChange(s.address, s.data.GetBalance())
 	s.setBalance(amount)
 	return prev
 }
 
 func (s *stateObject) setBalance(amount *uint256.Int) {
-	s.data.Balance = amount
+	s.data.SetBalance(amount)
 }
 
 func (s *stateObject) deepCopy(db *StateDB) *stateObject {
@@ -613,7 +613,7 @@ func (s *stateObject) CodeHash() []byte {
 }
 
 func (s *stateObject) Balance() *uint256.Int {
-	return s.data.Balance
+	return s.data.GetBalance()
 }
 
 func (s *stateObject) Nonce() uint64 {

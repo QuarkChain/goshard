@@ -66,10 +66,10 @@ func updateTrie(db *Database, stateRoot common.Hash, addrHash common.Hash, root 
 
 func generateAccount(storageRoot common.Hash) types.StateAccount {
 	return types.StateAccount{
-		Nonce:    uint64(rand.Intn(100)),
-		Balance:  uint256.NewInt(rand.Uint64()),
-		CodeHash: testrand.Bytes(32),
-		Root:     storageRoot,
+		Nonce:       uint64(rand.Intn(100)),
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(rand.Uint64())),
+		CodeHash:    testrand.Bytes(32),
+		Root:        storageRoot,
 	}
 }
 

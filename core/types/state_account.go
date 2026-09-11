@@ -20,47 +20,52 @@ import (
 	"bytes"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
-//go:generate go run ../../rlp/rlpgen -type StateAccount -out gen_account_rlp.go
-
-// StateAccount is the Ethereum consensus representation of accounts.
-// These objects are stored in the main account trie.
+// StateAccount is the QuarkChain consensus representation of accounts.
+// It uses the codec in state_account_qkc.go because the standard four-field
+// Ethereum codec cannot encode its token and shard fields.
 type StateAccount struct {
-	Nonce    uint64
-	Balance  *uint256.Int
-	Root     common.Hash // merkle root of the storage trie
-	CodeHash []byte
+	Nonce        uint64
+	MntBalances  *qkccommon.TokenBalances // QKC and MNT balances.
+	Root         common.Hash              // merkle root of the storage trie
+	CodeHash     []byte
+	FullShardKey uint32
 }
 
 // NewEmptyStateAccount constructs an empty state account.
 func NewEmptyStateAccount() *StateAccount {
 	return &StateAccount{
-		Balance:  new(uint256.Int),
-		Root:     EmptyRootHash,
-		CodeHash: EmptyCodeHash.Bytes(),
+		MntBalances: qkccommon.NewEmptyTokenBalances(),
+		Root:        EmptyRootHash,
+		CodeHash:    EmptyCodeHash.Bytes(),
 	}
 }
 
 // Copy returns a deep-copied state account object.
 func (acct *StateAccount) Copy() *StateAccount {
-	var balance *uint256.Int
-	if acct.Balance != nil {
-		balance = new(uint256.Int).Set(acct.Balance)
+	var mntBalances *qkccommon.TokenBalances
+	if acct.MntBalances != nil {
+		mntBalances = acct.MntBalances.Copy()
 	}
 	return &StateAccount{
-		Nonce:    acct.Nonce,
-		Balance:  balance,
-		Root:     acct.Root,
-		CodeHash: common.CopyBytes(acct.CodeHash),
+		Nonce:        acct.Nonce,
+		MntBalances:  mntBalances,
+		Root:         acct.Root,
+		CodeHash:     common.CopyBytes(acct.CodeHash),
+		FullShardKey: acct.FullShardKey,
 	}
 }
 
-// SlimAccount is a modified version of an Account, where the root is replaced
-// with a byte slice. This format can be used to represent full-consensus format
-// or slim format which replaces the empty root and code hash as nil byte slice.
+// SlimAccount is retained unchanged for the inherited snapshot and pathdb code.
+// Goshard currently supports neither snap sync nor the snapshot database flat
+// reader, so this representation intentionally carries only the QKC balance.
+// Converting between SlimAccount and StateAccount therefore loses MNT balances
+// and FullShardKey. This is a known issue which is ignored until those modes are
+// supported; they must not be enabled before the conversion becomes lossless.
 type SlimAccount struct {
 	Nonce    uint64
 	Balance  *uint256.Int
@@ -72,7 +77,7 @@ type SlimAccount struct {
 func SlimAccountRLP(account StateAccount) []byte {
 	slim := SlimAccount{
 		Nonce:   account.Nonce,
-		Balance: account.Balance,
+		Balance: account.GetBalance(),
 	}
 	if account.Root != EmptyRootHash {
 		slim.Root = account.Root[:]
@@ -94,8 +99,10 @@ func FullAccount(data []byte) (*StateAccount, error) {
 	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		return nil, err
 	}
-	var account StateAccount
-	account.Nonce, account.Balance = slim.Nonce, slim.Balance
+	account := StateAccount{
+		Nonce:       slim.Nonce,
+		MntBalances: NewQKCTokenBalances(slim.Balance),
+	}
 
 	// Interpret the storage root and code hash in slim format.
 	if len(slim.Root) == 0 {
