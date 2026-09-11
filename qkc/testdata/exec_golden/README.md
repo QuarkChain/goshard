@@ -52,7 +52,7 @@ in the third column.
 
 | op | pyquarkchain `EvmState` | Go |
 | --- | --- | --- |
-| `set_full_shard_key` | `full_shard_key = v` | `EvmState.SetFullShardKey` |
+| `set_full_shard_key` | `full_shard_key = v` | `StateDB.SetFullShardKey` |
 | `delta_token_balance` | `delta_token_balance` | `EvmState.DeltaTokenBalance` |
 | `set_token_balance` | `set_token_balance` | `EvmState.SetTokenBalance` |
 | `read_account` | `get_balance` | `EvmState.GetBalance` |
@@ -63,8 +63,8 @@ in the third column.
 | `reset_balances` | `reset_balances` | `StateDB.ResetBalances` |
 | `reset_storage` | `reset_storage` | `StateDB.ResetStorage` |
 | `del_account` | `del_account` | `StateDB.DelAccount` |
-| `snapshot` | `snapshot` | `EvmState.Snapshot` |
-| `revert` | `revert` | `EvmState.RevertToSnapshot` |
+| `snapshot` | `snapshot` | `StateDB.Snapshot` |
+| `revert` | `revert` | `StateDB.RevertToSnapshot` |
 | `commit` | `commit` | `EvmState.Commit` |
 
 The two Go receivers are one object. `EvmState` is QuarkChain's, in `qkc/state`;
