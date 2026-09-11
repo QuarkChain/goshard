@@ -1830,7 +1830,7 @@ func verifyTrie(scheme string, db ethdb.KeyValueStore, root common.Hash, t *test
 	for accIt.Next() {
 		var acc types.StateAccount
 		if err := rlp.DecodeBytes(accIt.Value, &acc); err != nil {
-			t.Fatal(err)
+			log.Crit("Invalid account encountered during snapshot creation", "err", err)
 		}
 		accounts++
 		if acc.Root != types.EmptyRootHash {
