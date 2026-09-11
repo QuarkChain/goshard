@@ -75,6 +75,42 @@ naming `StateDB` is that method reached through `EvmState` unchanged — no
 forwarding code exists for it. `qkc/state` writes its own method only where
 QuarkChain's semantics differ from geth's.
 
+## Mutable-state policy families (S1)
+
+`qkc/state.TestStateGolden` consumes all 42 state vectors without a VM or a
+transaction executor. The following 25 supplement the original 17. Each checks
+the committed state root and account read-back against the pinned oracle.
+The `_qkc` and `_qeth` variants exercise the two balance dispatch paths.
+
+| case | policy pinned in the committed state |
+| --- | --- |
+| `reset_storage_alone_does_not_touch` | Reset alone leaves the stored slots intact. |
+| `reset_storage_equal_write_touches` | An equal-value storage write publishes the reset. |
+| `reset_storage_revert_restores_dirty_slots` | Revert restores the storage root and writes made before the snapshot. |
+| `reset_storage_revert_restores_clean_account` | A later touch publishes the restored storage of an account that was clean at the snapshot. |
+| `untouched_storage_reset_lost_across_commit` | A later touch cannot publish a reset discarded at commit. |
+| `reset_storage_write_survives_commit` | New storage survives reopening; abandoned slots stay absent. |
+| `reset_storage_zero_delta_touches_qkc` / `_qeth` | A zero balance delta touches a nonblank account and publishes its storage reset. |
+| `reset_storage_equal_balance_touches_qkc` / `_qeth` | An unchanged balance write also publishes the storage reset. |
+| `reset_balances_alone_does_not_touch` | Reset alone leaves the stored balances intact. |
+| `untouched_balance_reset_lost_across_commit` | A later touch uses balances read from the trie, not the discarded reset. |
+| `set_code_revert_restores_unloaded_code` | Revert restores code even when it had not been loaded before replacement. |
+| `del_account_revert_on_touched_account` | A pre-snapshot touch publishes the unrestored balance reset, with nonce, code and storage restored. |
+| `del_account_revert_then_touch` | A post-revert touch exposes the same unrestored balance reset. |
+| `full_shard_key_first_read_survives_revert` | The first-read key survives revert; a different account uses the restored context key. |
+| `full_shard_key_first_write_survives_revert` | The frozen key survives removal of a newly created Go state object. |
+| `full_shard_key_blank_read_expires_at_commit` | Commit ends the blank account's cached shard-key lifetime. |
+| `set_token_balance_zero_keeps_token_absent_qkc` / `_qeth` | Setting zero does not create a token entry in a surviving account. |
+| `delta_token_balance_zero_keeps_token_absent_qkc` / `_qeth` | Adding zero does not create a token entry either. |
+| `ripemd_touch_reverts_after_balance_reset` | Address 3 has no geth-style persistent dirty mark after revert. |
+| `sixteen_tokens_stay_list_encoded` | Sixteen nonzero balances use list encoding across commit. |
+| `seventeenth_zero_token_does_not_enable_trie` | The threshold counts nonzero balances, not cached token entries. |
+
+Seventeen **nonzero** tokens require the unsupported token-trie representation;
+they are outside this S1 success corpus. Execution gates, PoSW transfer checks,
+precompile activation and transaction rejection belong to the message/block
+layers, where their effects can reach receipts or transaction acceptance.
+
 ## The other two files
 
 `message_level.json` and `block_level.json` are not op lists. Each case is a

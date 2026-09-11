@@ -644,6 +644,357 @@ def state_cases(networks):
             ],
         },
     ]
+    # These families isolate the account policy from VM and transaction rules,
+    # so the mutable state layer can consume them before an executor exists.
+    stored_account = {
+        A + "00000001": {
+            "balances": {"QKC": "5", "QETH": "7"},
+            "code": "0x6000",
+            "storage": {"0x01": "0x11", "0x02": "0x22"},
+        }
+    }
+    cases += [
+        {
+            "name": "reset_storage_alone_does_not_touch",
+            "comment": "reset_storage empties the cache and points at the blank "
+            "storage root but does not touch the account; commit skips the "
+            "account, so both original slots survive",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [{"op": "reset_storage", "address": A}],
+        },
+        {
+            "name": "reset_storage_equal_write_touches",
+            "comment": "writing zero to an already empty slot still touches the "
+            "account, publishing the preceding reset; geth's equal-value "
+            "SetState early return would leave both original slots in the trie",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "reset_storage", "address": A},
+                {"op": "set_storage", "address": A, "key": "0x03", "value": "0x0"},
+            ],
+        },
+        {
+            "name": "reset_storage_revert_restores_dirty_slots",
+            "comment": "reverting reset_storage must restore both the old trie "
+            "root and the uncommitted slot cache; the write before the snapshot "
+            "survives, and the other slot still comes from the original trie",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "set_storage", "address": A, "key": "0x01", "value": "0x33"},
+                {"op": "snapshot"},
+                {"op": "reset_storage", "address": A},
+                {"op": "revert"},
+            ],
+        },
+        {
+            "name": "reset_storage_revert_restores_clean_account",
+            "comment": "a clean account's reset and equal nonce write are "
+            "reverted; a later touch must publish the restored storage root, "
+            "rather than hiding an unrestored reset by skipping the account",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "snapshot"},
+                {"op": "reset_storage", "address": A},
+                {"op": "set_nonce", "address": A, "value": 1},
+                {"op": "revert"},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "untouched_storage_reset_lost_across_commit",
+            "comment": "commit discards an untouched storage reset along with "
+            "the cache; touching the account in the next commit must not "
+            "publish that abandoned reset",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "reset_storage", "address": A},
+                {"op": "commit"},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "reset_storage_write_survives_commit",
+            "comment": "a write after reset publishes a fresh storage trie; "
+            "after commit and another touch, the new slot survives and the "
+            "other original slot stays absent",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "reset_storage", "address": A},
+                {"op": "set_storage", "address": A, "key": "0x01", "value": "0x33"},
+                {"op": "commit"},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "reset_balances_alone_does_not_touch",
+            "comment": "reset_balances does not touch the account; commit "
+            "skips it, so its original balances survive in the leaf",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [{"op": "reset_balances", "address": A}],
+        },
+        {
+            "name": "untouched_balance_reset_lost_across_commit",
+            "comment": "commit discards an untouched balance reset; a later "
+            "nonce touch must serialize the balances read from the trie, not "
+            "the empty map abandoned at the previous commit",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "reset_balances", "address": A},
+                {"op": "commit"},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "set_code_revert_restores_unloaded_code",
+            "comment": "the old code has not been read since allocation was "
+            "committed; set_code must journal that stored code, not an empty "
+            "lazy cache. A touch after revert publishes the restored code hash",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "snapshot"},
+                {"op": "set_code", "address": A, "code": "0x6001"},
+                {"op": "revert"},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "del_account_revert_on_touched_account",
+            "comment": "del_account's balance reset is not restored by revert; "
+            "a touch before the snapshot makes commit publish the empty balance "
+            "map alongside the restored nonce, code and storage",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {"op": "snapshot"},
+                {"op": "del_account", "address": A},
+                {"op": "revert"},
+            ],
+        },
+        {
+            "name": "del_account_revert_then_touch",
+            "comment": "revert leaves del_account's balance reset in the clean "
+            "cache; a later touch exposes it in the committed leaf, unlike "
+            "revert_after_del_account where commit skips the account",
+            "network": "devnet",
+            "pre_alloc": stored_account,
+            "ops": [
+                {"op": "snapshot"},
+                {"op": "del_account", "address": A},
+                {"op": "revert"},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "full_shard_key_first_read_survives_revert",
+            "comment": "revert restores the current shard key to 1 but keeps "
+            "the blank account first cached under key 2; its later credit "
+            "must therefore write key 2 into the leaf, while B's first credit "
+            "uses the restored key 1",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 1},
+                {"op": "snapshot"},
+                {"op": "set_full_shard_key", "value": 2},
+                {"op": "read_account", "address": A},
+                {"op": "revert"},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {
+                    "op": "delta_token_balance",
+                    "address": B,
+                    "token": "QKC",
+                    "value": "1",
+                },
+            ],
+        },
+        {
+            "name": "full_shard_key_first_write_survives_revert",
+            "comment": "reverting the first credit leaves the cached account "
+            "and its key 2 behind; geth's journal removes newly created objects, "
+            "so the frozen key must outlive that object to survive the next "
+            "credit; B checks that the current key was restored to 1",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 1},
+                {"op": "snapshot"},
+                {"op": "set_full_shard_key", "value": 2},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {"op": "revert"},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {
+                    "op": "delta_token_balance",
+                    "address": B,
+                    "token": "QKC",
+                    "value": "1",
+                },
+            ],
+        },
+        {
+            "name": "full_shard_key_blank_read_expires_at_commit",
+            "comment": "commit clears the blank account cached by a read; "
+            "a later first credit uses the new shard key 2, not the key 1 "
+            "remembered before the commit",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 1},
+                {"op": "read_account", "address": A},
+                {"op": "commit"},
+                {"op": "set_full_shard_key", "value": 2},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+            ],
+        },
+        {
+            "name": "ripemd_touch_reverts_after_balance_reset",
+            "comment": "QuarkChain has no RIPEMD address exception to reverting "
+            "touch: the account stays clean after revert and its stored balance "
+            "survives. geth's extra unjournalled dirty mark at address 3 would "
+            "instead commit the reset and delete this account",
+            "network": "devnet",
+            "pre_alloc": {"00" * 19 + "0300000001": {"balances": {"QKC": "5"}}},
+            "ops": [
+                {"op": "reset_balances", "address": "00" * 19 + "03"},
+                {"op": "snapshot"},
+                {
+                    "op": "delta_token_balance",
+                    "address": "00" * 19 + "03",
+                    "token": "QKC",
+                    "value": "0",
+                },
+                {"op": "revert"},
+            ],
+        },
+    ]
+    # QKC and other tokens use different native entry points in Go. Both must
+    # preserve the same touch and absent-entry rules.
+    for token, balance in (("QKC", "5"), ("QETH", "7")):
+        cases += [
+            {
+                "name": "reset_storage_zero_delta_touches_" + token.lower(),
+                "comment": "a zero balance delta touches even a nonblank "
+                "account, so it publishes the storage reset without changing "
+                "any token balance",
+                "network": "devnet",
+                "pre_alloc": stored_account,
+                "ops": [
+                    {"op": "reset_storage", "address": A},
+                    {
+                        "op": "delta_token_balance",
+                        "address": A,
+                        "token": token,
+                        "value": "0",
+                    },
+                ],
+            },
+            {
+                "name": "reset_storage_equal_balance_touches_" + token.lower(),
+                "comment": "setting an unchanged token balance still touches "
+                "the account, making the preceding storage reset reach the root",
+                "network": "devnet",
+                "pre_alloc": stored_account,
+                "ops": [
+                    {"op": "reset_storage", "address": A},
+                    {
+                        "op": "set_token_balance",
+                        "address": A,
+                        "token": token,
+                        "value": balance,
+                    },
+                ],
+            },
+        ]
+        for operation in ("set_token_balance", "delta_token_balance"):
+            cases.append(
+                {
+                    "name": operation + "_zero_keeps_token_absent_" + token.lower(),
+                    "comment": "a zero write for a token never held must not "
+                    "create an entry; nonce keeps the account alive so empty "
+                    "bytes versus the 00c0 zero-entry blob changes its leaf",
+                    "network": "devnet",
+                    "pre_alloc": {},
+                    "ops": [
+                        {"op": "increment_nonce", "address": A},
+                        {"op": operation, "address": A, "token": token, "value": "0"},
+                    ],
+                }
+            )
+
+    # Stay on the list-encoded side of the token-trie boundary supported by S1.
+    # The threshold counts nonzero balances, not all entries in the cache.
+    sixteen_credits = [
+        {"op": "delta_token_balance", "address": A, "token": "T" + str(i), "value": "1"}
+        for i in range(16)
+    ]
+    for name, extra_ops in (
+        ("sixteen_tokens_stay_list_encoded", []),
+        (
+            "seventeenth_zero_token_does_not_enable_trie",
+            [
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "T16",
+                    "value": "1",
+                },
+                {"op": "set_token_balance", "address": A, "token": "T16", "value": "0"},
+            ],
+        ),
+    ):
+        cases.append(
+            {
+                "name": name,
+                "comment": "sixteen nonzero balances remain a sorted pair list, "
+                "even with a seventeenth zero cache entry; commit and read-back "
+                "must preserve this representation without requiring a token trie",
+                "network": "devnet",
+                "pre_alloc": {},
+                "ops": sixteen_credits + extra_ops + [
+                    {"op": "commit"},
+                    {
+                        "op": "delta_token_balance",
+                        "address": A,
+                        "token": "T0",
+                        "value": "0",
+                    },
+                ],
+            }
+        )
     return cases
 
 
