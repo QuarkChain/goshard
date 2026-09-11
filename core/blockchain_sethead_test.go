@@ -1953,6 +1953,9 @@ func testLongReorgedSnapSyncingDeepSetHead(t *testing.T, snapshots bool) {
 }
 
 func testSetHead(t *testing.T, tt *rewindTest, snapshots bool) {
+	if snapshots {
+		t.Skip("snapshot database is unsupported for QuarkChain accounts")
+	}
 	for _, scheme := range []string{rawdb.HashScheme, rawdb.PathScheme} {
 		testSetHeadWithScheme(t, tt, snapshots, scheme)
 	}

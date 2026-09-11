@@ -41,8 +41,11 @@ func TestSetupGenesis(t *testing.T) {
 
 func testSetupGenesis(t *testing.T, scheme string) {
 	var (
-		customghash = common.HexToHash("0x89c99d90b79719238d2645c7642f2c9295246e80775b38cfd162b696817fbd50")
-		customg     = Genesis{
+		customghash        = common.HexToHash("0x514d1710f78f18a3c655d03fa8e0ae736d20414ea75b73b1af5081a0bb9afe52")
+		mainnetGenesisHash = common.HexToHash("0x7a86192e8901d313f5ca3af78e13a660aae94173959c69a3f33e0ae5f2749d7c")
+		sepoliaGenesisHash = common.HexToHash("0xc61eb78385a53483f9de8a5710f91d0921bb4ff968ed482c8955b3a9c6d3ccaf")
+		hoodiGenesisHash   = common.HexToHash("0x21a5ed4cc25beb5aa3e1fe4552e2ff7bcf785aeb6cf0472e1b529bd3346c3ba3")
+		customg            = Genesis{
 			Config: &params.ChainConfig{HomesteadBlock: big.NewInt(3), Ethash: &params.EthashConfig{}},
 			Alloc: types.GenesisAlloc{
 				{1}: {Balance: big.NewInt(1), Storage: map[common.Hash]common.Hash{{1}: {1}}},
@@ -72,7 +75,7 @@ func testSetupGenesis(t *testing.T, scheme string) {
 			fn: func(db ethdb.Database) (*params.ChainConfig, common.Hash, *params.ConfigCompatError, error) {
 				return SetupGenesisBlock(db, triedb.NewDatabase(db, newDbConfig(scheme)), nil)
 			},
-			wantHash:   params.MainnetGenesisHash,
+			wantHash:   mainnetGenesisHash,
 			wantConfig: params.MainnetChainConfig,
 		},
 		{
@@ -81,7 +84,7 @@ func testSetupGenesis(t *testing.T, scheme string) {
 				DefaultGenesisBlock().MustCommit(db, triedb.NewDatabase(db, newDbConfig(scheme)))
 				return SetupGenesisBlock(db, triedb.NewDatabase(db, newDbConfig(scheme)), nil)
 			},
-			wantHash:   params.MainnetGenesisHash,
+			wantHash:   mainnetGenesisHash,
 			wantConfig: params.MainnetChainConfig,
 		},
 		{
@@ -101,7 +104,7 @@ func testSetupGenesis(t *testing.T, scheme string) {
 				customg.Commit(db, tdb, nil)
 				return SetupGenesisBlock(db, tdb, DefaultSepoliaGenesisBlock())
 			},
-			wantErr: &GenesisMismatchError{Stored: customghash, New: params.SepoliaGenesisHash},
+			wantErr: &GenesisMismatchError{Stored: customghash, New: sepoliaGenesisHash},
 		},
 		{
 			name: "custom block in DB, genesis == hoodi",
@@ -110,7 +113,7 @@ func testSetupGenesis(t *testing.T, scheme string) {
 				customg.Commit(db, tdb, nil)
 				return SetupGenesisBlock(db, tdb, DefaultHoodiGenesisBlock())
 			},
-			wantErr: &GenesisMismatchError{Stored: customghash, New: params.HoodiGenesisHash},
+			wantErr: &GenesisMismatchError{Stored: customghash, New: hoodiGenesisHash},
 		},
 		{
 			name: "compatible config in DB",
@@ -184,10 +187,10 @@ func TestGenesisHashes(t *testing.T) {
 		genesis *Genesis
 		want    common.Hash
 	}{
-		{DefaultGenesisBlock(), params.MainnetGenesisHash},
-		{DefaultSepoliaGenesisBlock(), params.SepoliaGenesisHash},
-		{DefaultHoleskyGenesisBlock(), params.HoleskyGenesisHash},
-		{DefaultHoodiGenesisBlock(), params.HoodiGenesisHash},
+		{DefaultGenesisBlock(), common.HexToHash("0x7a86192e8901d313f5ca3af78e13a660aae94173959c69a3f33e0ae5f2749d7c")},
+		{DefaultSepoliaGenesisBlock(), common.HexToHash("0xc61eb78385a53483f9de8a5710f91d0921bb4ff968ed482c8955b3a9c6d3ccaf")},
+		{DefaultHoleskyGenesisBlock(), common.HexToHash("0x0706dbd8f023baa1808450dd3dfce54335339247b2116c5613e178037b2ccc8f")},
+		{DefaultHoodiGenesisBlock(), common.HexToHash("0x21a5ed4cc25beb5aa3e1fe4552e2ff7bcf785aeb6cf0472e1b529bd3346c3ba3")},
 	} {
 		// Test via MustCommit
 		db := rawdb.NewMemoryDatabase()
