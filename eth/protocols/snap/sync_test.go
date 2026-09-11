@@ -1828,14 +1828,9 @@ func verifyTrie(scheme string, db ethdb.KeyValueStore, root common.Hash, t *test
 	accounts, slots := 0, 0
 	accIt := trie.NewIterator(accTrie.MustNodeIterator(nil))
 	for accIt.Next() {
-		var acc struct {
-			Nonce    uint64
-			Balance  *big.Int
-			Root     common.Hash
-			CodeHash []byte
-		}
+		var acc types.StateAccount
 		if err := rlp.DecodeBytes(accIt.Value, &acc); err != nil {
-			log.Crit("Invalid account encountered during snapshot creation", "err", err)
+			t.Fatal(err)
 		}
 		accounts++
 		if acc.Root != types.EmptyRootHash {
