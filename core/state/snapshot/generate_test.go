@@ -441,12 +441,9 @@ func testGenerateCorruptAccountTrie(t *testing.T, scheme string) {
 
 	// Delete an account trie node and ensure the generator chokes
 	targetPath := []byte{0xc}
-	target := helper.nodes.Sets[common.Hash{}].Nodes[string(targetPath)]
-	if target == nil {
-		t.Fatalf("missing account trie node at path %x", targetPath)
-	}
+	targetHash := common.HexToHash("0x1a6c40e21b4fd283fa73a210af425d49496bc280a9c4e99cbd764ad557224705")
 
-	rawdb.DeleteTrieNode(helper.diskdb, common.Hash{}, targetPath, target.Hash, scheme)
+	rawdb.DeleteTrieNode(helper.diskdb, common.Hash{}, targetPath, targetHash, scheme)
 
 	snap := generateSnapshot(helper.diskdb, helper.triedb, 16, root)
 	select {
