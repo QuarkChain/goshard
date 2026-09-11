@@ -8,7 +8,10 @@ request classes) to drive concrete interactions against Go Slaves.
 
 ## Prerequisites
 
-1. Python 3.8+
+1. Python 3.8+ **with pyquarkchain's Python dependencies installed** (see the
+   `requirements.txt` in the pyquarkchain checkout, e.g. `ecdsa`, `aiohttp`).
+   A dedicated virtualenv is recommended; the harness launches whatever
+   `python3` resolves to on `PATH`.
 2. A checkout of pyquarkchain:
    ```bash
    git clone https://github.com/QuarkChain/pyquarkchain.git
@@ -41,6 +44,15 @@ PYQUARKCHAIN=/path/to/pyquarkchain go test -race -tags interop ./qkc/cluster/sla
 ```
 
 If `PYQUARKCHAIN` is not set or its directory doesn't exist, tests are skipped.
+
+Distinguish three environment states:
+
+- `PYQUARKCHAIN` unset or directory missing → tests **skip**.
+- `python3` exists on `PATH` but lacks pyquarkchain's dependencies (e.g.
+  `ecdsa`, `aiohttp`) → the Python harness fails at startup/import and the
+  tests **fail** — they do *not* skip. This is a test-environment problem, not
+  a Go regression.
+- `python3` + pyquarkchain + dependencies complete → tests run normally.
 
 ## What is tested
 
@@ -76,8 +88,8 @@ If `PYQUARKCHAIN` is not set or its directory doesn't exist, tests are skipped.
 Interop verifies only the real Python Master ↔ real Go Slave boundary:
 wire, opcode, serializer and bootstrap compatibility. It deliberately does not
 verify lock ordering, races, timeouts, pending RPCs or internal state — those are
-covered by the Go unit tests in `head`/`master_conn_test.go`, `peer_conn_test.go`,
-`xshard_test.go` and `slave_test.go`.
+covered by the Go unit tests in `conn/base_test.go`, `master_conn_test.go`,
+`peer_conn_test.go`, `xshard_test.go` and `slave_test.go`.
 
 ## Architecture
 
@@ -147,6 +159,9 @@ if [ ! -d "../pyquarkchain" ]; then
 fi
 
 # Run interop tests
+# NOTE: the python3 on PATH must have pyquarkchain's requirements.txt
+# installed (use a virtualenv), otherwise the harness fails at import
+# instead of the tests being skipped.
 export PYQUARKCHAIN=../pyquarkchain
 go test -tags interop ./qkc/cluster/slave/
 ```
