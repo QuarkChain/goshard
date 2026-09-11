@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // fakeSlaveService is a test double for the future SlaveService: it embeds
@@ -116,7 +117,7 @@ func (h *recordingPeerHandler) NewBlockMinor(req *wire.NewBlockMinorCommand) err
 
 func (h *recordingPeerHandler) GetMinorBlockHeaderList(req *wire.GetMinorBlockHeaderListRequest) (*wire.GetMinorBlockHeaderListResponse, error) {
 	h.record(wire.CommandOpGetMinorBlockHeaderListRequest, req)
-	return &wire.GetMinorBlockHeaderListResponse{RootTip: &wire.RawBytes{}, ShardTip: &wire.RawBytes{}}, nil
+	return &wire.GetMinorBlockHeaderListResponse{RootTip: &types.RootBlockHeader{}, ShardTip: &types.MinorBlockHeader{}}, nil
 }
 
 func (h *recordingPeerHandler) GetMinorBlockList(req *wire.GetMinorBlockListRequest) (*wire.GetMinorBlockListResponse, error) {
@@ -126,7 +127,7 @@ func (h *recordingPeerHandler) GetMinorBlockList(req *wire.GetMinorBlockListRequ
 
 func (h *recordingPeerHandler) GetMinorBlockHeaderListWithSkip(req *wire.GetMinorBlockHeaderListWithSkipRequest) (*wire.GetMinorBlockHeaderListResponse, error) {
 	h.record(wire.CommandOpGetMinorBlockHeaderListWithSkipRequest, req)
-	return &wire.GetMinorBlockHeaderListResponse{RootTip: &wire.RawBytes{}, ShardTip: &wire.RawBytes{}}, nil
+	return &wire.GetMinorBlockHeaderListResponse{RootTip: &types.RootBlockHeader{}, ShardTip: &types.MinorBlockHeader{}}, nil
 }
 
 func newFakeSlaveService(mc *MasterConn, handler PeerHandler, branches []uint32) *fakeSlaveService {
@@ -944,8 +945,8 @@ func TestMasterConn_NonRPCCommandRouted(t *testing.T) {
 	pc.Start()
 
 	cmd := &wire.NewMinorBlockHeaderListCommand{
-		RootBlockHeader:      &wire.RawBytes{},
-		MinorBlockHeaderList: []*wire.RawBytes{{0x01}},
+		RootBlockHeader:      &types.RootBlockHeader{},
+		MinorBlockHeaderList: []*types.MinorBlockHeader{{}},
 	}
 	cmdPayload, err := serialize.SerializeToBytes(cmd)
 	if err != nil {
@@ -1041,7 +1042,7 @@ func TestMasterConn_HandlerErrorClosesPeerConnOnly(t *testing.T) {
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
-	cmdPayload, err := serialize.SerializeToBytes(&wire.NewTransactionListCommand{TransactionList: []*wire.RawBytes{{}}})
+	cmdPayload, err := serialize.SerializeToBytes(&wire.NewTransactionListCommand{TransactionList: []*types.Transaction{newTestTx()}})
 	if err != nil {
 		t.Fatalf("serialize command: %v", err)
 	}
@@ -1211,7 +1212,7 @@ func TestPeerConn_SendNewBlock(t *testing.T) {
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
-	if err := pc.SendNewBlock(&wire.NewBlockMinorCommand{Block: &wire.RawBytes{}}); err != nil {
+	if err := pc.SendNewBlock(&wire.NewBlockMinorCommand{Block: types.NewMinorBlockWithHeader(&types.MinorBlockHeader{}, &types.MinorBlockMeta{})}); err != nil {
 		t.Fatalf("SendNewBlock: %v", err)
 	}
 
@@ -1247,8 +1248,8 @@ func TestPeerConn_SendNewMinorBlockHeaderList(t *testing.T) {
 	pc := fake.peers[clusterPeerID][branch]
 
 	cmd := &wire.NewMinorBlockHeaderListCommand{
-		RootBlockHeader:      &wire.RawBytes{},
-		MinorBlockHeaderList: []*wire.RawBytes{{}},
+		RootBlockHeader:      &types.RootBlockHeader{},
+		MinorBlockHeaderList: []*types.MinorBlockHeader{{}},
 	}
 	if err := pc.SendNewMinorBlockHeaderList(cmd); err != nil {
 		t.Fatalf("SendNewMinorBlockHeaderList: %v", err)
@@ -1284,7 +1285,7 @@ func TestPeerConn_SendTransactionList(t *testing.T) {
 	fake.createPeerConns(clusterPeerID, []uint32{branch})
 	pc := fake.peers[clusterPeerID][branch]
 
-	cmd := &wire.NewTransactionListCommand{TransactionList: []*wire.RawBytes{{}}}
+	cmd := &wire.NewTransactionListCommand{TransactionList: []*types.Transaction{newTestTx()}}
 	if err := pc.SendTransactionList(cmd); err != nil {
 		t.Fatalf("SendTransactionList: %v", err)
 	}
@@ -1378,8 +1379,8 @@ func TestPeerConn_GetMinorBlockHeaderList(t *testing.T) {
 			t.Errorf("unexpected request opcode 0x%x", frame.Opcode)
 		}
 		respPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockHeaderListResponse{
-			RootTip:  &wire.RawBytes{},
-			ShardTip: &wire.RawBytes{},
+			RootTip:  &types.RootBlockHeader{},
+			ShardTip: &types.MinorBlockHeader{},
 		})
 		if err != nil {
 			t.Errorf("serialize response: %v", err)
@@ -1436,8 +1437,8 @@ func TestPeerConn_GetMinorBlockHeaderListWithSkip(t *testing.T) {
 			t.Errorf("unexpected request opcode 0x%x", frame.Opcode)
 		}
 		respPayload, err := serialize.SerializeToBytes(&wire.GetMinorBlockHeaderListResponse{
-			RootTip:  &wire.RawBytes{},
-			ShardTip: &wire.RawBytes{},
+			RootTip:  &types.RootBlockHeader{},
+			ShardTip: &types.MinorBlockHeader{},
 		})
 		if err != nil {
 			t.Errorf("serialize response: %v", err)
@@ -1521,19 +1522,19 @@ func TestPeerConn_InboundHandlerDispatch(t *testing.T) {
 		{
 			name:    "NewMinorBlockHeaderList",
 			op:      wire.CommandOpNewMinorBlockHeaderList,
-			request: &wire.NewMinorBlockHeaderListCommand{RootBlockHeader: &wire.RawBytes{}, MinorBlockHeaderList: []*wire.RawBytes{{0x01}}},
+			request: &wire.NewMinorBlockHeaderListCommand{RootBlockHeader: &types.RootBlockHeader{}, MinorBlockHeaderList: []*types.MinorBlockHeader{{}}},
 			wantReq: &wire.NewMinorBlockHeaderListCommand{},
 		},
 		{
 			name:    "NewTransactionList",
 			op:      wire.CommandOpNewTransactionList,
-			request: &wire.NewTransactionListCommand{TransactionList: []*wire.RawBytes{{0x02}}},
+			request: &wire.NewTransactionListCommand{TransactionList: []*types.Transaction{newTestTx()}},
 			wantReq: &wire.NewTransactionListCommand{},
 		},
 		{
 			name:    "NewBlockMinor",
 			op:      wire.CommandOpNewBlockMinor,
-			request: &wire.NewBlockMinorCommand{Block: &wire.RawBytes{}},
+			request: &wire.NewBlockMinorCommand{Block: types.NewMinorBlockWithHeader(&types.MinorBlockHeader{}, &types.MinorBlockMeta{})},
 			wantReq: &wire.NewBlockMinorCommand{},
 		},
 		{
@@ -1663,7 +1664,7 @@ func TestPeerConn_HandleFrameConcurrentWithClose(t *testing.T) {
 
 	pc, _ := newRecordingPeerConn(t, client, clusterPeerID, branch)
 
-	cmdPayload, err := serialize.SerializeToBytes(&wire.NewTransactionListCommand{TransactionList: []*wire.RawBytes{{}}})
+	cmdPayload, err := serialize.SerializeToBytes(&wire.NewTransactionListCommand{TransactionList: []*types.Transaction{newTestTx()}})
 	if err != nil {
 		t.Fatalf("serialize command: %v", err)
 	}
