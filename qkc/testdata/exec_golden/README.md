@@ -1,13 +1,47 @@
 # exec_golden
 
 Execution golden vectors generated from pyquarkchain by
-[`gen_exec_golden.py`](../gen_exec_golden.py). What the three files hold, how
-they are regenerated, and how the result is guarded is documented in
-[`qkc/config/singularity/README.md`](../../config/singularity/README.md), under
-"Execution golden vectors".
+[`gen_exec_golden.py`](../gen_exec_golden.py), which drives pyquarkchain's own
+`EvmState` and `ShardState`. It reads the two configs in
+[`qkc/config/singularity`](../../config/singularity), so the vectors are bound to
+the configs goshard ships rather than to whatever a pyquarkchain checkout happens
+to carry.
 
-This file records the one thing a consumer cannot read off the vectors: which
-call each `state_level.json` op stands for.
+Three granularities are emitted, each with its own file and its own consumer in
+`qkc/core`:
+
+| file | input | pinned output |
+| --- | --- | --- |
+| `state_level.json` | direct `EvmState` mutations | post state root, per-account reads |
+| `message_level.json` | one signed transaction or one cross-shard deposit | post state root, receipts, gas counters, produced deposits, coinbase fees |
+| `block_level.json` | whole minor blocks against a shard built from its genesis, with a root chain alongside | the seven values a block commits to, plus the deposits it consumed |
+
+A block-level case carries the shard's genesis allocation, the serialized root
+blocks it saw, the deposit lists its neighbours sent, and each block in order.
+The allocation is the shard's `GENESIS.ALLOC`, so a consumer reaches the genesis
+state root by applying it and nothing else — which is the same self-check the
+genesis cases make, one level up.
+
+## Regenerating
+
+```
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed:
+python <path-to-goshard>/qkc/testdata/gen_exec_golden.py
+```
+
+The checkout is taken from `$PYQUARKCHAIN`, defaulting to the current directory.
+
+Two things guard the result. The script's first two cases are the genesis
+allocations themselves, and it fails unless their state roots match the pinned
+[minor-genesis values](../../config/singularity/README.md#pinned-minor-genesis-values)
+— a mismatch elsewhere is then a real disagreement, not a case description that
+never reached `EvmState`. And because that self-check says nothing about
+execution — changing `messages.py` leaves the genesis root untouched — every
+vector file records the oracle it came from: the pyquarkchain commit and a digest
+of each module that decides execution. The script refuses to run when one of
+those modules has uncommitted changes; `--allow-dirty` proceeds and names the
+edited modules in the output instead.
 
 ## State-level ops
 
@@ -45,7 +79,7 @@ QuarkChain's semantics differ from geth's.
 
 `message_level.json` and `block_level.json` are not op lists. Each case is a
 whole input — one transaction or deposit, or a sequence of minor blocks — and
-the pinned values are listed in the table in the singularity README.
+the pinned values are listed in the table at the top of this file.
 
 
 ## What earns a vector
