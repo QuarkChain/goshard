@@ -86,19 +86,19 @@ func TestGenerateTrieAccountsOnly(t *testing.T) {
 		{
 			hash: common.HexToHash("0x01"),
 			account: types.StateAccount{
-				Nonce:    1,
-				Balance:  uint256.NewInt(100),
-				Root:     types.EmptyRootHash,
-				CodeHash: types.EmptyCodeHash.Bytes(),
+				Nonce:       1,
+				MntBalances: types.NewQKCTokenBalances(uint256.NewInt(100)),
+				Root:        types.EmptyRootHash,
+				CodeHash:    types.EmptyCodeHash.Bytes(),
 			},
 		},
 		{
 			hash: common.HexToHash("0x02"),
 			account: types.StateAccount{
-				Nonce:    2,
-				Balance:  uint256.NewInt(200),
-				Root:     types.EmptyRootHash,
-				CodeHash: types.EmptyCodeHash.Bytes(),
+				Nonce:       2,
+				MntBalances: types.NewQKCTokenBalances(uint256.NewInt(200)),
+				Root:        types.EmptyRootHash,
+				CodeHash:    types.EmptyCodeHash.Bytes(),
 			},
 		},
 	}
@@ -125,20 +125,20 @@ func TestGenerateTrieWithStorage(t *testing.T) {
 		{
 			hash: common.HexToHash("0x01"),
 			account: types.StateAccount{
-				Nonce:    1,
-				Balance:  uint256.NewInt(100),
-				Root:     storageRoot,
-				CodeHash: types.EmptyCodeHash.Bytes(),
+				Nonce:       1,
+				MntBalances: types.NewQKCTokenBalances(uint256.NewInt(100)),
+				Root:        storageRoot,
+				CodeHash:    types.EmptyCodeHash.Bytes(),
 			},
 			storage: slots,
 		},
 		{
 			hash: common.HexToHash("0x02"),
 			account: types.StateAccount{
-				Nonce:    0,
-				Balance:  uint256.NewInt(50),
-				Root:     types.EmptyRootHash,
-				CodeHash: types.EmptyCodeHash.Bytes(),
+				Nonce:       0,
+				MntBalances: types.NewQKCTokenBalances(uint256.NewInt(50)),
+				Root:        types.EmptyRootHash,
+				CodeHash:    types.EmptyCodeHash.Bytes(),
 			},
 		},
 	}
@@ -163,10 +163,10 @@ func TestGenerateTrieRootMismatch(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 
 	acct := types.StateAccount{
-		Nonce:    1,
-		Balance:  uint256.NewInt(100),
-		Root:     types.EmptyRootHash,
-		CodeHash: types.EmptyCodeHash.Bytes(),
+		Nonce:       1,
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(100)),
+		Root:        types.EmptyRootHash,
+		CodeHash:    types.EmptyCodeHash.Bytes(),
 	}
 	rawdb.WriteAccountSnapshot(db, common.HexToHash("0x01"), types.SlimAccountRLP(acct))
 

@@ -613,10 +613,10 @@ func genBinTrieFromAlloc(alloc core.GenesisAlloc, db database.NodeDatabase, grou
 			}
 		}
 		account := &types.StateAccount{
-			Balance:  uint256.MustFromBig(acc.Balance),
-			Nonce:    acc.Nonce,
-			CodeHash: crypto.Keccak256Hash(acc.Code).Bytes(),
-			Root:     common.Hash{},
+			MntBalances: types.NewQKCTokenBalances(uint256.MustFromBig(acc.Balance)),
+			Nonce:       acc.Nonce,
+			CodeHash:    crypto.Keccak256Hash(acc.Code).Bytes(),
+			Root:        common.Hash{},
 		}
 		err := bt.UpdateAccount(addr, account, len(acc.Code))
 		if err != nil {

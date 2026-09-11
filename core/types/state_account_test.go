@@ -138,23 +138,23 @@ func TestStateAccountCopyMntBalances(t *testing.T) {
 
 func TestStateAccountBalance(t *testing.T) {
 	acct := StateAccount{MntBalances: NewQKCTokenBalances(uint256.NewInt(42))}
-	if got := acct.Balance(); got.Cmp(uint256.NewInt(42)) != 0 {
+	if got := acct.GetBalance(); got.Cmp(uint256.NewInt(42)) != 0 {
 		t.Fatalf("QKC balance mismatch: have %v, want 42", got)
 	}
 	acct.SetBalance(uint256.NewInt(43))
-	if got := acct.Balance(); got.Cmp(uint256.NewInt(43)) != 0 {
+	if got := acct.GetBalance(); got.Cmp(uint256.NewInt(43)) != 0 {
 		t.Fatalf("updated QKC balance mismatch: have %v, want 43", got)
 	}
 	acct.SetBalance(nil)
-	if got := acct.Balance(); !got.IsZero() {
+	if got := acct.GetBalance(); !got.IsZero() {
 		t.Fatalf("nil QKC balance should set zero, have %v", got)
 	}
 	newAcct := &StateAccount{}
 	newAcct.SetBalance(uint256.NewInt(7))
-	if got := newAcct.Balance(); got.Cmp(uint256.NewInt(7)) != 0 {
+	if got := newAcct.GetBalance(); got.Cmp(uint256.NewInt(7)) != 0 {
 		t.Fatalf("QKC balance on nil map mismatch: have %v, want 7", got)
 	}
-	if got := (&StateAccount{}).Balance(); !got.IsZero() {
+	if got := (&StateAccount{}).GetBalance(); !got.IsZero() {
 		t.Fatalf("nil balance map should return zero, have %v", got)
 	}
 }

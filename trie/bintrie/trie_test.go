@@ -196,9 +196,9 @@ func TestStorageRoundTrip(t *testing.T) {
 	// Create an account first so the root becomes an InternalNode,
 	// which is the realistic state when storage operations happen.
 	acc := &types.StateAccount{
-		Nonce:    1,
-		Balance:  uint256.NewInt(1000),
-		CodeHash: common.HexToHash("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470").Bytes(),
+		Nonce:       1,
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(1000)),
+		CodeHash:    common.HexToHash("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470").Bytes(),
 	}
 	if err := tr.UpdateAccount(addr, acc, 0); err != nil {
 		t.Fatalf("UpdateAccount error: %v", err)
@@ -265,9 +265,9 @@ func newEmptyTestTrie(t *testing.T) *BinaryTrie {
 // zeroed out because the bintrie has no per-account storage root.
 func makeAccount(nonce uint64, balance uint64, codeHash common.Hash) *types.StateAccount {
 	return &types.StateAccount{
-		Nonce:    nonce,
-		Balance:  uint256.NewInt(balance),
-		CodeHash: codeHash.Bytes(),
+		Nonce:       nonce,
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(balance)),
+		CodeHash:    codeHash.Bytes(),
 	}
 }
 
@@ -295,8 +295,8 @@ func TestDeleteAccountRoundTrip(t *testing.T) {
 	if got.Nonce != 42 {
 		t.Fatalf("Nonce: got %d, want 42", got.Nonce)
 	}
-	if got.Balance.Uint64() != 1000 {
-		t.Fatalf("Balance: got %s, want 1000", got.Balance)
+	if balance := got.GetBalance(); balance.Uint64() != 1000 {
+		t.Fatalf("Balance: got %s, want 1000", balance)
 	}
 	if !bytes.Equal(got.CodeHash, codeHash[:]) {
 		t.Fatalf("CodeHash: got %x, want %x", got.CodeHash, codeHash)
@@ -375,8 +375,8 @@ func TestDeleteAccountPreservesOtherAccounts(t *testing.T) {
 	if got.Nonce != 2 {
 		t.Fatalf("Account B Nonce: got %d, want 2", got.Nonce)
 	}
-	if got.Balance.Uint64() != 200 {
-		t.Fatalf("Account B Balance: got %s, want 200", got.Balance)
+	if balance := got.GetBalance(); balance.Uint64() != 200 {
+		t.Fatalf("Account B Balance: got %s, want 200", balance)
 	}
 	if !bytes.Equal(got.CodeHash, codeHashB[:]) {
 		t.Fatalf("Account B CodeHash: got %x, want %x", got.CodeHash, codeHashB)
@@ -415,8 +415,8 @@ func TestDeleteAccountThenRecreate(t *testing.T) {
 	if got.Nonce != 7 {
 		t.Fatalf("Nonce: got %d, want 7", got.Nonce)
 	}
-	if got.Balance.Uint64() != 9999 {
-		t.Fatalf("Balance: got %s, want 9999", got.Balance)
+	if balance := got.GetBalance(); balance.Uint64() != 9999 {
+		t.Fatalf("Balance: got %s, want 9999", balance)
 	}
 	if !bytes.Equal(got.CodeHash, codeHash2[:]) {
 		t.Fatalf("CodeHash: got %x, want %x", got.CodeHash, codeHash2)
@@ -612,9 +612,9 @@ func testAccount(t *testing.T, addr common.Address, nonce uint64, balance uint64
 		tracer: trie.NewPrevalueTracer(),
 	}
 	acc := &types.StateAccount{
-		Nonce:    nonce,
-		Balance:  uint256.NewInt(balance),
-		CodeHash: types.EmptyCodeHash[:],
+		Nonce:       nonce,
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(balance)),
+		CodeHash:    types.EmptyCodeHash[:],
 	}
 	if err := tr.UpdateAccount(addr, acc, 0); err != nil {
 		t.Fatalf("UpdateAccount error: %v", err)
@@ -642,7 +642,7 @@ func TestGetAccountNonMembershipStemRoot(t *testing.T) {
 		t.Fatalf("GetAccount error: %v", err)
 	}
 	if got != nil {
-		t.Fatalf("expected nil for non-existent account, got nonce=%d balance=%s", got.Nonce, got.Balance)
+		t.Fatalf("expected nil for non-existent account, got nonce=%d balance=%s", got.Nonce, got.GetBalance())
 	}
 
 	// Original account must still be retrievable.
@@ -672,9 +672,9 @@ func TestGetAccountNonMembershipInternalRoot(t *testing.T) {
 	addr2 := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	for _, addr := range []common.Address{addr1, addr2} {
 		acc := &types.StateAccount{
-			Nonce:    1,
-			Balance:  uint256.NewInt(1),
-			CodeHash: types.EmptyCodeHash[:],
+			Nonce:       1,
+			MntBalances: types.NewQKCTokenBalances(uint256.NewInt(1)),
+			CodeHash:    types.EmptyCodeHash[:],
 		}
 		if err := tr.UpdateAccount(addr, acc, 0); err != nil {
 			t.Fatalf("UpdateAccount error: %v", err)
@@ -731,9 +731,9 @@ func TestGetStorageNonMembershipInternalRoot(t *testing.T) {
 
 	addr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
 	acc := &types.StateAccount{
-		Nonce:    1,
-		Balance:  uint256.NewInt(1000),
-		CodeHash: types.EmptyCodeHash[:],
+		Nonce:       1,
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(1000)),
+		CodeHash:    types.EmptyCodeHash[:],
 	}
 	if err := tr.UpdateAccount(addr, acc, 0); err != nil {
 		t.Fatalf("UpdateAccount error: %v", err)
