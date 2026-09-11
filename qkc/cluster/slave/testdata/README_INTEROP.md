@@ -43,11 +43,9 @@ With race detector:
 PYQUARKCHAIN=/path/to/pyquarkchain go test -race -tags interop ./qkc/cluster/slave/
 ```
 
-If `PYQUARKCHAIN` is not set or its directory doesn't exist, tests are skipped.
-
 Distinguish three environment states:
 
-- `PYQUARKCHAIN` unset or directory missing → tests **skip**.
+- `PYQUARKCHAIN` unset → tests **skip**.
 - `python3` exists on `PATH` but lacks pyquarkchain's dependencies (e.g.
   `ecdsa`, `aiohttp`) → the Python harness fails at startup/import and the
   tests **fail** — they do *not* skip. This is a test-environment problem, not
