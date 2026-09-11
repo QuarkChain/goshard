@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -39,19 +40,18 @@ type commTestHandler struct {
 // injection to the embedded double. Under Go's GENESIS.ROOT_HEIGHT 0
 // simplification the business runtime always reports every configured shard as
 // created, unless it fails (errCreateShards).
-func (h *commTestHandler) ShardCreator(rootTip *wire.RawBytes) ([]uint32, error) {
+func (h *commTestHandler) ShardCreator(rootTip *types.RootBlock) ([]uint32, error) {
 	if err := h.fakeMasterHandler.CreateShards(rootTip); err != nil {
 		return nil, err
 	}
 	return append([]uint32(nil), testSlaveShards...), nil
 }
 
-// testRootTip returns an opaque RootTip payload. The communication layer never
+// testRootTip returns a minimal RootBlock payload. The communication layer never
 // decodes it — the business handler owns the RootTip semantics — so tests only
 // need a non-nil payload to trigger the PING orchestration.
-func testRootTip() *wire.RawBytes {
-	rb := wire.RawBytes{0x01, 0x02}
-	return &rb
+func testRootTip() *types.RootBlock {
+	return types.NewRootBlockWithHeader(&types.RootBlockHeader{Number: 1})
 }
 
 // startTestSlaveComm starts a SlaveComm on a free loopback port with both
@@ -201,7 +201,7 @@ func sendDestroyPeer(t *testing.T, conn net.Conn, clusterPeerID uint64) {
 // sendPingRootTip sends a master PING carrying rootTip with the given rpcID
 // (RPC ids must strictly increase per connection) and waits for the PONG,
 // which is written only after the CreateShards orchestration has completed.
-func sendPingRootTip(t *testing.T, conn net.Conn, rpcID uint64, rootTip *wire.RawBytes) {
+func sendPingRootTip(t *testing.T, conn net.Conn, rpcID uint64, rootTip *types.RootBlock) {
 	t.Helper()
 	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              append([]byte(nil), testSlaveID...),
@@ -226,7 +226,7 @@ func sendPingRootTip(t *testing.T, conn net.Conn, rpcID uint64, rootTip *wire.Ra
 // sendPingRootTipNoResponse sends a master PING carrying rootTip without
 // reading a response. Used when the orchestration is expected to fail and the
 // connection to close before any PONG is written.
-func sendPingRootTipNoResponse(t *testing.T, conn net.Conn, rpcID uint64, rootTip *wire.RawBytes) {
+func sendPingRootTipNoResponse(t *testing.T, conn net.Conn, rpcID uint64, rootTip *types.RootBlock) {
 	t.Helper()
 	payload, err := serialize.SerializeToBytes(&wire.PingRequest{
 		ID:              append([]byte(nil), testSlaveID...),

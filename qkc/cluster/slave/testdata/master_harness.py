@@ -165,6 +165,11 @@ async def do_peer(args):
         conn.write_command(ClusterOp.DESTROY_CLUSTER_PEER_CONNECTION_COMMAND, destroy, rpc_id=0)
         await asyncio.sleep(args.hold)
         print("PEER_DESTROYED", flush=True)
+        # Keep the connection alive after announcing the destroy: the Go test
+        # asserts peer2 still exists in the slave registry, but the master
+        # disconnect would tear down every peer, so the scenario must not
+        # shutdown until the assertion window has passed.
+        await asyncio.sleep(args.hold)
         return 0
     finally:
         await conn.shutdown()

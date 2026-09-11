@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // MasterBackend defines the business operations used by SlaveComm.
@@ -22,7 +23,7 @@ import (
 type MasterBackend interface {
 	// ShardCreator creates the business runtime's shards for a root tip
 	// and returns the newly-created branches.
-	ShardCreator(rootTip *wire.RawBytes) ([]uint32, error)
+	ShardCreator(rootTip *types.RootBlock) ([]uint32, error)
 
 	// ── business RPCs ──
 	Mine(req *wire.MineRequest) (*wire.MineResponse, error)
@@ -78,7 +79,7 @@ func (s *SlaveComm) newMasterHandler() MasterHandler {
 
 // CreateShards handles a PING root tip: it creates the local shards and equips
 // them with PeerConns.
-func (h *masterHandler) CreateShards(rootTip *wire.RawBytes) error {
+func (h *masterHandler) CreateShards(rootTip *types.RootBlock) error {
 	return h.comm.createShards(rootTip)
 }
 
@@ -419,7 +420,7 @@ func (s *SlaveComm) connectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.Con
 // createShards records newly-created branches in localBranches and equips
 // each with a PeerConn for every announced cluster peer. Existing branches
 // are skipped.
-func (s *SlaveComm) createShards(rootTip *wire.RawBytes) error {
+func (s *SlaveComm) createShards(rootTip *types.RootBlock) error {
 	// A business failure fails the PING before any topology change.
 	createdBranches, err := s.cfg.Master.ShardCreator(rootTip)
 	if err != nil {

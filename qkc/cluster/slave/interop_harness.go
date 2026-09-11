@@ -21,7 +21,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/internal/testlog"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // =============================================================================
@@ -110,7 +110,10 @@ func newInteropBackend(fullShardIDList []uint32) *interopBackend {
 	}
 }
 
-func (b *interopBackend) createShards(_ *wire.RawBytes) ([]uint32, error) {
+// ShardCreator implements MasterBackend: it records the invocation and reports
+// every configured shard as created, closing shardsCreated on the first call.
+// The root tip itself carries no meaning for the communication-only backend.
+func (b *interopBackend) ShardCreator(_ *types.RootBlock) ([]uint32, error) {
 	b.mu.Lock()
 	b.createShardsCalls++
 	b.mu.Unlock()
@@ -159,7 +162,6 @@ func startTestSlave(t *testing.T, id string, fullShards, clusterShards []uint32,
 			MaxPayloadSize:         0,
 			Logger:                 testlog.Logger(t, log.LvlInfo),
 			Master:                 backend,
-			ShardCreator:           backend.createShards,
 			Peer:                   peerHandler,
 			Xshard:                 testXshardHandler{},
 		}

@@ -7,12 +7,18 @@ package slave
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
 // =============================================================================
@@ -83,7 +89,7 @@ func TestInteropPeerCreateOrDestroy(t *testing.T) {
 
 	const peer1, peer2 = 1, 2
 	p := startScenarioMaster(t, "peer", "127.0.0.1", strconv.Itoa(port),
-		"0x00000001", strconv.Itoa(peer1), strconv.Itoa(peer2), "--hold", "1.5")
+		"0x00000001", strconv.Itoa(peer1), strconv.Itoa(peer2), "--hold", "3")
 
 	if !p.WaitLine("PEER_CREATED 1", 15*time.Second) {
 		t.Fatalf("peer 1 create not confirmed\n%s", p.output())
@@ -295,27 +301,27 @@ func newInteropMinorBlockHeaderRequest() *wire.AddMinorBlockHeaderRequest {
 		MinorBlockHeader:  newInteropMinorBlockHeader(),
 		TxCount:           0,
 		XShardTxCount:     0,
-		CoinbaseAmountMap: &wire.TokenBalanceMap{},
+		CoinbaseAmountMap: qkcCommon.NewEmptyTokenBalances(),
 		ShardStats:        wire.ShardStats{Branch: 0x00000001},
 	}
 }
 
-func newInteropMinorBlockHeader() *wire.MinorBlockHeader {
-	return &wire.MinorBlockHeader{
-		Version:            0,
-		Branch:             0x00000001,
-		Height:             0,
-		CoinbaseAddress:    wire.ZeroAddress,
-		CoinbaseAmountMap:  &wire.TokenBalanceMap{},
-		HashPrevMinorBlock: wire.ZeroHash,
-		HashPrevRootBlock:  wire.ZeroHash,
-		EVMGasLimit:        wire.ZeroUint256,
-		HashMeta:           wire.ZeroHash,
-		CreateTime:         0,
-		Difficulty:         0,
-		Nonce:              0,
-		Bloom:              wire.ZeroBloom,
-		ExtraData:          nil,
-		MixHash:            wire.ZeroHash,
+func newInteropMinorBlockHeader() *types.MinorBlockHeader {
+	return &types.MinorBlockHeader{
+		Version:           0,
+		Branch:            account.Branch{Value: 0x00000001},
+		Number:            0,
+		Coinbase:          account.Address{},
+		CoinbaseAmount:    qkcCommon.NewEmptyTokenBalances(),
+		ParentHash:        common.Hash{},
+		PrevRootBlockHash: common.Hash{},
+		GasLimit:          &serialize.Uint256{},
+		MetaHash:          common.Hash{},
+		Time:              0,
+		Difficulty:        new(big.Int),
+		Nonce:             0,
+		Bloom:             types.Bloom{},
+		Extra:             nil,
+		MixDigest:         common.Hash{},
 	}
 }

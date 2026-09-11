@@ -127,12 +127,6 @@ real `AddMinorBlockHeaderRequest` serializer for decode, the real
 `AddMinorBlockHeaderResponse` class for the reply, and the real `ClusterConnection`
 RPC framing; it never touches MasterServer block-processing state.
 
-> **Note:** `TestInteropAddMinorBlockHeaderToMaster` depends on the `MinorBlockHeader`
-> / `TokenBalanceMap` wire types ported in the companion PR. Until that lands
-> (`wire.AddMinorBlockHeaderRequest.MinorBlockHeader` / `CoinbaseAmountMap` are still
-> `*RawBytes` placeholders), the test file does not compile under `-tags interop`. It
-> is intentionally authored against the merged API and will build that way.
-
 ## Environment Variables
 
 | Variable | Required | Description |
