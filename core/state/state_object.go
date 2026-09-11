@@ -235,6 +235,9 @@ func (s *stateObject) SetState(key, value common.Hash) common.Hash {
 	// dirty changes, supporting reverting all of it back to no change.
 	prev, origin := s.getState(key)
 	if prev == value {
+		// set_storage_data (state.py:483-488) still marks the account, so a
+		// preceding ResetStorage reaches the trie at commit.
+		s.touch()
 		return prev
 	}
 	// New value is different, update and journal the change
@@ -586,7 +589,9 @@ func (s *stateObject) CodeSize() int {
 }
 
 func (s *stateObject) SetCode(codeHash common.Hash, code []byte) (prev []byte) {
-	prev = slices.Clone(s.code)
+	// Direct state mutations can replace code before the VM has loaded it.
+	// The journal must retain the stored code, not an empty lazy cache.
+	prev = slices.Clone(s.Code())
 	s.db.journal.setCode(s.address, prev)
 	s.setCode(codeHash, code)
 	return prev
