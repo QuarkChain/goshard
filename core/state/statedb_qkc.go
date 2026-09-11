@@ -217,15 +217,6 @@ func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
 // FullShardKey is the key set by the last SetFullShardKey.
 func (s *StateDB) FullShardKey() uint32 { return s.fullShardKey }
 
-// noteQKCShardKey records the shard key an address was first looked up with.
-//
-// pyquarkchain freezes the key at that moment, not at first write:
-// get_and_cache_account builds a blank account with the state's current
-// full_shard_key and caches it (state.py:387), and the cache outlives the
-// transaction. An address read by one transaction and first written by the next
-// therefore keeps the first transaction's key. Recording the key here rather
-// than caching a blank object keeps getStateObject's nil-for-absent contract,
-// which the rest of geth relies on.
 func (s *StateDB) noteQKCShardKey(addr common.Address) {
 	if _, ok := s.qkcShardKeys[addr]; !ok {
 		s.qkcShardKeys[addr] = s.fullShardKey

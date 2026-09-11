@@ -8,13 +8,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// touchChange is reversible for every QuarkChain account. geth adds an extra,
-// unjournalled dirty mark for the RIPEMD precompile; preserving that mark after
-// revert would publish otherwise untouched resets at commit.
-func (j *journal) touchChange(address common.Address) {
-	j.append(touchChange{account: address})
-}
-
 // qkcFullShardKeyChange undoes SetFullShardKey. full_shard_key is part of
 // STATE_DEFAULTS (state.py:45), which State.revert puts back. The keys already
 // frozen into qkcShardKeys stay: pyquarkchain keeps those blank accounts cached.

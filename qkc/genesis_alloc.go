@@ -50,9 +50,8 @@ func CheckGenesisState(db ethdb.Database, root common.Hash) error {
 }
 
 // commitGenesisAlloc materializes the genesis allocation into db and returns the
-// resulting state root. It is pyquarkchain's genesis state write
-// (quarkchain/genesis.py:55-87) run through the state layer blocks execute on,
-// then flushed to disk as geth's flushAlloc does.
+// resulting state root — pyquarkchain's genesis state write
+// (quarkchain/genesis.py:55-87) over geth's trie.
 func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allocation) (common.Hash, error) {
 	seenRecipients := make(map[account.Recipient]account.Address, len(alloc))
 	for addr := range alloc {
@@ -70,7 +69,7 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 	defer sdb.TrieDB().Close()
 	statedb, err := state.New(coretypes.EmptyRootHash, sdb)
 	if err != nil {
-		return common.Hash{}, err
+		return common.Hash{}, fmt.Errorf("open genesis state trie: %w", err)
 	}
 	for addr, allocation := range alloc {
 		statedb.SetFullShardKey(addr.FullShardKey)

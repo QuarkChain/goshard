@@ -228,6 +228,24 @@ func (s *stateObject) GetCommittedState(key common.Hash) common.Hash {
 	return value
 }
 
+// SetState updates a value in account storage.
+// It returns the previous value
+func (s *stateObject) SetState(key, value common.Hash) common.Hash {
+	// If the new value is the same as old, don't set. Otherwise, track only the
+	// dirty changes, supporting reverting all of it back to no change.
+	prev, origin := s.getState(key)
+	if prev == value {
+		// set_storage_data (state.py:483-488) still marks the account, so a
+		// preceding ResetStorage reaches the trie at commit.
+		s.touch()
+		return prev
+	}
+	// New value is different, update and journal the change
+	s.db.journal.storageChange(s.address, key, prev, origin)
+	s.setState(key, value, origin)
+	return prev
+}
+
 // setState updates a value in account dirty storage. The dirtiness will be
 // removed if the value being set equals to the original value.
 func (s *stateObject) setState(key common.Hash, value common.Hash, origin common.Hash) {

@@ -201,6 +201,14 @@ func (j *journal) nonceChange(address common.Address, prev uint64) {
 	})
 }
 
+// touchChange is reversible for every account: pyquarkchain has no RIPEMD
+// exception, so geth's unjournalled dirty mark for it is dropped.
+func (j *journal) touchChange(address common.Address) {
+	j.append(touchChange{
+		account: address,
+	})
+}
+
 func (j *journal) accessListAddAccount(addr common.Address) {
 	j.append(accessListAddAccountChange{addr})
 }

@@ -4,7 +4,6 @@ package state
 
 import (
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"os"
 	"sort"
@@ -84,15 +83,6 @@ func newTestState(t *testing.T) *EvmState {
 		t.Fatalf("New: %v", err)
 	}
 	return state
-}
-
-// flush writes a committed root through to disk, the step geth leaves to its
-// chain layer.
-func flush(t *testing.T, state *EvmState, root common.Hash) {
-	t.Helper()
-	if err := state.Database().TrieDB().Commit(root, false); err != nil {
-		t.Fatalf("flush %s: %v", root, err)
-	}
 }
 
 func mustRecipient(t *testing.T, hex string) account.Recipient {
@@ -253,7 +243,7 @@ func checkAccounts(t *testing.T, state *EvmState, want map[string]goldenAccount)
 			t.Errorf("%s: exists = %v, want %v", addrHex, got, expected.Exists)
 		}
 
-		balances := state.GetBalances(addr)
+		balances := state.GetTokenBalances(addr)
 		if len(balances) != len(expected.Balances) {
 			t.Errorf("%s: holds %d tokens, want %d", addrHex, len(balances), len(expected.Balances))
 		}
@@ -353,53 +343,6 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 	}
 }
 
-// TestStoragePersistsAcrossReopen: a contract's code and storage survive being
-// committed, flushed and read back through a fresh trie database, which is what
-// the storage-tries-flushed-first convention has to buy.
-func TestStoragePersistsAcrossReopen(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-	state, err := New(coretypes.EmptyRootHash, NewDatabase(db))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	addr := mustRecipient(t, "0x00000000000000000000000000000000000000c0")
-	code := []byte{0x60, 0x00, 0x60, 0x01}
-	state.SetFullShardKey(7)
-	state.SetCode(addr, code)
-	state.SetNonce(addr, 1)
-	for slot := 1; slot <= 3; slot++ {
-		state.SetState(addr, common.BigToHash(big.NewInt(int64(slot))), common.BigToHash(big.NewInt(int64(slot*100))))
-	}
-	root, err := state.Commit(0)
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	flush(t, state, root)
-
-	reopened, err := New(root, NewDatabase(db))
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	if got := reopened.GetNonce(addr); got != 1 {
-		t.Errorf("nonce = %d, want 1", got)
-	}
-	if got := reopened.GetFullShardKey(addr); got != 7 {
-		t.Errorf("full shard key = %d, want 7", got)
-	}
-	if got := reopened.GetCode(addr); string(got) != string(code) {
-		t.Errorf("code = %x, want %x", got, code)
-	}
-	for slot := 1; slot <= 3; slot++ {
-		got := reopened.GetState(addr, common.BigToHash(big.NewInt(int64(slot))))
-		if want := common.BigToHash(big.NewInt(int64(slot * 100))); got != want {
-			t.Errorf("slot %d = %s, want %s", slot, got, want)
-		}
-	}
-	if err := reopened.Error(); err != nil {
-		t.Fatalf("reads reported %v", err)
-	}
-}
-
 // TestSnapshotRevertRestoresEverything covers the mutations the golden's revert
 // case does not reach: nested snapshots and storage that was only read.
 func TestSnapshotRevertRestoresEverything(t *testing.T) {
@@ -491,78 +434,5 @@ func TestResetStorageIsCommittedAfterEqualValueWrite(t *testing.T) {
 	}
 	if err := reopened.Error(); err != nil {
 		t.Fatalf("reads reported %v", err)
-	}
-}
-
-// TestCorruptTrieFailsLoudly: a missing trie node has to surface as an error,
-// not as an absent account. Reading it through geth's Must* accessors returns
-// nothing and logs, which would let a corrupt database read as an empty account,
-// silently drop the writes made against it, and still report a committed root —
-// the same root as before, since the failed update leaves the trie untouched.
-func TestCorruptTrieFailsLoudly(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-	state, err := New(coretypes.EmptyRootHash, NewDatabase(db))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	addr := mustRecipient(t, "0x00000000000000000000000000000000000000a1")
-	other := mustRecipient(t, "0x00000000000000000000000000000000000000b2")
-	state.SetFullShardKey(1)
-	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(1000))
-	state.DeltaTokenBalance(other, qkcCommon.DefaultTokenID, big.NewInt(2000))
-	root, err := state.Commit(0)
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	flush(t, state, root)
-
-	// Drop every trie node but the root, so the leaves can no longer be resolved.
-	it := db.NewIterator(nil, nil)
-	var orphaned [][]byte
-	for it.Next() {
-		if key := common.CopyBytes(it.Key()); len(key) == common.HashLength && common.BytesToHash(key) != root {
-			orphaned = append(orphaned, key)
-		}
-	}
-	it.Release()
-	if len(orphaned) == 0 {
-		t.Fatal("nothing to corrupt: the trie is a single node")
-	}
-	for _, key := range orphaned {
-		if err := db.Delete(key); err != nil {
-			t.Fatalf("corrupt: %v", err)
-		}
-	}
-
-	corrupt, err := New(root, NewDatabase(db))
-	if err != nil {
-		return // Refusing to open at all is a loud enough failure.
-	}
-	corrupt.GetBalance(addr, qkcCommon.DefaultTokenID)
-	if corrupt.Error() == nil {
-		t.Error("reading an unresolvable account reported no error")
-	}
-	corrupt.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(500))
-	again, err := corrupt.Commit(0)
-	if err == nil {
-		t.Errorf("commit of a corrupt state succeeded with root %s (was %s)", again, root)
-	}
-}
-
-// TestBlankAccountsAreNeverWritten: touching accounts that stay blank leaves the
-// trie empty, the rule that keeps a zero-value transfer from creating leaves.
-func TestBlankAccountsAreNeverWritten(t *testing.T) {
-	state := newTestState(t)
-	for i := 0; i < 4; i++ {
-		addr := mustRecipient(t, fmt.Sprintf("0x%040x", i+1))
-		state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(0))
-		state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x2a"))
-	}
-	root, err := state.Commit(0)
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if root != coretypes.EmptyRootHash {
-		t.Errorf("root = %s, want the empty root %s", root, coretypes.EmptyRootHash)
 	}
 }

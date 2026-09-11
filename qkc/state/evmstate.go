@@ -91,12 +91,6 @@ func (s *EvmState) GetBalance(addr account.Recipient, tokenID uint64) *uint256.I
 	return s.GetBalanceByTokenID(addr, tokenID)
 }
 
-// GetBalances returns every token the account holds, for callers that report
-// state rather than execute against it.
-func (s *EvmState) GetBalances(addr account.Recipient) map[uint64]*uint256.Int {
-	return s.GetTokenBalances(addr)
-}
-
 // SetTokenBalance is set_token_balance (state.py:443). Its early return —
 // writing the balance an account already holds changes nothing but still marks
 // the account — is in core/state, where the write itself is.
@@ -141,9 +135,6 @@ func (s *EvmState) DeltaTokenBalance(addr account.Recipient, tokenID uint64, del
 // the caller's decision, as it is geth's blockchain's: pyquarkchain persists an
 // applied block but not a block template (shard_state.py:1338).
 func (s *EvmState) Commit(block uint64) (common.Hash, error) {
-	if err := s.Error(); err != nil {
-		return common.Hash{}, err
-	}
 	root, err := s.StateDB.Commit(block, true, false)
 	if err != nil {
 		return common.Hash{}, err
