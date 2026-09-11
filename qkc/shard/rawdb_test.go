@@ -63,17 +63,17 @@ func TestGenesisBlockRoundTrip(t *testing.T) {
 	if got.Hash() != want.Hash() {
 		t.Errorf("round-trip hash mismatch: got %s, want %s", got.Hash(), want.Hash())
 	}
-	if got.Meta.Hash() != want.Meta.Hash() {
-		t.Errorf("round-trip meta mismatch: got %s, want %s", got.Meta.Hash(), want.Meta.Hash())
+	if got.Meta().Hash() != want.Meta().Hash() {
+		t.Errorf("round-trip meta mismatch: got %s, want %s", got.Meta().Hash(), want.Meta().Hash())
 	}
-	if got.Meta.Root != want.Meta.Root {
-		t.Errorf("round-trip state root = %s, want %s", got.Meta.Root, want.Meta.Root)
+	if got.Root() != want.Root() {
+		t.Errorf("round-trip state root = %s, want %s", got.Root(), want.Root())
 	}
-	if got.Header.Branch.GetFullShardID() != firstShardID {
-		t.Errorf("round-trip branch = 0x%08x, want 0x%08x", got.Header.Branch.GetFullShardID(), firstShardID)
+	if got.Header().Branch.GetFullShardID() != firstShardID {
+		t.Errorf("round-trip branch = 0x%08x, want 0x%08x", got.Header().Branch.GetFullShardID(), firstShardID)
 	}
-	if len(got.Transactions) != 0 || len(got.TrackingData) != 0 {
-		t.Errorf("round-trip body = %d txs / %d tracking bytes, want empty", len(got.Transactions), len(got.TrackingData))
+	if len(got.Transactions()) != 0 || len(got.TrackingData()) != 0 {
+		t.Errorf("round-trip body = %d txs / %d tracking bytes, want empty", len(got.Transactions()), len(got.TrackingData()))
 	}
 }
 
@@ -135,9 +135,9 @@ func TestReconcileGenesisBlockTamperedMeta(t *testing.T) {
 	db := rawdb.NewMemoryDatabase()
 	expected := testGenesisBlock(t, fixtureMainnet)
 
-	meta := *expected.Meta
+	meta := *expected.Meta()
 	meta.Root = common.HexToHash("0xdead")
-	tampered := types.NewMinorBlock(expected.Header, &meta, nil, nil)
+	tampered := types.NewMinorBlockWithHeader(expected.Header(), &meta)
 	if tampered.Hash() != expected.Hash() {
 		t.Fatal("tampering with the meta moved the block hash: this test no longer covers what it claims")
 	}

@@ -89,4 +89,8 @@ print('gas_limit  ', block.header.evm_gas_limit, block.meta.evm_xshard_gas_limit
 "
 ```
 
+The execution golden vectors are also generated from the two configs here, and
+their generator refuses to write unless its genesis cases reproduce these state
+roots; see [`qkc/testdata/exec_golden`](../../testdata/exec_golden/README.md).
+
 Consumed by `qkc`, `qkc/config`, `qkc/types`, and `cmd/slave` tests.

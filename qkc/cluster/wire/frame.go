@@ -67,7 +67,7 @@ func readFrame(r io.Reader, metaSize int, maxPayloadLen uint32) (*Frame, error) 
 		}
 		metaBuf := make([]byte, metaSize)
 		if _, err := io.ReadFull(r, metaBuf); err != nil {
-			return nil, fmt.Errorf("reading metadata: %w", err)
+			return nil, fmt.Errorf("reading metadata: %w", normalizeTruncatedEOF(err))
 		}
 		meta = ClusterMetadata{
 			Branch:        binary.BigEndian.Uint32(metaBuf[0:4]),
@@ -79,7 +79,7 @@ func readFrame(r io.Reader, metaSize int, maxPayloadLen uint32) (*Frame, error) 
 	bodySize := opcodeSize + rpcIDSize + int(payloadLen)
 	body := make([]byte, bodySize)
 	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, fmt.Errorf("reading frame body (payload_len=%d): %w", payloadLen, err)
+		return nil, fmt.Errorf("reading frame body (payload_len=%d): %w", payloadLen, normalizeTruncatedEOF(err))
 	}
 
 	return &Frame{
@@ -88,6 +88,22 @@ func readFrame(r io.Reader, metaSize int, maxPayloadLen uint32) (*Frame, error) 
 		RPCID:   binary.BigEndian.Uint64(body[1:9]),
 		Payload: body[9:],
 	}, nil
+}
+
+// normalizeTruncatedEOF converts an EOF encountered after a frame has
+// already started into io.ErrUnexpectedEOF.
+//
+// A clean EOF before reading any frame bytes is intentionally kept as
+// io.EOF by readFrame's length read, because it represents a graceful
+// peer close. Once the frame length has been consumed, any EOF while
+// reading metadata or body means the frame is truncated and should be
+// treated as an error, matching Python's close() vs close_with_error()
+// behavior.
+func normalizeTruncatedEOF(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // WriteFrame serializes f with 12-byte ClusterMetadata and writes it to w.

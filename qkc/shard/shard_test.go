@@ -94,8 +94,8 @@ func TestShardNewAndReopen(t *testing.T) {
 
 			// Deriving the block persists nothing, so the state is here only
 			// because the fresh path flushed it into the shard's own database.
-			if !rawdb.HasLegacyTrieNode(s.DB(), genesis.Meta.Root) {
-				t.Errorf("genesis state root %s is missing from the shard db", genesis.Meta.Root)
+			if !rawdb.HasLegacyTrieNode(s.DB(), genesis.Root()) {
+				t.Errorf("genesis state root %s is missing from the shard db", genesis.Root())
 			}
 
 			// The genesis block is stored, and carries the shard's root linkage
@@ -107,10 +107,11 @@ func TestShardNewAndReopen(t *testing.T) {
 			if stored.Hash() != genesis.Hash() {
 				t.Errorf("stored genesis %s, want %s", stored.Hash(), genesis.Hash())
 			}
-			if stored.Header.Branch.GetFullShardID() != firstShardID ||
-				stored.Header.PrevRootBlockHash != root.Hash() ||
-				stored.Meta.XShardTxCursor != (types.XShardTxCursorInfo{RootBlockHeight: uint64(root.Number)}) {
-				t.Errorf("stored genesis %+v inconsistent with config derivation", stored.Header)
+			cursor := stored.Meta().XShardTxCursorInfo
+			if stored.Header().Branch.GetFullShardID() != firstShardID ||
+				stored.PrevRootBlockHash() != root.Hash() || cursor == nil ||
+				*cursor != (types.XShardTxCursorInfo{RootBlockHeight: uint64(root.Number)}) {
+				t.Errorf("stored genesis %+v inconsistent with config derivation", stored.Header())
 			}
 
 			if err := s.Stop(); err != nil {
@@ -230,7 +231,7 @@ func TestShardReopenMissingGenesisState(t *testing.T) {
 
 	// Drop the genesis state while leaving the stored genesis block intact.
 	withDB(t, datadir, func(db ethdb.Database) {
-		rawdb.DeleteLegacyTrieNode(db, genesis.Meta.Root)
+		rawdb.DeleteLegacyTrieNode(db, genesis.Root())
 	})
 
 	_, err = New(ctx, branch, root, datadir, Options{})
@@ -242,7 +243,7 @@ func TestShardReopenMissingGenesisState(t *testing.T) {
 	// The failed boot did not quietly re-materialize what was lost: a corrupt
 	// datadir stays corrupt until an operator looks at it.
 	withDB(t, datadir, func(db ethdb.Database) {
-		if rawdb.HasLegacyTrieNode(db, genesis.Meta.Root) {
+		if rawdb.HasLegacyTrieNode(db, genesis.Root()) {
 			t.Error("the failed reopen rewrote the genesis state instead of reporting corruption")
 		}
 	})

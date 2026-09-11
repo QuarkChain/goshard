@@ -128,8 +128,8 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 			// The block was derived from a hash of the same allocation. If the
 			// flushed root disagrees, the chain would open on a genesis whose state
 			// is not the one below it.
-			if stateRoot != genesis.Meta.Root {
-				return fmt.Errorf("committed genesis state %s does not match the derived genesis root %s", stateRoot, genesis.Meta.Root)
+			if stateRoot != genesis.Root() {
+				return fmt.Errorf("committed genesis state %s does not match the derived genesis root %s", stateRoot, genesis.Root())
 			}
 			return nil
 		},
@@ -177,7 +177,7 @@ type genesisSetup struct {
 // the genesis block only once the chain is standing. It stops a constructed chain
 // on failure; the caller retains ownership of the db.
 func initializeChain(db ethdb.Database, dbPath string, g genesisSetup, service ChainService) (ShardChain, bool, error) {
-	fullShardID := g.block.Header.Branch.GetFullShardID()
+	fullShardID := g.block.Header().Branch.GetFullShardID()
 	existed, err := ReconcileGenesisBlock(db, g.block, dbPath)
 	if err != nil {
 		return nil, false, err
@@ -188,7 +188,7 @@ func initializeChain(db ethdb.Database, dbPath string, g genesisSetup, service C
 		if err := g.commit(db); err != nil {
 			return nil, false, fmt.Errorf("shard 0x%08x: commit genesis state (db %s): %w", fullShardID, dbPath, err)
 		}
-	} else if err := qkc.CheckGenesisState(db, g.block.Meta.Root); err != nil {
+	} else if err := qkc.CheckGenesisState(db, g.block.Root()); err != nil {
 		// On reopen the state is already there — unless the datadir lost it. The
 		// stored genesis is an identity and says nothing about the trie under it, so
 		// the two are checked separately. Re-materializing here would repair a

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"io"
 	"testing"
 )
@@ -181,6 +182,44 @@ func truncatedHeader() []byte {
 	hdr := make([]byte, 4)
 	binary.BigEndian.PutUint32(hdr, 100)
 	return hdr
+}
+
+// TestReadFrame_EOFSemantics pins the clean-EOF vs truncated-frame contract:
+//
+//   - EOF before the first frame byte -> io.EOF (clean close, Python close())
+//   - EOF after the frame has started  -> io.ErrUnexpectedEOF (Python "read
+//     unexpected EOF" -> close_with_error())
+//
+// The critical case is a zero-byte EOF on the metadata/body read after the
+// length header has been consumed: io.ReadFull would otherwise surface it as
+// io.EOF and it would be mistaken for a clean close.
+func TestReadFrame_EOFSemantics(t *testing.T) {
+	// Clean EOF: connection closed before the start of any frame.
+	if _, err := ReadFrame(bytes.NewReader(nil), 0); !errors.Is(err, io.EOF) {
+		t.Fatalf("clean EOF: want io.EOF, got %v", err)
+	}
+	if _, err := ReadFrameNoMeta(bytes.NewReader(nil), 0); !errors.Is(err, io.EOF) {
+		t.Fatalf("clean EOF (nometa): want io.EOF, got %v", err)
+	}
+
+	// Truncated length header: EOF after 2 of 4 length bytes.
+	if _, err := ReadFrame(bytes.NewReader([]byte{0x00, 0x00}), 0); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated length: want io.ErrUnexpectedEOF, got %v", err)
+	}
+
+	// Length header complete, then zero-byte EOF on the metadata read:
+	// must be a truncated frame, not a clean EOF.
+	if _, err := ReadFrame(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x0a}), 0); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("length-then-EOF (metadata): want io.ErrUnexpectedEOF, got %v", err)
+	}
+
+	// Length header complete, body truncated after 5 of 10 body bytes.
+	bodyTrunc := []byte{0x00, 0x00, 0x00, 0x01} // payload_len = 1 -> body is 1+8+1 = 10 bytes
+	bodyTrunc = append(bodyTrunc, make([]byte, 12)...)
+	bodyTrunc = append(bodyTrunc, make([]byte, 5)...)
+	if _, err := ReadFrame(bytes.NewReader(bodyTrunc), 0); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("body truncated: want io.ErrUnexpectedEOF, got %v", err)
+	}
 }
 
 // ---- payload size limit ----
