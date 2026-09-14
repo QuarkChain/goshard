@@ -3,6 +3,7 @@
 package state
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,6 +15,91 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTokenBalanceRevertAbsentAccount(t *testing.T) {
+	for _, tokenID := range []uint64{qkccommon.DefaultTokenID, 100} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("token=%d/existing=%t", tokenID, existing), func(t *testing.T) {
+				s := newMntTestStateDB(t)
+				addr := common.HexToAddress("0x2345")
+				if existing {
+					s.CreateAccount(addr)
+				}
+				snapshot := s.Snapshot()
+				s.SetBalanceByTokenID(addr, uint256.NewInt(1), tokenID, tracing.BalanceChangeUnspecified)
+				s.RevertToSnapshot(snapshot)
+				require.Equal(t, existing, s.Exist(addr))
+				require.True(t, s.GetBalanceByTokenID(addr, tokenID).IsZero())
+
+				// A reverted transfer alone must not introduce a trie account.
+				reverted := s.Copy()
+				root, err := reverted.Commit(0, true, false)
+				require.NoError(t, err)
+				baseline := newMntTestStateDB(t)
+				emptyRoot, err := baseline.Commit(0, true, false)
+				require.NoError(t, err)
+				require.Equal(t, emptyRoot, root)
+
+				// Repeated creation/revert must preserve every cached zero token.
+				nested := s.Snapshot()
+				s.SetMntBalance(addr, uint256.NewInt(2), 101)
+				inner := s.Snapshot()
+				s.SetMntBalance(addr, uint256.NewInt(3), 102)
+				s.RevertToSnapshot(inner)
+				s.RevertToSnapshot(nested)
+				copied := s.Copy()
+				for _, db := range []*StateDB{s, copied} {
+					db.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
+					balances := db.getStateObject(addr).data.MntBalances
+					require.Contains(t, balances.GetBalanceMap(), tokenID)
+					require.Contains(t, balances.GetBalanceMap(), uint64(101))
+					require.Contains(t, balances.GetBalanceMap(), uint64(102))
+					encoded, err := balances.SerializeToBytes()
+					require.NoError(t, err)
+					require.Equal(t, []byte{0x00, 0xc0}, encoded)
+				}
+				copied.SetBalanceByTokenID(addr, uint256.NewInt(9), tokenID, tracing.BalanceChangeUnspecified)
+				require.True(t, s.GetBalanceByTokenID(addr, tokenID).IsZero())
+
+				root, err = s.Commit(0, true, false)
+				require.NoError(t, err)
+				// Pyquarkchain ce274f3d: set_token_balance; revert; set_nonce(1); commit.
+				// Both tokens and both initial account states produce the same root.
+				require.Equal(t, common.HexToHash("2b2981500f27c249a2d75dcf17a3baaa767ad57991e700bbc8bca71b15ed63d9"), root)
+
+				// Commit discards pyquarkchain's untouched blank-account cache.
+				reverted.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
+				encoded, err := reverted.getStateObject(addr).data.MntBalances.SerializeToBytes()
+				require.NoError(t, err)
+				require.Empty(t, encoded)
+			})
+		}
+	}
+}
+
+func TestTokenBalanceRevertAcrossFinalise(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			s := newMntTestStateDB(t)
+			addr := common.HexToAddress("0x2345")
+			if existing {
+				s.CreateAccount(addr)
+			}
+			snapshot := s.Snapshot()
+			s.SetMntBalance(addr, uint256.NewInt(1), 100)
+			s.RevertToSnapshot(snapshot)
+			for range 2 {
+				s.AddBalance(addr, new(uint256.Int), tracing.BalanceChangeTransfer)
+				s.Finalise(true)
+				require.False(t, s.Exist(addr))
+			}
+			s.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
+			root, err := s.Commit(0, true, false)
+			require.NoError(t, err)
+			require.Equal(t, common.HexToHash("2b2981500f27c249a2d75dcf17a3baaa767ad57991e700bbc8bca71b15ed63d9"), root)
+		})
+	}
+}
 
 func newMntTestStateDB(t *testing.T) *StateDB {
 	t.Helper()
@@ -270,6 +356,25 @@ func TestFullShardKeyInheritance(t *testing.T) {
 		cpy.SetFullShardKey(2)
 		cpy.AddBalance(addr, uint256.NewInt(1), tracing.BalanceChangeUnspecified)
 		assert.Equal(t, uint32(1), cpy.getStateObject(addr).data.FullShardKey)
+	})
+
+	t.Run("blank balance restoration keeps first shard key", func(t *testing.T) {
+		s := newMntTestStateDB(t)
+		addr := common.HexToAddress("0x789d01")
+		s.SetFullShardKey(1)
+		snapshot := s.Snapshot()
+		s.SetMntBalance(addr, uint256.NewInt(1), 100)
+		s.RevertToSnapshot(snapshot)
+
+		for _, fullShardKey := range []uint32{2, 3} {
+			snapshot = s.Snapshot()
+			s.SetFullShardKey(fullShardKey)
+			s.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
+			obj := s.getStateObject(addr)
+			assert.Equal(t, uint32(1), obj.data.FullShardKey)
+			assert.Contains(t, obj.data.MntBalances.GetBalanceMap(), uint64(100))
+			s.RevertToSnapshot(snapshot)
+		}
 	})
 
 	t.Run("first-read cache clears after commit", func(t *testing.T) {
