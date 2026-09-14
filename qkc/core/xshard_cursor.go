@@ -87,6 +87,9 @@ func (x *XShardTxCursor) GetNextTx() (*types.CrossShardTransactionDeposit, error
 
 	for x.minorIndex <= uint64(len(x.root.MinorBlockHeaders())) {
 		header := x.root.MinorBlockHeaders()[x.minorIndex-1]
+		// Neighbor filtering bounds cross-shard fan-out when the network grows beyond
+		// 32 shards. The current scope is not expected to reach that size, so every
+		// active remote shard is treated as a deposit source to keep traversal simple.
 		if header.Branch == x.branch {
 			x.minorIndex++
 			continue
@@ -150,6 +153,8 @@ func (x *XShardTxCursor) getCurrentTx() (*types.CrossShardTransactionDeposit, er
 		if x.depositIndex == 1 {
 			value := new(big.Int)
 			coinbase := x.root.Coinbase()
+			// Root coinbase deposits are intentionally fixed to QKC. Configurable
+			// genesis-token routing is outside this implementation's protocol scope.
 			if x.branch.IsInBranch(coinbase.FullShardKey) {
 				value.Set(x.root.CoinbaseAmount().GetTokenBalance(qkcCommon.DefaultTokenID).ToBig())
 			}

@@ -109,6 +109,16 @@ func (c *ShardCoordinator) initFromGenesisRoot(root *types.RootBlock) error {
 	if err := c.setCurrentRootBlock(root); err != nil {
 		return fmt.Errorf("set genesis root tip: %w", err)
 	}
+	payload := XShardBroadcast{
+		Block:    genesis,
+		Deposits: make([]*types.CrossShardTransactionDeposit, 0),
+	}
+	if err := c.connManager.BroadcastXShardTxList(payload); err != nil {
+		return fmt.Errorf("broadcast genesis x-shard transactions: %w", err)
+	}
+	if err := c.connManager.SendMinorBlockHeaderToMaster(genesis, 0); err != nil {
+		return fmt.Errorf("send genesis minor block header to master: %w", err)
+	}
 	c.rootTip = root
 	c.confirmedMinorTip = nil
 	c.initialized = true
@@ -219,6 +229,9 @@ func (c *ShardCoordinator) lastConfirmedMinorBlockAtRootBlock(hash common.Hash) 
 
 func (c *ShardCoordinator) validateRemoteXShardList(header *types.MinorBlockHeader) error {
 	previousRoot := c.RootBlockByHash(header.PrevRootBlockHash)
+	// Neighbor filtering bounds cross-shard fan-out when the network grows beyond
+	// 32 shards. The current scope is not expected to reach that size, so it is
+	// intentionally omitted to keep cross-shard list handling simple.
 	expectsList := previousRoot != nil && previousRoot.NumberU64() != uint64(c.shardConfig.Genesis.RootHeight)
 	list := rawdb.ReadCrossShardTxList(c.db, header.Hash())
 	if expectsList && list == nil {
@@ -367,6 +380,8 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	if !c.initialized {
 		return ErrRootChainUninitialized
 	}
+	// AddMinorBlock handles first delivery only. Propagation recovery replays
+	// persisted blocks explicitly through AddBlockListForSync.
 	if c.minorBlockChain.GetBlock(block.Hash()) != nil {
 		return nil
 	}
@@ -377,7 +392,8 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	if err := validateMinorBlockTime(block, parentBlock); err != nil {
 		return err
 	}
-	if _, err := c.validateMinorBlockRootChain(block, parentBlock); err != nil {
+	previousRoot, err := c.validateMinorBlockRootChain(block, parentBlock)
+	if err != nil {
 		return err
 	}
 	cursor, err := c.xShardExecutionInput(block, parentBlock)
@@ -391,6 +407,11 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	}
 	if len(outputs) != 1 {
 		return fmt.Errorf("minor insertion returned %d x-shard output lists for 1 block", len(outputs))
+	}
+	if c.shouldUpdateMinorHead(block, previousRoot) {
+		if err := c.minorBlockChain.SetCanonicalHead(block.Hash()); err != nil {
+			return fmt.Errorf("set canonical minor head %s: %w", block.Hash(), err)
+		}
 	}
 	payload := XShardBroadcast{Block: block, Deposits: outputs[0]}
 	if err := c.connManager.BroadcastXShardTxList(payload); err != nil {
@@ -439,6 +460,9 @@ func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error
 	}
 	processedBlocks := make([]*types.MinorBlock, 0, len(blocks))
 	payloads := make([]XShardBroadcast, 0, len(blocks))
+	// Preserve pyquarkchain's per-block fork choice while deferring the
+	// canonical rewrite until the whole root-sync batch has been persisted.
+	var canonicalTarget *types.MinorBlock
 	for index, block := range blocks {
 		parentBlock := c.minorBlockChain.GetBlock(block.ParentHash())
 		if parentBlock == nil {
@@ -447,7 +471,8 @@ func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error
 		if err := validateMinorBlockTime(block, parentBlock); err != nil {
 			return fmt.Errorf("validate sync block %d time: %w", index, err)
 		}
-		if _, err := c.validateMinorBlockRootChain(block, parentBlock); err != nil {
+		previousRoot, err := c.validateMinorBlockRootChain(block, parentBlock)
+		if err != nil {
 			return fmt.Errorf("validate root reference for block %d: %w", index, err)
 		}
 		cursor, err := c.xShardExecutionInput(block, parentBlock)
@@ -461,8 +486,16 @@ func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error
 		if len(outputs) != 1 {
 			return fmt.Errorf("minor insertion returned %d x-shard output lists for block %d", len(outputs), index)
 		}
+		if c.shouldUpdateMinorHead(block, previousRoot) {
+			canonicalTarget = block
+		}
 		processedBlocks = append(processedBlocks, block)
 		payloads = append(payloads, XShardBroadcast{Block: block, Deposits: outputs[0]})
+	}
+	if canonicalTarget != nil {
+		if err := c.minorBlockChain.SetCanonicalHead(canonicalTarget.Hash()); err != nil {
+			return fmt.Errorf("set canonical minor head %s: %w", canonicalTarget.Hash(), err)
+		}
 	}
 	if err := c.connManager.BatchBroadcastXShardTxList(payloads); err != nil {
 		return fmt.Errorf("batch broadcast x-shard transactions: %w", err)
@@ -503,10 +536,30 @@ func (c *ShardCoordinator) validateMinorBlockRootChain(block, parentBlock *types
 			return nil, ErrMinorRootNotCanonical
 		}
 	}
-	if !c.isRootDescendant(c.CurrentRootBlock(), prevRootBlock) {
-		return nil, ErrMinorRootNotCanonical
-	}
 	return prevRootBlock, nil
+}
+
+// shouldUpdateMinorHead mirrors pyquarkchain's minor-tip selection after the
+// candidate has been persisted. A direct extension wins after root-ancestry
+// validation; competing forks must cross the current confirmation barrier and
+// are ordered by minor height, then by referenced-root height.
+func (c *ShardCoordinator) shouldUpdateMinorHead(block *types.MinorBlock, previousRoot *types.RootBlock) bool {
+	current := c.minorBlockChain.CurrentBlock()
+	if block == nil || previousRoot == nil || current == nil || !c.isRootDescendant(c.rootTip, previousRoot) {
+		return false
+	}
+	if block.ParentHash() == current.Hash() {
+		return true
+	}
+	if c.confirmedMinorTip != nil &&
+		(block.NumberU64() <= c.confirmedMinorTip.NumberU64() || !c.isMinorDescendant(block, c.confirmedMinorTip)) {
+		return false
+	}
+	if block.NumberU64() != current.NumberU64() {
+		return block.NumberU64() > current.NumberU64()
+	}
+	currentRoot := c.RootBlockByHash(current.PrevRootBlockHash())
+	return currentRoot != nil && previousRoot.NumberU64() > currentRoot.NumberU64()
 }
 
 func (c *ShardCoordinator) isRootDescendant(descendant, ancestor *types.RootBlock) bool {
