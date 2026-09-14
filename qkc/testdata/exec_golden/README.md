@@ -7,8 +7,7 @@ Execution golden vectors generated from pyquarkchain by
 the configs goshard ships rather than to whatever a pyquarkchain checkout happens
 to carry.
 
-Three granularities are emitted, each with its own file and its own consumer in
-`qkc/core`:
+Three granularities are emitted, each with its own file and its own consumer. The first two are for unit tests, the last is for integration tests.
 
 | file | input | pinned output |
 | --- | --- | --- |
