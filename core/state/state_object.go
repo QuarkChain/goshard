@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/bintrie"
 	"github.com/ethereum/go-ethereum/trie/transitiontrie"
@@ -89,7 +90,7 @@ type stateObject struct {
 
 // empty returns whether the account is considered empty.
 func (s *stateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.GetBalance().IsZero() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
+	return s.data.Nonce == 0 && s.IsBlankMnt() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
 }
 
 // newObject creates a state object.
@@ -98,7 +99,7 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 	if acct == nil {
 		acct = types.NewEmptyStateAccount()
 	}
-	return &stateObject{
+	obj := &stateObject{
 		db:                 db,
 		address:            address,
 		origin:             origin,
@@ -108,6 +109,10 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 		pendingStorage:     make(Storage),
 		uncommittedStorage: make(Storage),
 	}
+	if origin != nil && origin.MntBalances != nil {
+		obj.data.MntBalances = origin.MntBalances.Copy()
+	}
+	return obj
 }
 
 func (s *stateObject) addrHash() common.Hash {
@@ -476,12 +481,10 @@ func (s *stateObject) commit() (*AccountUpdate, *trienode.NodeSet, error) {
 // It is used to add funds to the destination account of a transfer.
 // returns the previous balance
 func (s *stateObject) AddBalance(amount *uint256.Int) uint256.Int {
-	// EIP161: We must check emptiness for the objects such that the account
-	// clearing (0,0,0 objects) can take effect.
 	if amount.IsZero() {
-		if s.empty() {
-			s.touch()
-		}
+		// Pyquarkchain touches the account for every zero balance delta, including
+		// non-empty accounts. This also canonicalizes cached explicit zero entries.
+		s.touch()
 		return *(s.Balance())
 	}
 	return s.SetBalance(new(uint256.Int).Add(s.Balance(), amount))
@@ -489,14 +492,7 @@ func (s *stateObject) AddBalance(amount *uint256.Int) uint256.Int {
 
 // SetBalance sets the balance for the object, and returns the previous balance.
 func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
-	prev := *s.data.GetBalance()
-	s.db.journal.balanceChange(s.address, s.data.GetBalance())
-	s.setBalance(amount)
-	return prev
-}
-
-func (s *stateObject) setBalance(amount *uint256.Int) {
-	s.data.SetBalance(amount)
+	return s.setBalance(amount, qkccommon.DefaultTokenID)
 }
 
 func (s *stateObject) deepCopy(db *StateDB) *stateObject {
@@ -514,6 +510,9 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 		dirtyCode:          s.dirtyCode,
 		selfDestructed:     s.selfDestructed,
 		newContract:        s.newContract,
+	}
+	if s.data.MntBalances != nil {
+		obj.data.MntBalances = s.data.MntBalances.Copy()
 	}
 
 	switch s.trie.(type) {
