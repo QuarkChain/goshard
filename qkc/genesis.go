@@ -171,8 +171,8 @@ func CreateMinorBlock(qkc *config.QuarkChainConfig, fullShardID uint32, root *ty
 		CrossShardGasUsed: &serialize.Uint256{Value: new(big.Int)},
 		// The cross-shard cursor starts at (root_height, 0, 0), matching
 		// pyquarkchain (quarkchain/genesis.py:92).
-		XShardTxCursor: types.XShardTxCursorInfo{RootBlockHeight: uint64(root.Number)},
-		XShardGasLimit: &serialize.Uint256{Value: big.NewInt(defaultXShardGasLimit)},
+		XShardTxCursorInfo: &types.XShardTxCursorInfo{RootBlockHeight: uint64(root.Number)},
+		XShardGasLimit:     &serialize.Uint256{Value: big.NewInt(defaultXShardGasLimit)},
 	}
 	header := &types.MinorBlockHeader{
 		Version:           g.Version,
@@ -188,7 +188,10 @@ func CreateMinorBlock(qkc *config.QuarkChainConfig, fullShardID uint32, root *ty
 		Difficulty:        new(big.Int).SetUint64(g.Difficulty),
 		Extra:             bytes.Clone(g.ExtraData),
 	}
-	return types.NewMinorBlock(header, meta, nil, nil), nil
+	// NewMinorBlockWithHeader, not NewMinorBlock: the latter derives meta.TxHash
+	// from the tx list, which would overwrite the HASH_MERKLE_ROOT the genesis
+	// config pins (and that header.MetaHash above already commits to).
+	return types.NewMinorBlockWithHeader(header, meta), nil
 }
 
 // ShardChainConfig returns the EVM rule set one shard runs: Petersburg-only,

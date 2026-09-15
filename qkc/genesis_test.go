@@ -193,7 +193,7 @@ func TestMinorGenesisGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateMinorBlock: %v", err)
 			}
-			h, m := block.Header, block.Meta
+			h, m := block.Header(), block.Meta()
 
 			if h.PrevRootBlockHash != common.HexToHash(want.RootGenesisHash) {
 				t.Errorf("PrevRootBlockHash = %s, want %s", h.PrevRootBlockHash, want.RootGenesisHash)
@@ -220,19 +220,19 @@ func TestMinorGenesisGolden(t *testing.T) {
 				MinorBlockIndex:    want.XShardCursor[1],
 				XShardDepositIndex: want.XShardCursor[2],
 			}
-			if m.XShardTxCursor != wantCursor {
-				t.Errorf("XShardTxCursor = %+v, want %+v", m.XShardTxCursor, wantCursor)
+			if *m.XShardTxCursorInfo != wantCursor {
+				t.Errorf("XShardTxCursor = %+v, want %+v", *m.XShardTxCursorInfo, wantCursor)
 			}
 
 			// The whole point: materializing ALLOC and assembling the block must
 			// reproduce pyquarkchain's genesis block, byte for byte.
-			if got := block.Meta.Root; got != common.HexToHash(want.StateRoot) {
+			if got := block.Meta().Root; got != common.HexToHash(want.StateRoot) {
 				t.Errorf("genesis state root\n got %s\nwant %s", got.Hex(), want.StateRoot)
 			}
-			if got := block.Meta.Hash(); got != common.HexToHash(want.MetaHash) {
+			if got := block.Meta().Hash(); got != common.HexToHash(want.MetaHash) {
 				t.Errorf("genesis meta hash\n got %s\nwant %s", got.Hex(), want.MetaHash)
 			}
-			if got := block.Header.MetaHash; got != common.HexToHash(want.MetaHash) {
+			if got := block.Header().MetaHash; got != common.HexToHash(want.MetaHash) {
 				t.Errorf("header's meta hash\n got %s\nwant %s", got.Hex(), want.MetaHash)
 			}
 			if got := block.Hash(); got != common.HexToHash(want.HeaderHash) {
@@ -254,7 +254,7 @@ func TestCreateMinorBlock(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateMinorBlock: %v", err)
 			}
-			h, m, sg := block.Header, block.Meta, shardCfg.Genesis
+			h, m, sg := block.Header(), block.Meta(), shardCfg.Genesis
 
 			if h.Branch.GetFullShardID() != firstShardID {
 				t.Errorf("branch = 0x%08x, want 0x%08x", h.Branch.GetFullShardID(), firstShardID)
@@ -280,8 +280,8 @@ func TestCreateMinorBlock(t *testing.T) {
 			if h.PrevRootBlockHash != root.Hash() {
 				t.Errorf("PrevRootBlockHash = %s, want the root genesis %s", h.PrevRootBlockHash, root.Hash())
 			}
-			if want := (types.XShardTxCursorInfo{RootBlockHeight: uint64(root.Number)}); m.XShardTxCursor != want {
-				t.Errorf("XShardTxCursor = %+v, want %+v", m.XShardTxCursor, want)
+			if want := (types.XShardTxCursorInfo{RootBlockHeight: uint64(root.Number)}); *m.XShardTxCursorInfo != want {
+				t.Errorf("XShardTxCursor = %+v, want %+v", *m.XShardTxCursorInfo, want)
 			}
 
 			// Meta: the config's merkle root, a materialized state root, and an
@@ -320,8 +320,8 @@ func TestCreateMinorBlock(t *testing.T) {
 			}
 
 			// The genesis body is empty.
-			if len(block.Transactions) != 0 || len(block.TrackingData) != 0 {
-				t.Errorf("body = %d txs / %d tracking bytes, want empty", len(block.Transactions), len(block.TrackingData))
+			if len(block.Transactions()) != 0 || len(block.TrackingData()) != 0 {
+				t.Errorf("body = %d txs / %d tracking bytes, want empty", len(block.Transactions()), len(block.TrackingData()))
 			}
 		})
 	}
@@ -346,8 +346,8 @@ func TestCommitGenesisState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CommitGenesisState: %v", err)
 			}
-			if stateRoot != block.Meta.Root {
-				t.Errorf("committed state root = %s, want the derived meta root %s", stateRoot, block.Meta.Root)
+			if stateRoot != block.Meta().Root {
+				t.Errorf("committed state root = %s, want the derived meta root %s", stateRoot, block.Meta().Root)
 			}
 			if !rawdb.HasLegacyTrieNode(db, stateRoot) {
 				t.Errorf("state root %s was not written to the database", stateRoot)
