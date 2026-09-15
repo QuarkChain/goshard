@@ -10,7 +10,7 @@ import (
 
 // qkcFullShardKeyChange undoes SetFullShardKey. full_shard_key is part of
 // STATE_DEFAULTS (state.py:45), which State.revert puts back. The keys already
-// frozen into qkcShardKeys stay: pyquarkchain keeps those blank accounts cached.
+// frozen into qkcAccountCache stay: pyquarkchain keeps those blank accounts cached.
 type qkcFullShardKeyChange struct {
 	prev uint32
 }

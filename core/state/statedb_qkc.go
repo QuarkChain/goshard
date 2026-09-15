@@ -109,6 +109,21 @@ func (s *StateDB) ResetStorage(addr common.Address) {
 	}
 }
 
+// qkcCachedAccount stores the parts of pyquarkchain's cached blank account
+// that can affect persisted account encoding. The full shard key is retained
+// until block commit, while balances are transferred to a recreated state
+// object and then cleared.
+//
+// Map presence records whether the account has been observed because zero is
+// a valid full shard key.
+type qkcCachedAccount struct {
+	fullShardKey uint32
+
+	// balances contains explicit zero entries left by reverted balance writes.
+	// A nil value means that only the first-observed full shard key is cached.
+	balances *qkccommon.TokenBalances
+}
+
 // Balance updates support two equivalent call styles. Callers that already
 // distinguish QKC from MNT can use Set/Add/SubBalance for QKC and the matching
 // MntBalance method for MNT. Callers holding an arbitrary token ID can instead
@@ -218,14 +233,14 @@ func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
 func (s *StateDB) FullShardKey() uint32 { return s.fullShardKey }
 
 func (s *StateDB) noteQKCShardKey(addr common.Address) {
-	if _, ok := s.qkcShardKeys[addr]; !ok {
-		s.qkcShardKeys[addr] = s.fullShardKey
+	if _, ok := s.qkcAccountCache[addr]; !ok {
+		s.qkcAccountCache[addr] = qkcCachedAccount{fullShardKey: s.fullShardKey}
 	}
 }
 
 func (s *StateDB) qkcShardKey(addr common.Address) uint32 {
-	if fullShardKey, ok := s.qkcShardKeys[addr]; ok {
-		return fullShardKey
+	if cached, ok := s.qkcAccountCache[addr]; ok {
+		return cached.fullShardKey
 	}
 	return s.fullShardKey
 }
@@ -255,3 +270,28 @@ func (s *StateDB) GetTokenBalances(addr common.Address) map[uint64]*uint256.Int 
 // that a mistake it cannot report through its own return value still stops
 // Commit from producing a root.
 func (s *StateDB) SetError(err error) { s.setError(err) }
+
+func (s *StateDB) cacheQKCBlankBalances(obj *stateObject) {
+	if balances := obj.data.MntBalances; balances != nil && balances.Len() != 0 && balances.IsBlank() {
+		cached, ok := s.qkcAccountCache[obj.address]
+		if !ok {
+			cached.fullShardKey = obj.data.FullShardKey
+		}
+		cached.balances = balances
+		s.qkcAccountCache[obj.address] = cached
+	}
+}
+
+// takeQKCBlankBalances transfers reverted zero-balance entries to a recreated
+// state object. It keeps the cache entry so the first-observed full shard key
+// remains valid until block commit.
+func (s *StateDB) takeQKCBlankBalances(addr common.Address) *qkccommon.TokenBalances {
+	cached, ok := s.qkcAccountCache[addr]
+	if !ok || cached.balances == nil {
+		return nil
+	}
+	balances := cached.balances
+	cached.balances = nil
+	s.qkcAccountCache[addr] = cached
+	return balances
+}

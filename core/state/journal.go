@@ -284,6 +284,12 @@ type (
 )
 
 func (ch createObjectChange) revert(s *StateDB) {
+	// Balance changes have already been reverted. pyquarkchain retains their
+	// explicit zero entries in its cached blank account, which affect serialization
+	// if this address becomes non-empty before commit (for example via CREATE2).
+	if obj := s.stateObjects[ch.account]; obj != nil {
+		s.cacheQKCBlankBalances(obj)
+	}
 	delete(s.stateObjects, ch.account)
 }
 
