@@ -1023,6 +1023,71 @@ func TestPeerConn_CloseStopsReadLoop(t *testing.T) {
 	}
 }
 
+// TestPeerConn_CloseStopsQueuedFrameDispatch verifies that once a PeerConn is
+// closed, frames that were already queued but not yet dispatched are never
+// delivered to handlers.
+func TestPeerConn_CloseStopsQueuedFrameDispatch(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 77
+	const branch uint32 = 0x00010001
+
+	pc, handler := newRecordingPeerConn(t, client, clusterPeerID, branch)
+
+	cmdPayload, err := serialize.SerializeToBytes(
+		&wire.NewTransactionListCommand{
+			TransactionList: []*types.Transaction{newTestTx()},
+		},
+	)
+	if err != nil {
+		t.Fatalf("serialize command: %v", err)
+	}
+
+	// Queue both frames before Start so the read loop observes the complete
+	// backlog immediately: the first frame triggers shutdown and the second
+	// frame must never be dispatched afterwards.
+	if err := pc.HandleFrame(&wire.Frame{
+		Meta:   wire.ClusterMetadata{Branch: branch, ClusterPeerID: clusterPeerID},
+		Opcode: 0x77, // unknown opcode
+		RPCID:  0,
+	}); err != nil {
+		t.Fatalf("HandleFrame (unknown opcode): %v", err)
+	}
+
+	if err := pc.HandleFrame(&wire.Frame{
+		Meta:    wire.ClusterMetadata{Branch: branch, ClusterPeerID: clusterPeerID},
+		Opcode:  byte(wire.CommandOpNewTransactionList),
+		RPCID:   0,
+		Payload: cmdPayload,
+	}); err != nil {
+		t.Fatalf("HandleFrame (valid command): %v", err)
+	}
+
+	pc.Start()
+
+	select {
+	case <-pc.WaitUntilClosed():
+		// OK.
+	case <-time.After(2 * time.Second):
+		t.Fatal("PeerConn did not close after the unknown-opcode frame")
+	}
+
+	select {
+	case c := <-handler.calls:
+		t.Fatalf("handler invoked for opcode 0x%x after PeerConn shutdown", c.opcode)
+	case <-time.After(200 * time.Millisecond):
+		// OK: no frame was dispatched after close.
+	}
+
+	// PeerConn shutdown must not affect the shared MasterConn transport.
+	if client.IsClosed() {
+		t.Fatal("PeerConn shutdown closed the shared MasterConn")
+	}
+
+	pingMaster(t, serverConn, 1)
+}
+
 // TestMasterConn_HandlerErrorClosesPeerConnOnly verifies the failure-isolation
 // half of the routing contract: a business-layer error while dispatching a
 // routed frame shuts down only the PeerConn — the shared MasterConn must keep

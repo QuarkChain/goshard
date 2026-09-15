@@ -53,7 +53,10 @@ func newVirtualTransport(clusterPeerID uint64, branch uint32, masterConn *Master
 	return vt
 }
 
-// ReadFrame blocks until a frame is queued or the transport is closed.
+// ReadFrame blocks until a frame is queued or the transport is closed. Once
+// closed it never returns a queued frame: the backlog is discarded, so no
+// inbound frame is dispatched after the connection is torn down (e.g., after
+// an earlier frame's handler error triggered shutdown).
 func (vt *virtualTransport) ReadFrame() (*wire.Frame, error) {
 	vt.mu.Lock()
 	defer vt.mu.Unlock()
@@ -61,7 +64,8 @@ func (vt *virtualTransport) ReadFrame() (*wire.Frame, error) {
 	for len(vt.queue) == 0 && !vt.closed {
 		vt.cond.Wait()
 	}
-	if len(vt.queue) == 0 && vt.closed {
+	if vt.closed {
+		vt.queue = nil
 		return nil, conn.ErrConnectionClosed
 	}
 
