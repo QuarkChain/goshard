@@ -2,7 +2,6 @@
 package rawdb
 
 import (
-	"encoding/binary"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -158,6 +157,14 @@ func WriteMinorBlock(db ethdb.KeyValueWriter, block *types.MinorBlock) {
 	}
 }
 
+// DeleteBlock removes all block data associated with a hash.
+func DeleteMinorBlock(db ethdb.KeyValueWriter, hash common.Hash) {
+	DeleteQKCReceipts(db, hash)
+	if err := db.Delete(qkcMinorBlockKey(hash)); err != nil {
+		log.Crit("Failed to delete minor block", "err", err)
+	}
+}
+
 // HasRootBlock verifies the existence of a root block corresponding to the hash.
 func HasRootBlock(db ethdb.KeyValueReader, hash common.Hash) bool {
 	if has, err := db.Has(qkcRootBlockKey(hash)); !has || err != nil {
@@ -197,137 +204,4 @@ func DeleteRootBlock(db ethdb.KeyValueWriter, hash common.Hash) {
 	if err := db.Delete(qkcRootBlockKey(hash)); err != nil {
 		log.Crit("Failed to delete root block", "err", err)
 	}
-}
-
-// DeleteBlock removes all block data associated with a hash.
-func DeleteMinorBlock(db ethdb.KeyValueWriter, hash common.Hash) {
-	DeleteQKCReceipts(db, hash)
-	if err := db.Delete(qkcMinorBlockKey(hash)); err != nil {
-		log.Crit("Failed to delete minor block", "err", err)
-	}
-}
-
-func WriteTotalTx(db ethdb.KeyValueWriter, hash common.Hash, txCount uint32) {
-	data := qkcEncodeUint32(txCount)
-	if err := db.Put(qkcTotalTxCountKey(hash), data); err != nil {
-		log.Crit("Failed to store total Tx", "err", err)
-	}
-}
-
-func ReadTotalTx(db ethdb.KeyValueReader, hash common.Hash) *uint32 {
-	data, _ := db.Get(qkcTotalTxCountKey(hash))
-	if len(data) != 4 {
-		return nil
-	}
-	number := binary.BigEndian.Uint32(data)
-	return &number
-
-}
-
-func WriteGenesisBlock(db ethdb.KeyValueWriter, rHash common.Hash, block *types.MinorBlock) {
-	data, err := serialize.SerializeToBytes(block)
-	if err != nil {
-		log.Crit("can not serilalize Minor block")
-	}
-	key := qkcGenesisKey(rHash)
-	if err := db.Put(key, data); err != nil {
-		log.Crit("Failed to store genesis", "err", err)
-	}
-}
-
-func ReadGenesis(db ethdb.KeyValueReader, rHash common.Hash) *types.MinorBlock {
-	data, _ := db.Get(qkcGenesisKey(rHash))
-	if len(data) == 0 {
-		return nil
-	}
-	res := new(types.MinorBlock)
-	if err := serialize.DeserializeFromBytes(data, res); err != nil {
-		return nil
-	}
-	return res
-}
-
-func WriteConfirmedCrossShardTxList(db ethdb.KeyValueWriter, rHash common.Hash, list *types.CrossShardTransactionList) {
-	data, err := serialize.SerializeToBytes(list)
-	if err != nil {
-		log.Crit("can not serialize CrossShardTransactionList")
-	}
-	key := qkcConfirmedXShardKey(rHash)
-	if err := db.Put(key, data); err != nil {
-		log.Crit("Failed to store header", "err", err)
-	}
-}
-
-func ReadConfirmedCrossShardTxList(db ethdb.KeyValueReader, rHash common.Hash) *types.CrossShardTransactionList {
-	data, _ := db.Get(qkcConfirmedXShardKey(rHash))
-	if len(data) == 0 {
-		return nil
-	}
-	list := new(types.CrossShardTransactionList)
-	if err := serialize.Deserialize(serialize.NewByteBuffer(data), list); err != nil {
-		log.Error("Invalid block header Deserialize", "hash", rHash, "err", err)
-		return nil
-	}
-	return list
-}
-
-func WriteCrossShardTxList(db ethdb.KeyValueWriter, rHash common.Hash, list *types.CrossShardTransactionList) {
-	data, err := serialize.SerializeToBytes(list)
-	if err != nil {
-		log.Crit("can not serialize CrossShardTransactionList")
-	}
-	key := qkcXShardTxListKey(rHash)
-	if err := db.Put(key, data); err != nil {
-		log.Crit("Failed to store header", "err", err)
-	}
-}
-
-func ReadCrossShardTxList(db ethdb.KeyValueReader, rHash common.Hash) *types.CrossShardTransactionList {
-	data, _ := db.Get(qkcXShardTxListKey(rHash))
-	if len(data) == 0 {
-		return nil
-	}
-	list := new(types.CrossShardTransactionList)
-	if err := serialize.Deserialize(serialize.NewByteBuffer(data), list); err != nil {
-		log.Error("Invalid block header Deserialize", "hash", rHash, "err", err)
-		return nil
-	}
-	return list
-}
-
-func WriteLastConfirmedMinorBlockHeaderAtRootBlock(db ethdb.KeyValueWriter, rHash common.Hash, mHash common.Hash) {
-	if err := db.Put(qkcLastMinorAtRootKey(rHash), mHash.Bytes()); err != nil {
-		log.Crit("failed to store last confirmed  minot block at root block")
-	}
-}
-
-func ReadLastConfirmedMinorBlockHeaderAtRootBlock(db ethdb.KeyValueReader, rHash common.Hash) common.Hash {
-	data, _ := db.Get(qkcLastMinorAtRootKey(rHash))
-	if len(data) == 0 {
-		return common.Hash{}
-	}
-	return common.BytesToHash(data)
-}
-
-func PutXShardDepositHashList(db ethdb.KeyValueWriter, h common.Hash, hList *HashList) {
-	bytes, err := serialize.SerializeToBytes(hList)
-	if err != nil {
-		log.Crit("can not serialize HashList")
-	}
-	if err := db.Put(qkcXShardDepositHashListKey(h), bytes); err != nil {
-		log.Crit("failed to put xshard deposit hash list err", err)
-	}
-}
-
-func GetXShardDepositHashList(db ethdb.KeyValueReader, h common.Hash) *HashList {
-	data, _ := db.Get(qkcXShardDepositHashListKey(h))
-	if len(data) == 0 {
-		return nil
-	}
-	hList := new(HashList)
-	if err := serialize.DeserializeFromBytes(data, hList); err != nil {
-		log.Error("GetXShardDepositHashList", "DeserializeFromBytes err", err)
-		return nil
-	}
-	return hList
 }
