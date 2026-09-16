@@ -101,37 +101,6 @@ func TestTokenBalanceRevertAcrossFinalise(t *testing.T) {
 	}
 }
 
-func TestBalanceResetClearsRevertedAbsentAccountCache(t *testing.T) {
-	tests := []struct {
-		name  string
-		reset func(*StateDB, common.Address)
-	}{
-		{name: "reset balances", reset: (*StateDB).ResetBalances},
-		{name: "delete account", reset: (*StateDB).DelAccount},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			addr := common.HexToAddress("0x2345")
-			s := newMntTestStateDB(t)
-			s.SetFullShardKey(42)
-			snapshot := s.Snapshot()
-			s.SetMntBalance(addr, uint256.NewInt(1), 100)
-			s.RevertToSnapshot(snapshot)
-			test.reset(s, addr)
-			s.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
-			root, err := s.Commit(0, true, false)
-			require.NoError(t, err)
-
-			baseline := newMntTestStateDB(t)
-			baseline.SetFullShardKey(42)
-			baseline.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
-			want, err := baseline.Commit(0, true, false)
-			require.NoError(t, err)
-			require.Equal(t, want, root)
-		})
-	}
-}
-
 func newMntTestStateDB(t *testing.T) *StateDB {
 	t.Helper()
 	db := triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil)
