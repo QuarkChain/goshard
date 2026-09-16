@@ -43,10 +43,10 @@ import (
 // account instead leaves exactly one rule deciding its fate, the emptiness
 // sweep, which is is_blank.
 func (s *StateDB) DelAccount(addr common.Address) {
+	s.ResetBalances(addr)
 	if s.getStateObject(addr) == nil {
 		return
 	}
-	s.ResetBalances(addr)
 	s.SetNonce(addr, 0, tracing.NonceChangeUnspecified)
 	s.SetCode(addr, nil, tracing.CodeChangeUnspecified)
 	s.ResetStorage(addr)
@@ -64,6 +64,10 @@ func (s *StateDB) DelAccount(addr common.Address) {
 // alone, and it is del_account's other steps that mark the account.
 func (s *StateDB) ResetBalances(addr common.Address) {
 	obj := s.getStateObject(addr)
+	if cached, ok := s.qkcAccountCache[addr]; ok {
+		cached.balances = nil
+		s.qkcAccountCache[addr] = cached
+	}
 	if obj == nil {
 		return
 	}

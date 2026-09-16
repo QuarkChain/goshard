@@ -25,6 +25,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
@@ -55,6 +56,9 @@ type EvmState struct {
 // blockchain shares one state database across blocks: a root committed through
 // it can be reopened before anything is flushed to disk.
 func New(root common.Hash, db state.Database) (*EvmState, error) {
+	if db.Type() != state.TypeMPT || db.TrieDB().Scheme() != rawdb.HashScheme {
+		return nil, fmt.Errorf("unsupported state database: QuarkChain state requires a hash-based MPT")
+	}
 	sdb, err := state.New(root, db)
 	if err != nil {
 		return nil, fmt.Errorf("open state %s: %w", root, err)

@@ -12,9 +12,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	corestate "github.com/ethereum/go-ethereum/core/state"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"github.com/holiman/uint256"
 )
 
@@ -83,6 +86,17 @@ func newTestState(t *testing.T) *EvmState {
 		t.Fatalf("New: %v", err)
 	}
 	return state
+}
+
+func TestNewRejectsPathDatabase(t *testing.T) {
+	disk := rawdb.NewMemoryDatabase()
+	db := corestate.NewDatabase(
+		triedb.NewDatabase(disk, &triedb.Config{PathDB: pathdb.Defaults}),
+		corestate.NewCodeDB(disk),
+	)
+	if _, err := New(coretypes.EmptyRootHash, db); err == nil {
+		t.Fatal("New accepted a path-based state database")
+	}
 }
 
 func mustRecipient(t *testing.T, hex string) account.Recipient {
