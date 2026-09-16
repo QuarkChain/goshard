@@ -71,10 +71,10 @@ func verifyIterator(t *testing.T, expCount int, it Iterator, verify verifyConten
 // randomAccount generates a random account and returns it RLP encoded.
 func randomAccount() []byte {
 	a := &types.StateAccount{
-		Balance:  uint256.NewInt(rand.Uint64()),
-		Nonce:    rand.Uint64(),
-		Root:     testrand.Hash(),
-		CodeHash: types.EmptyCodeHash[:],
+		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(rand.Uint64())),
+		Nonce:       rand.Uint64(),
+		Root:        testrand.Hash(),
+		CodeHash:    types.EmptyCodeHash[:],
 	}
 	data, _ := rlp.EncodeToBytes(a)
 	return data

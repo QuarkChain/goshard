@@ -151,7 +151,7 @@ func (s *StateDB) DumpToCollector(c DumpCollector, conf *DumpConfig) (nextKey []
 		}
 		var (
 			account = DumpAccount{
-				Balance:     data.Balance.String(),
+				Balance:     data.GetBalance().String(),
 				Nonce:       data.Nonce,
 				Root:        data.Root[:],
 				CodeHash:    data.CodeHash,

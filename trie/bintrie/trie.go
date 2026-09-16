@@ -219,7 +219,7 @@ func (t *BinaryTrie) GetAccount(addr common.Address) (*types.StateAccount, error
 	acc.Nonce = binary.BigEndian.Uint64(values[BasicDataLeafKey][BasicDataNonceOffset:])
 	var balance [16]byte
 	copy(balance[:], values[BasicDataLeafKey][BasicDataBalanceOffset:])
-	acc.Balance = new(uint256.Int).SetBytes(balance[:])
+	acc.SetBalance(new(uint256.Int).SetBytes(balance[:]))
 	acc.CodeHash = values[CodeHashLeafKey]
 
 	return acc, nil
@@ -245,7 +245,7 @@ func (t *BinaryTrie) UpdateAccount(addr common.Address, acc *types.StateAccount,
 	// Because the balance is a max of 16 bytes, truncate
 	// the extra values. This happens in devmode, where
 	// 0xff**HashSize is allocated to the developer account.
-	balanceBytes := acc.Balance.Bytes()
+	balanceBytes := acc.GetBalance().Bytes()
 	// TODO: reduce the size of the allocation in devmode, then panic instead
 	// of truncating.
 	if len(balanceBytes) > 16 {

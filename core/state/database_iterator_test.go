@@ -102,8 +102,9 @@ func testAccountIterator(t *testing.T, scheme string) {
 		if got.Nonce != acc.nonce {
 			t.Fatalf("(%s) nonce %x: got %d, want %d", scheme, hash, got.Nonce, acc.nonce)
 		}
-		if got.Balance.Cmp(acc.balance) != 0 {
-			t.Fatalf("(%s) balance %x: got %v, want %v", scheme, hash, got.Balance, acc.balance)
+		balance := got.GetBalance()
+		if balance.Cmp(acc.balance) != 0 {
+			t.Fatalf("(%s) balance %x: got %v, want %v", scheme, hash, balance, acc.balance)
 		}
 		// Verify address preimage resolution.
 		addr, err := acctIt.Address()
