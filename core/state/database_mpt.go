@@ -49,10 +49,10 @@ func NewMPTDatabase(tdb *triedb.Database, codedb *CodeDB) *MPTDatabase {
 	}
 }
 
-// WithSnapshot configures the provided state snapshot. Note that this
-// registration must be performed before the MPTDatabase is used.
-func (db *MPTDatabase) WithSnapshot(snapshot *snapshot.Tree) Database {
-	db.snap = snapshot
+// WithSnapshot ignores the provided snapshot because snapshot state encoding
+// does not support QuarkChain accounts.
+func (db *MPTDatabase) WithSnapshot(_ *snapshot.Tree) Database {
+	db.snap = nil
 	return db
 }
 

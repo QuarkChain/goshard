@@ -803,10 +803,10 @@ func makeAccounts(size int) (addresses [][20]byte, accounts [][]byte) {
 		random.Read(balanceBytes)
 		balance := new(uint256.Int).SetBytes(balanceBytes)
 		data, _ := rlp.EncodeToBytes(&types.StateAccount{
-			Nonce:    nonce,
-			Balance:  balance,
-			Root:     root,
-			CodeHash: code,
+			Nonce:       nonce,
+			MntBalances: types.NewQKCTokenBalances(balance),
+			Root:        root,
+			CodeHash:    code,
 		})
 		accounts[i] = data
 	}

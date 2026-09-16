@@ -37,10 +37,11 @@ type virtualTransport struct {
 	branch        uint32
 	masterConn    *MasterConn
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []*wire.Frame
-	closed bool
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   []*wire.Frame
+	closed  bool
+	closeCh chan struct{}
 }
 
 func newVirtualTransport(clusterPeerID uint64, branch uint32, masterConn *MasterConn) *virtualTransport {
@@ -48,12 +49,16 @@ func newVirtualTransport(clusterPeerID uint64, branch uint32, masterConn *Master
 		clusterPeerID: clusterPeerID,
 		branch:        branch,
 		masterConn:    masterConn,
+		closeCh:       make(chan struct{}),
 	}
 	vt.cond = sync.NewCond(&vt.mu)
 	return vt
 }
 
-// ReadFrame blocks until a frame is queued or the transport is closed.
+// ReadFrame blocks until a frame is queued or the transport is closed. Once
+// closed it never returns a queued frame: the backlog is discarded, so no
+// inbound frame is dispatched after the connection is torn down (e.g., after
+// an earlier frame's handler error triggered shutdown).
 func (vt *virtualTransport) ReadFrame() (*wire.Frame, error) {
 	vt.mu.Lock()
 	defer vt.mu.Unlock()
@@ -61,7 +66,8 @@ func (vt *virtualTransport) ReadFrame() (*wire.Frame, error) {
 	for len(vt.queue) == 0 && !vt.closed {
 		vt.cond.Wait()
 	}
-	if len(vt.queue) == 0 && vt.closed {
+	if vt.closed {
+		vt.queue = nil
 		return nil, conn.ErrConnectionClosed
 	}
 
@@ -72,24 +78,42 @@ func (vt *virtualTransport) ReadFrame() (*wire.Frame, error) {
 }
 
 // WriteFrame stamps the routing metadata of this virtual peer connection
-// and forwards the frame through the master's TCP connection. The virtual
-// connection is created with a fixed branch and cluster peer ID, and every
-// frame sent through it must be routed using that identity. This mirrors
-// Python's PeerShardConnection.get_metadata_to_write(), which derives the
-// metadata from the connection's branch and cluster peer ID.
+// and forwards the frame through the shared MasterConn. If the virtual
+// connection closes while the master write is blocked, return immediately
+// without closing the shared MasterConn.
 func (vt *virtualTransport) WriteFrame(f *wire.Frame) error {
 	f.Meta = wire.ClusterMetadata{
 		Branch:        vt.branch,
 		ClusterPeerID: vt.clusterPeerID,
 	}
-	return vt.masterConn.WriteFrame(f)
+
+	vt.mu.Lock()
+	if vt.closed {
+		vt.mu.Unlock()
+		return conn.ErrConnectionClosed
+	}
+	closeCh := vt.closeCh
+	vt.mu.Unlock()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- vt.masterConn.WriteFrame(f)
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-closeCh:
+		return conn.ErrConnectionClosed
+	}
 }
 
-// Close unblocks any pending ReadFrame and drops further receive() calls.
+// Close unblocks any pending ReadFrame and WriteFrame callers and drops
+// further receive() calls.
 func (vt *virtualTransport) Close() error {
 	vt.mu.Lock()
 	if !vt.closed {
 		vt.closed = true
+		close(vt.closeCh)
 		vt.cond.Broadcast()
 	}
 	vt.mu.Unlock()

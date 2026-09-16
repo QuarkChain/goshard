@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -1020,6 +1021,139 @@ func TestPeerConn_CloseStopsReadLoop(t *testing.T) {
 	// HandleFrame after close should return an error.
 	if err := pc.HandleFrame(&wire.Frame{}); err == nil {
 		t.Fatal("expected error from HandleFrame after Close")
+	}
+}
+
+// TestPeerConn_CloseStopsQueuedFrameDispatch verifies that once a PeerConn is
+// closed, frames that were already queued but not yet dispatched are never
+// delivered to handlers.
+func TestPeerConn_CloseStopsQueuedFrameDispatch(t *testing.T) {
+	client, serverConn, cleanup := newMasterConn(t)
+	defer cleanup()
+
+	const clusterPeerID uint64 = 77
+	const branch uint32 = 0x00010001
+
+	pc, handler := newRecordingPeerConn(t, client, clusterPeerID, branch)
+
+	cmdPayload, err := serialize.SerializeToBytes(
+		&wire.NewTransactionListCommand{
+			TransactionList: []*types.Transaction{newTestTx()},
+		},
+	)
+	if err != nil {
+		t.Fatalf("serialize command: %v", err)
+	}
+
+	// Queue both frames before Start so the read loop observes the complete
+	// backlog immediately: the first frame triggers shutdown and the second
+	// frame must never be dispatched afterwards.
+	if err := pc.HandleFrame(&wire.Frame{
+		Meta:   wire.ClusterMetadata{Branch: branch, ClusterPeerID: clusterPeerID},
+		Opcode: 0x77, // unknown opcode
+		RPCID:  0,
+	}); err != nil {
+		t.Fatalf("HandleFrame (unknown opcode): %v", err)
+	}
+
+	if err := pc.HandleFrame(&wire.Frame{
+		Meta:    wire.ClusterMetadata{Branch: branch, ClusterPeerID: clusterPeerID},
+		Opcode:  byte(wire.CommandOpNewTransactionList),
+		RPCID:   0,
+		Payload: cmdPayload,
+	}); err != nil {
+		t.Fatalf("HandleFrame (valid command): %v", err)
+	}
+
+	pc.Start()
+
+	select {
+	case <-pc.WaitUntilClosed():
+		// OK.
+	case <-time.After(2 * time.Second):
+		t.Fatal("PeerConn did not close after the unknown-opcode frame")
+	}
+
+	select {
+	case c := <-handler.calls:
+		t.Fatalf("handler invoked for opcode 0x%x after PeerConn shutdown", c.opcode)
+	case <-time.After(200 * time.Millisecond):
+		// OK: no frame was dispatched after close.
+	}
+
+	// PeerConn shutdown must not affect the shared MasterConn transport.
+	if client.IsClosed() {
+		t.Fatal("PeerConn shutdown closed the shared MasterConn")
+	}
+
+	pingMaster(t, serverConn, 1)
+}
+
+// TestPeerConn_CloseUnblocksPendingWrite verifies that a local PeerConn close
+// unblocks a WriteFrame already waiting on the shared MasterConn. net.Pipe
+// completes a Write only after the peer has consumed the whole buffer, so with
+// no reader on the master side the forwarded write blocks until its 20s
+// deadline. PeerConn.Close must return the blocked SendRPCMeta promptly with
+// ErrConnectionClosed, without closing MasterConn.
+func TestPeerConn_CloseUnblocksPendingWrite(t *testing.T) {
+	peerConn, slaveConn := net.Pipe()
+	defer peerConn.Close()
+	defer slaveConn.Close()
+
+	mc, err := NewMasterConn(MasterConnConfig{
+		Conn:                 slaveConn,
+		LocalID:              []byte("go-slave"),
+		LocalFullShardIDList: []uint32{0x00010001},
+		ClusterShardIDs:      []uint32{0x00010001},
+		Handler:              &fakeMasterHandler{},
+		PeerResolver:         &fakeMasterHandler{},
+		Logger:               log.New(),
+	})
+	if err != nil {
+		t.Fatalf("new master conn: %v", err)
+	}
+	mc.Start()
+	defer mc.Close()
+
+	const clusterPeerID uint64 = 78
+	const branch uint32 = 0x00010001
+	pc, err := NewPeerConn(clusterPeerID, branch, mc, stubPeerHandler{}, log.New())
+	if err != nil {
+		t.Fatalf("new peer conn: %v", err)
+	}
+	pc.Start()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := pc.GetMinorBlockHeaderList(context.Background(),
+			&wire.GetMinorBlockHeaderListRequest{Branch: branch, Limit: 1})
+		done <- err
+	}()
+
+	// Deterministic sync point: the RPC frame is written to the pipe, but the
+	// peer consumes only the 4-byte length prefix. The remaining frame data
+	// keeps the MasterConn write blocked, so PeerConn.Close must unblock the
+	// logical RPC caller without closing the shared MasterConn.
+	if err := peerConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := io.ReadFull(peerConn, make([]byte, 4)); err != nil {
+		t.Fatalf("RPC never reached the blocked pipe write: %v", err)
+	}
+
+	pc.Close()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, conn.ErrConnectionClosed) {
+			t.Fatalf("RPC error = %v, want ErrConnectionClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendRPCMeta still blocked after PeerConn.Close")
+	}
+
+	if mc.IsClosed() {
+		t.Fatal("PeerConn close closed the shared MasterConn")
 	}
 }
 

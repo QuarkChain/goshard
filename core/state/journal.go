@@ -186,9 +186,10 @@ func (j *journal) refundChange(previous uint64) {
 	j.append(refundChange{prev: previous})
 }
 
-func (j *journal) balanceChange(addr common.Address, previous *uint256.Int) {
+func (j *journal) balanceChange(addr common.Address, tokenID uint64, previous *uint256.Int) {
 	j.append(balanceChange{
 		account: addr,
+		tokenID: tokenID,
 		prev:    previous.Clone(),
 	})
 }
@@ -247,6 +248,7 @@ type (
 	// Changes to individual accounts.
 	balanceChange struct {
 		account common.Address
+		tokenID uint64
 		prev    *uint256.Int
 	}
 	nonceChange struct {
@@ -292,6 +294,12 @@ type (
 )
 
 func (ch createObjectChange) revert(s *StateDB) {
+	// Balance changes have already been reverted. pyquarkchain retains their
+	// explicit zero entries in its cached blank account, which affect serialization
+	// if this address becomes non-empty before commit (for example via CREATE2).
+	if obj := s.stateObjects[ch.account]; obj != nil {
+		s.cacheQKCBlankBalances(obj)
+	}
 	delete(s.stateObjects, ch.account)
 }
 
@@ -352,7 +360,7 @@ func (ch touchChange) copy() journalEntry {
 }
 
 func (ch balanceChange) revert(s *StateDB) {
-	s.getStateObject(ch.account).setBalance(ch.prev)
+	s.getStateObject(ch.account).setTokenBalance(ch.prev, ch.tokenID)
 }
 
 func (ch balanceChange) dirtied() (common.Address, bool) {
@@ -362,6 +370,7 @@ func (ch balanceChange) dirtied() (common.Address, bool) {
 func (ch balanceChange) copy() journalEntry {
 	return balanceChange{
 		account: ch.account,
+		tokenID: ch.tokenID,
 		prev:    new(uint256.Int).Set(ch.prev),
 	}
 }
