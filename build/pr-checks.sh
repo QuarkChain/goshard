@@ -14,6 +14,7 @@ readonly BASE_REF="${PR_CHECK_BASE_REF:-origin/goshard/base}"
 passed=()
 failed=()
 skipped=()
+goimports_cmd=()
 
 usage() {
 	cat <<'EOF'
@@ -26,7 +27,6 @@ Environment:
 
 Prerequisites:
   - Go 1.24 or 1.25 (CI tests both versions)
-  - goimports available in PATH
   - initialized git submodules
   - gcc-multilib on Linux for the 386 test job
 EOF
@@ -59,7 +59,7 @@ run_check() {
 check_prerequisites() {
 	local command_name
 	local missing=0
-	for command_name in git go gofmt goimports make; do
+	for command_name in git go gofmt make; do
 		if ! command -v "$command_name" >/dev/null 2>&1; then
 			printf 'missing required command: %s\n' "$command_name" >&2
 			missing=1
@@ -75,6 +75,13 @@ check_prerequisites() {
 		printf 'base ref not found: %s\n' "$BASE_REF" >&2
 		printf 'fetch it or set PR_CHECK_BASE_REF to the PR base ref\n' >&2
 		return 1
+	fi
+
+	if command -v goimports >/dev/null 2>&1; then
+		goimports_cmd=(goimports)
+	else
+		skipped+=("standalone goimports check (covered by the lint stage)")
+		printf 'goimports not found; the lint stage will enforce import formatting\n'
 	fi
 
 	local uninitialized
@@ -108,7 +115,11 @@ check_formatting() {
 
 	if ((${#changed_go_files[@]} != 0)); then
 		gofmt_output="$(gofmt -s -l "${changed_go_files[@]}")" || return 1
-		goimports_output="$(goimports -l "${changed_go_files[@]}")" || return 1
+		if ((${#goimports_cmd[@]} != 0)); then
+			goimports_output="$("${goimports_cmd[@]}" -l "${changed_go_files[@]}")" || return 1
+		else
+			goimports_output=""
+		fi
 	else
 		gofmt_output=""
 		goimports_output=""
@@ -165,7 +176,7 @@ main() {
 		return 1
 	fi
 
-	run_check "gofmt, goimports, and whitespace" check_formatting
+	run_check "source formatting and whitespace" check_formatting
 	run_check "lint" go run ./build/ci.go lint
 	run_check "generated files and go.mod tidy" go run ./build/ci.go check_generate
 	run_check "forbidden dependencies" go run ./build/ci.go check_baddeps
