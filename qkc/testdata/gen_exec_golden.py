@@ -753,6 +753,50 @@ def state_cases(networks):
             ],
         },
         {
+            "name": "reset_balances_clears_reverted_blank_account",
+            "comment": "reverting an absent account's first balance write leaves "
+            "an explicit zero entry in its cached blank account; reset_balances "
+            "must clear that entry before a later nonce write creates the leaf, "
+            "while retaining the full shard key frozen by the first write",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 42},
+                {"op": "snapshot"},
+                {
+                    "op": "set_token_balance",
+                    "address": A,
+                    "token": "QETH",
+                    "value": "7",
+                },
+                {"op": "revert"},
+                {"op": "reset_balances", "address": A},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
+            "name": "del_account_clears_reverted_blank_account",
+            "comment": "del_account must clear the explicit zero balance entry "
+            "left in an absent account's cache by a reverted first write; the "
+            "later nonce write keeps the originally frozen full shard key and "
+            "serializes an empty balance blob",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 42},
+                {"op": "snapshot"},
+                {
+                    "op": "set_token_balance",
+                    "address": A,
+                    "token": "QETH",
+                    "value": "7",
+                },
+                {"op": "revert"},
+                {"op": "del_account", "address": A},
+                {"op": "set_nonce", "address": A, "value": 1},
+            ],
+        },
+        {
             "name": "set_code_revert_restores_unloaded_code",
             "comment": "the old code has not been read since allocation was "
             "committed; set_code must journal that stored code, not an empty "
