@@ -1,8 +1,10 @@
 # exec_golden
 
 Execution golden vectors generated from pyquarkchain by
-[`gen_exec_golden.py`](../gen_exec_golden.py), which drives pyquarkchain's own
-`EvmState` and `ShardState`. It reads the two configs in
+[`gen_exec_golden.py`](../gen_exec_golden.py), which drives pyquarkchain's
+`quarkchain.evm.state.State` and `ShardState`. The generator imports that state
+class as `EvmState` only to keep it distinct from shard-level execution. It reads
+the two configs in
 [`qkc/config/singularity`](../../config/singularity), so the vectors are bound to
 the configs goshard ships rather than to whatever a pyquarkchain checkout happens
 to carry.
@@ -11,7 +13,7 @@ Three granularities are emitted, each with its own file and its own consumer. Th
 
 | file | input | pinned output |
 | --- | --- | --- |
-| `state_level.json` | direct `EvmState` mutations | post state root, per-account reads |
+| `state_level.json` | direct pyquarkchain `State` mutations | post state root, per-account reads |
 | `message_level.json` | one signed transaction or one cross-shard deposit | post state root, receipts, gas counters, produced deposits, coinbase fees |
 | `block_level.json` | whole minor blocks against a shard built from its genesis, with a root chain alongside | the seven values a block commits to, plus the deposits it consumed |
 
@@ -35,7 +37,7 @@ Two things guard the result. The script's first two cases are the genesis
 allocations themselves, and it fails unless their state roots match the pinned
 [minor-genesis values](../../config/singularity/README.md#pinned-minor-genesis-values)
 — a mismatch elsewhere is then a real disagreement, not a case description that
-never reached `EvmState`. And because that self-check says nothing about
+never reached pyquarkchain `State`. And because that self-check says nothing about
 execution — changing `messages.py` leaves the genesis root untouched — every
 vector file records the oracle it came from: the pyquarkchain commit and a digest
 of each module that decides execution. The script refuses to run when one of
@@ -45,11 +47,12 @@ edited modules in the output instead.
 ## State-level ops
 
 A case is an allocation, a list of ops, and the state root the ops commit to.
-Every op names a method the generator calls on pyquarkchain's `EvmState`. To
+Every op names a method the generator calls on pyquarkchain's
+`quarkchain.evm.state.State`. To
 test the Go implementation against the same case, an op has to reach the call
 in the third column.
 
-| op | pyquarkchain `EvmState` | Go |
+| op | pyquarkchain `State` | Go |
 | --- | --- | --- |
 | `set_full_shard_key` | `full_shard_key = v` | `StateDB.SetFullShardKey` |
 | `delta_token_balance` | `delta_token_balance` | `EvmState.DeltaTokenBalance` |
@@ -73,6 +76,13 @@ and Go makes an embedded type's methods callable on the outer one, so a row
 naming `StateDB` is that method reached through `EvmState` unchanged — no
 forwarding code exists for it. `qkc/state` writes its own method only where
 QuarkChain's semantics differ from geth's.
+
+Rows naming `StateDB` are not limited to stock geth's API. `ResetStorage`,
+`ResetBalances`, `DelAccount`, shard-key handling and token-balance handling are
+QuarkChain extensions in `core/state`; they exist so the state-level vectors can
+pin pyquarkchain primitives before a VM or transaction executor is present. When
+a case description mentions pyquarkchain's account cache, the Go test still
+asserts only consensus-visible output: the committed root and account read-back.
 
 ## Mutable-state policy families (S1)
 
