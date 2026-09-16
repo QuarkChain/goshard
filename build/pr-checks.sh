@@ -10,6 +10,9 @@ set -uo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TEST_JOBS="${PR_CHECK_JOBS:-8}"
 readonly BASE_REF="${PR_CHECK_BASE_REF:-origin/goshard/base}"
+readonly REPORT_DIR="${PR_CHECK_REPORT_DIR:-build/cache}"
+readonly LOG_FILE="${REPORT_DIR}/pr-checks.log"
+readonly SUMMARY_FILE="${REPORT_DIR}/pr-checks-summary.txt"
 
 passed=()
 failed=()
@@ -23,6 +26,7 @@ Usage: build/pr-checks.sh
 Environment:
   PR_CHECK_JOBS=N       Number of parallel Go test processes (default: 8).
   PR_CHECK_BASE_REF=REF Base ref used to find changed files (default: origin/goshard/base).
+  PR_CHECK_REPORT_DIR=D Directory for the full log and summary (default: build/cache).
   PR_CHECK_SKIP_386=1   Skip the Linux 386 short-test job.
 
 Prerequisites:
@@ -42,17 +46,17 @@ run_check() {
 	shift
 	local started=$SECONDS
 
-	printf '\n==> %s\n' "$name"
-	"$@"
+	printf '\n==> %s\n' "$name" >>"$LOG_FILE"
+	"$@" >>"$LOG_FILE" 2>&1
 	local status=$?
 	local duration
 	duration="$(elapsed "$((SECONDS - started))")"
 	if ((status == 0)); then
 		passed+=("$name ($duration)")
-		printf '<== PASS: %s (%s)\n' "$name" "$duration"
+		printf '<== PASS: %s (%s)\n' "$name" "$duration" >>"$LOG_FILE"
 	else
 		failed+=("$name: exit $status ($duration)")
-		printf '<== FAIL: %s (exit %d, %s)\n' "$name" "$status" "$duration" >&2
+		printf '<== FAIL: %s (exit %d, %s)\n' "$name" "$status" "$duration" >>"$LOG_FILE"
 	fi
 }
 
@@ -143,20 +147,37 @@ check_formatting() {
 	return "$status"
 }
 
-print_summary() {
+write_summary() {
 	local item
-	printf '\n===== PR check summary =====\n'
-	for item in "${passed[@]}"; do
-		printf 'PASS  %s\n' "$item"
-	done
-	for item in "${skipped[@]}"; do
-		printf 'SKIP  %s\n' "$item"
-	done
-	for item in "${failed[@]}"; do
-		printf 'FAIL  %s\n' "$item"
-	done
-	printf '%d passed, %d skipped, %d failed\n' \
-		"${#passed[@]}" "${#skipped[@]}" "${#failed[@]}"
+	{
+		printf 'commit: %s\n' "$(git rev-parse HEAD 2>/dev/null || printf unavailable)"
+		go version 2>/dev/null || printf 'go version: unavailable\n'
+		printf 'base: %s\n' "$BASE_REF"
+		printf 'jobs: %s\n' "$TEST_JOBS"
+		printf '\n===== PR check summary =====\n'
+		for item in "${passed[@]}"; do
+			printf 'PASS  %s\n' "$item"
+		done
+		for item in "${skipped[@]}"; do
+			printf 'SKIP  %s\n' "$item"
+		done
+		for item in "${failed[@]}"; do
+			printf 'FAIL  %s\n' "$item"
+		done
+		printf '%d passed, %d skipped, %d failed\n' \
+			"${#passed[@]}" "${#skipped[@]}" "${#failed[@]}"
+
+		if ((${#failed[@]} != 0)); then
+			printf '\n===== failure signatures (max 100) =====\n'
+			grep -En -m 100 \
+				'(<== FAIL:|^[[:space:]]*--- FAIL:|^FAIL([[:space:]]|$)|panic:|fatal:|undefined:|missing required command:|base ref not found:|uninitialized submodules:|build failed|File changed:|generated files were updated|untidy module|Bad dependencies detected|:[0-9]+:[0-9]+:)' \
+				"$LOG_FILE" || true
+		fi
+
+		printf '\nfull log: %s\n' "$LOG_FILE"
+		printf 'summary: %s\n' "$SUMMARY_FILE"
+	} >"$SUMMARY_FILE"
+	cat "$SUMMARY_FILE"
 }
 
 main() {
@@ -170,9 +191,17 @@ main() {
 	fi
 
 	cd "$REPO_ROOT" || return 1
+	if ! mkdir -p "$REPORT_DIR"; then
+		printf 'cannot create report directory: %s\n' "$REPORT_DIR" >&2
+		return 1
+	fi
+	if ! : >"$LOG_FILE"; then
+		printf 'cannot write full log: %s\n' "$LOG_FILE" >&2
+		return 1
+	fi
 	run_check "prerequisites" check_prerequisites
 	if ((${#failed[@]} != 0)); then
-		print_summary
+		write_summary
 		return 1
 	fi
 
@@ -193,7 +222,7 @@ main() {
 			go run ./build/ci.go test -arch 386 -short -p "$TEST_JOBS"
 	fi
 
-	print_summary
+	write_summary
 	((${#failed[@]} == 0))
 }
 
