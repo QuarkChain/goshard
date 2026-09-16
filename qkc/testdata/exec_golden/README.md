@@ -77,13 +77,6 @@ naming `StateDB` is that method reached through `EvmState` unchanged — no
 forwarding code exists for it. `qkc/state` writes its own method only where
 QuarkChain's semantics differ from geth's.
 
-Rows naming `StateDB` are not limited to stock geth's API. `ResetStorage`,
-`ResetBalances`, `DelAccount`, shard-key handling and token-balance handling are
-QuarkChain extensions in `core/state`; they exist so the state-level vectors can
-pin pyquarkchain primitives before a VM or transaction executor is present. When
-a case description mentions pyquarkchain's account cache, the Go test still
-asserts only consensus-visible output: the committed root and account read-back.
-
 ## Mutable-state policy families (S1)
 
 `qkc/state.TestStateGolden` consumes all 44 state vectors without a VM or a
