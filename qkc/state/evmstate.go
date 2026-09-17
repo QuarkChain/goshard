@@ -16,8 +16,10 @@
 //
 // # Driving rule
 //
-// A block must Commit exactly once, at its end, and must not Finalise in
-// between; core/state/statedb_qkc.go explains why.
+// Follow geth's transaction lifecycle: call Finalise(true) after each top-level
+// message, and Commit exactly once at the end of the block. This lets
+// stateObjectsDestruct hide a destroyed incarnation's storage while allowing a
+// later message in the block to recreate the address.
 package state
 
 import (

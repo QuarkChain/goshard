@@ -216,12 +216,6 @@ func runOps(t *testing.T, state *EvmState, ops []goldenOp) {
 				t.Fatalf("op %d: storage value %s: %v", i, op.Value, err)
 			}
 			state.SetState(addr, common.HexToHash(op.Key), common.HexToHash(value))
-		case "reset_balances":
-			state.ResetBalances(addr)
-		case "reset_storage":
-			state.ResetStorage(addr)
-		case "del_account":
-			state.DelAccount(addr)
 		case "snapshot":
 			snapshots = append(snapshots, state.Snapshot())
 		case "revert":
@@ -406,47 +400,68 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	}
 }
 
-func TestResetStorageIsCommittedAfterEqualValueWrite(t *testing.T) {
-	db := NewDatabase(rawdb.NewMemoryDatabase())
-	state, err := New(coretypes.EmptyRootHash, db)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	addr := mustRecipient(t, "0x00000000000000000000000000000000000000c0")
-	slot := common.BigToHash(big.NewInt(1))
-	state.SetNonce(addr, 1)
-	state.SetState(addr, slot, common.BigToHash(big.NewInt(17)))
-	root, err := state.Commit(0)
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
+func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		recreate  func(*EvmState, account.Recipient)
+		wantNonce uint64
+		wantQKC   uint64
+	}{
+		{
+			name: "paid after finalise",
+			recreate: func(state *EvmState, addr account.Recipient) {
+				state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(777))
+			},
+			wantQKC: 777,
+		},
+		{
+			name: "contract recreation",
+			recreate: func(state *EvmState, addr account.Recipient) {
+				state.CreateAccount(addr)
+				state.CreateContract(addr)
+				state.SetNonce(addr, 1)
+			},
+			wantNonce: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newTestState(t)
+			addr := mustRecipient(t, "0x00000000000000000000000000000000000000c0")
+			slot := common.HexToHash("0x01")
 
-	// Neither of the next two marks the account on its own: reset_storage
-	// deliberately marks nothing, and the write stores the value the slot
-	// already holds after the reset. pyquarkchain still touches on the write,
-	// so the emptied storage reaches the trie.
-	next, err := New(root, db)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	next.ResetStorage(addr)
-	next.SetState(addr, slot, common.Hash{})
-	root, err = next.Commit(1)
-	if err != nil {
-		t.Fatalf("commit after reset: %v", err)
-	}
+			state.SetFullShardKey(1)
+			state.SetNonce(addr, 1)
+			state.SetCode(addr, []byte{0x00})
+			state.SetState(addr, slot, common.HexToHash("0x2a"))
+			state.SetTokenBalance(addr, qkcCommon.DefaultTokenID, uint256.NewInt(5))
+			state.SetTokenBalance(addr, 100, uint256.NewInt(7))
+			if _, err := state.Commit(0); err != nil {
+				t.Fatalf("commit original account: %v", err)
+			}
 
-	reopened, err := New(root, db)
-	if err != nil {
-		t.Fatalf("reopen after reset: %v", err)
-	}
-	if got := reopened.GetState(addr, slot); got != (common.Hash{}) {
-		t.Errorf("slot survived the reset as %s, want empty", got)
-	}
-	if got := reopened.GetNonce(addr); got != 1 {
-		t.Errorf("nonce = %d, want 1: the reset must not remove the account", got)
-	}
-	if err := reopened.Error(); err != nil {
-		t.Fatalf("reads reported %v", err)
+			// SELFDESTRUCT transfers the default-token balance before marking the
+			// account. Finalise removes the old incarnation at the message boundary.
+			state.SetTokenBalance(addr, qkcCommon.DefaultTokenID, new(uint256.Int))
+			state.SelfDestruct(addr)
+			state.Finalise(true)
+			tc.recreate(state, addr)
+			state.Finalise(true)
+			if _, err := state.Commit(1); err != nil {
+				t.Fatalf("commit recreated account: %v", err)
+			}
+
+			if got := state.GetState(addr, slot); got != (common.Hash{}) {
+				t.Errorf("old storage = %s, want empty", got)
+			}
+			if got := state.GetNonce(addr); got != tc.wantNonce {
+				t.Errorf("nonce = %d, want %d", got, tc.wantNonce)
+			}
+			if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != tc.wantQKC {
+				t.Errorf("QKC balance = %d, want %d", got, tc.wantQKC)
+			}
+			if got := state.GetBalance(addr, 100); !got.IsZero() {
+				t.Errorf("old MNT balance = %s, want zero", got)
+			}
+		})
 	}
 }
