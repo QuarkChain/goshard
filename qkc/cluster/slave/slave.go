@@ -17,9 +17,10 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// MasterBackend defines the business operations used by SlaveComm.
-// It is implemented by the external slave runtime; SlaveComm consumes
-// these operations and performs the communication-side orchestration.
+// MasterBackend defines the business operations required by the Master side
+// of SlaveComm. It is implemented by the external slave runtime; SlaveComm
+// owns the communication orchestration and does not expose MasterConn's
+// protocol-level handler interface to the runtime.
 type MasterBackend interface {
 	// ShardCreator creates the business runtime's shards for a root tip
 	// and returns the newly-created branches.
@@ -106,12 +107,9 @@ func (h *masterHandler) DestroyClusterPeerConnection(req *wire.DestroyClusterPee
 // handlers it delegates protocol work to. The slave runtime implements the
 // handlers; SlaveComm only wires and owns the communication resources.
 type SlaveConfig struct {
-	// ID is this slave's unique identifier (e.g., []byte("S0")).
-	ID []byte
-	// FullShardIDList contains the shards managed by this slave.
-	FullShardIDList []uint32
-	// Port is the TCP port on which the slave listens for cluster connections.
-	Port int
+	ID              []byte   // ID is this slave's unique identifier.
+	FullShardIDList []uint32 // FullShardIDList contains the shards managed by this slave.
+	Port            int      // Port is the TCP port on which the slave listens for cluster connections.
 	// ClusterFullShardIDList is the cluster-wide shard id set (py:
 	// get_full_shard_ids()); feeds the xshard pool route filter and the
 	// MasterConn branch validator.
@@ -195,10 +193,11 @@ type SlaveComm struct {
 	// master loss, startup failure). The resource closes below are NOT once-guarded —
 	// each is individually idempotent and repeats on every Stop call, as in py.
 	shutdownOnce sync.Once
-	// stopped is the shutdown notification (py: SlaveServer.shutdown_future), closed
-	// once every close request has been issued, without waiting for the goroutines
-	// those closes unblock. Consumers (process main, tests) read it to learn shutdown
-	// was triggered.
+	// stopped is the shutdown notification (py: SlaveServer.shutdown_future),
+	// closed at the top of Stop before any resource close, so runMasterConn's
+	// post-publication compensation and addPeerConnection's registration gate
+	// can both detect shutdown. Consumers (process main, tests) read it to
+	// learn shutdown was triggered.
 	stopped chan struct{}
 }
 
@@ -253,9 +252,10 @@ func (s *SlaveComm) Start() error {
 // Resource closes are intentionally not once-guarded (each is individually
 // idempotent); only the shutdown notification is once-guarded.
 //
-// stopped is closed before loading master so runMasterConn can detect a MasterConn
-// published after Stop has already observed master as nil, and close it in its own
-// post-publication compensation.
+// stopped is closed before any resource close so runMasterConn can detect a
+// MasterConn published after Stop has already observed master as nil (and close
+// it in its post-publication compensation), and so addPeerConnection refuses
+// registrations racing with closeAllPeers's drain.
 func (s *SlaveComm) Stop() {
 	s.shutdownOnce.Do(func() {
 		close(s.stopped)
@@ -271,9 +271,9 @@ func (s *SlaveComm) Stop() {
 	s.logger.Info("slave server stopped")
 }
 
-// WaitStopped returns the shutdown notification channel (py: get_shutdown_future),
-// closed once Stop has issued every close request, without waiting for the
-// goroutines those closes unblock.
+// WaitStopped returns the shutdown notification channel (py: get_shutdown_future):
+// closed at the top of Stop, before the resource closes run. A resolved channel
+// means shutdown was triggered, not that every goroutine has exited.
 func (s *SlaveComm) WaitStopped() <-chan struct{} {
 	return s.stopped
 }
@@ -479,6 +479,12 @@ func (s *SlaveComm) createShards(rootTip *types.RootBlock) error {
 	for _, branch := range newBranches {
 		for _, id := range peers {
 			if _, err := s.addPeerConnection(id, branch); err != nil {
+				if errors.Is(err, errSlaveStopped) {
+					// Shutdown: every remaining equip would be refused too.
+					// Return nil — Stop is a normal termination, not a
+					// business failure to surface on the PING path.
+					return nil
+				}
 				s.logger.Error("equip peer connection failed", "cluster_peer_id", id, "branch", branch, "err", err)
 			}
 		}
@@ -504,6 +510,9 @@ func (s *SlaveComm) createClusterPeerConnection(req *wire.CreateClusterPeerConne
 	for _, branch := range branches {
 		created, err := s.addPeerConnection(id, branch)
 		if err != nil {
+			if errors.Is(err, errSlaveStopped) {
+				break // shutdown: every remaining branch would be refused too
+			}
 			s.logger.Error("create peer connection failed", "cluster_peer_id", id, "branch", branch, "err", err)
 			continue
 		}
@@ -626,15 +635,25 @@ func (s *SlaveComm) requirePeer(clusterPeerID uint64, branch uint32) (*PeerConn,
 	return nil, fmt.Errorf("no peer connection for cluster_peer_id %d branch 0x%x", clusterPeerID, branch)
 }
 
+// errSlaveStopped is returned by addPeerConnection when Stop has already run:
+// the registry is (about to be) drained, so no new PeerConn may be created.
+var errSlaveStopped = errors.New("slave comm stopped")
+
 // addPeerConnection is the single construction path for every PeerConn: it builds,
 // starts and registers (clusterPeerID, branch), reporting created=false on a
-// duplicate. Ownership stays with SlaveComm; callers are master-command
-// dispatchers, so the master connection is always published here. It does not gate
-// on Stop: an in-flight handler may complete one registration after the registry
-// drains — the terminal window py accepts.
+// duplicate. Ownership stays with SlaveComm. The stopped check inside the peersMu
+// critical section totally orders registration against closeAllPeers's
+// snapshot-and-drain (Stop closes s.stopped before draining): a PeerConn is either
+// registered before the drain and closed by it, or refused after it. No
+// post-shutdown orphan can exist.
 func (s *SlaveComm) addPeerConnection(clusterPeerID uint64, branch uint32) (created bool, err error) {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
+	select {
+	case <-s.stopped:
+		return false, errSlaveStopped
+	default:
+	}
 	bm, ok := s.peers[clusterPeerID]
 	if !ok {
 		bm = make(map[uint32]*PeerConn)
@@ -653,9 +672,11 @@ func (s *SlaveComm) addPeerConnection(clusterPeerID uint64, branch uint32) (crea
 }
 
 // closeAllPeers removes and closes every registered PeerConn and clears the known
-// peer set (py: MasterConnection.close, the master-loss leg). PeerConns recorded
-// later by an in-flight handler are a terminal best-effort residue the process is
-// about to exit with (py semantics). Close happens outside peersMu.
+// peer set (py: MasterConnection.close, the master-loss leg). The snapshot-and-
+// drain happens under peersMu, which addPeerConnection's stopped gate also
+// takes, so registration and shutdown are totally ordered: a PeerConn already
+// registered is included in the drain, while a later registration is refused.
+// Close happens outside peersMu.
 func (s *SlaveComm) closeAllPeers() {
 	s.peersMu.Lock()
 	var all []*PeerConn

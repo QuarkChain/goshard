@@ -818,6 +818,49 @@ func TestSlaveComm_SendToMasterEstablishedButClosed(t *testing.T) {
 	}
 }
 
+// TestSlaveComm_PeerVeneersRouteByPeerAndBranch verifies the outbound peer
+// veneers resolve the exact (clusterPeerID, branch) PeerConn: a send on a
+// registered pair writes one frame carrying that pair's metadata, while an
+// unknown id or branch fails before any write. The frame-level wire behavior is
+// owned by the TestPeerConn_Send*/Get* tests; this pins only the veneer's
+// routing and error contract.
+func TestSlaveComm_PeerVeneersRouteByPeerAndBranch(t *testing.T) {
+	comm, addr := startTestSlaveComm(t)
+	masterConn := dialComm(t, addr)
+
+	const cid = 42
+	if code := sendCreatePeer(t, masterConn, 1, cid); code != 0 {
+		t.Fatalf("create returned error_code=%d", code)
+	}
+
+	// Unknown pairs: no resolvable conn, error before any write.
+	if err := comm.SendPeerTransactionList(cid, 0x00990001, &wire.NewTransactionListCommand{}); err == nil {
+		t.Fatal("send to unknown branch succeeded, want error")
+	}
+	if err := comm.SendPeerTransactionList(999, testSlaveShards[0], &wire.NewTransactionListCommand{}); err == nil {
+		t.Fatal("send to unknown cluster peer id succeeded, want error")
+	}
+	if _, err := comm.GetPeerMinorBlockList(context.Background(), 999, testSlaveShards[0], &wire.GetMinorBlockListRequest{}); err == nil {
+		t.Fatal("RPC to unknown cluster peer id succeeded, want error")
+	}
+
+	// Registered pairs: each send carries its own (cid, branch) meta, proving
+	// the two-level registry routes per branch.
+	for _, branch := range testSlaveShards {
+		if err := comm.SendPeerTransactionList(cid, branch, &wire.NewTransactionListCommand{}); err != nil {
+			t.Fatalf("SendPeerTransactionList(0x%x): %v", branch, err)
+		}
+		f := readFrame(t, masterConn)
+		if f.Opcode != byte(wire.CommandOpNewTransactionList) || f.RPCID != 0 {
+			t.Fatalf("frame opcode=0x%x rpc_id=%d, want 0x%x/0", f.Opcode, f.RPCID, byte(wire.CommandOpNewTransactionList))
+		}
+		if f.Meta.ClusterPeerID != cid || f.Meta.Branch != branch {
+			t.Fatalf("frame meta cid=%d branch=0x%x, want cid=%d branch=0x%x",
+				f.Meta.ClusterPeerID, f.Meta.Branch, cid, branch)
+		}
+	}
+}
+
 // TestSlaveComm_MasterAtomicPublication verifies that many goroutines loading
 // the published master pointer all observe the same fully-initialized
 // MasterConn. The publication word is atomic: a Store by runMasterConn and the
