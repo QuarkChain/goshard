@@ -14,7 +14,7 @@ var (
 	minorHashPrefixQKC  = []byte("mn")       // qkcPrefix + minorHashPrefixQKC + num (uint64 big endian) -> minor canonical hash
 	rootBlockPrefixQKC  = []byte("rb")       // qkcPrefix + rootBlockPrefixQKC + hash -> root block
 	minorBlockPrefixQKC = []byte("mb")       // qkcPrefix + minorBlockPrefixQKC + hash -> minor block
-	rootHeadKey         = []byte("LastRoot") // qkcPrefix + rootHeadPrefixQKC -> canonical root head hash
+	rootHeadKey         = []byte("LastRoot") // qkcPrefix + rootHeadKey -> canonical root head hash
 )
 
 // qkcKey builds a QKC-specific database key by prepending qkcPrefix to the
@@ -33,11 +33,11 @@ func qkcKey(prefix []byte, parts ...[]byte) []byte {
 	return key
 }
 
-func rootCanonicalHashKey(number uint64) []byte {
+func qkcRootCanonicalHashKey(number uint64) []byte {
 	return qkcKey(rootHashPrefixQKC, encodeBlockNumber(number))
 }
 
-func minorCanonicalHashKey(number uint64) []byte {
+func qkcMinorCanonicalHashKey(number uint64) []byte {
 	return qkcKey(minorHashPrefixQKC, encodeBlockNumber(number))
 }
 

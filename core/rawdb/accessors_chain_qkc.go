@@ -14,14 +14,9 @@ import (
 
 const qkcDBLog = "db-operation"
 
-// QKCHashList is the serialized list of cross-shard deposit hashes.
-type HashList struct {
-	HList []common.Hash `bytesizeofslicelen:"4"`
-}
-
 // ReadRootCanonicalHash retrieves the root block hash assigned to a canonical block number.
 func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint64) common.Hash {
-	data, _ := db.Get(rootCanonicalHashKey(number))
+	data, _ := db.Get(qkcRootCanonicalHashKey(number))
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -30,21 +25,21 @@ func ReadRootCanonicalHash(db ethdb.KeyValueReader, number uint64) common.Hash {
 
 // WriteRootCanonicalHash stores the root block hash assigned to a canonical block number.
 func WriteRootCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint64) {
-	if err := db.Put(rootCanonicalHashKey(number), hash.Bytes()); err != nil {
+	if err := db.Put(qkcRootCanonicalHashKey(number), hash.Bytes()); err != nil {
 		log.Crit("Failed to store root number to hash mapping", "err", err)
 	}
 }
 
 // DeleteRootCanonicalHash removes the root number to hash canonical mapping.
 func DeleteRootCanonicalHash(db ethdb.KeyValueWriter, number uint64) {
-	if err := db.Delete(rootCanonicalHashKey(number)); err != nil {
+	if err := db.Delete(qkcRootCanonicalHashKey(number)); err != nil {
 		log.Crit("Failed to delete root number to hash mapping", "err", err)
 	}
 }
 
 // ReadMinorCanonicalHash retrieves the minor block hash assigned to a canonical block number.
 func ReadMinorCanonicalHash(db ethdb.KeyValueReader, number uint64) common.Hash {
-	data, _ := db.Get(minorCanonicalHashKey(number))
+	data, _ := db.Get(qkcMinorCanonicalHashKey(number))
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -53,14 +48,14 @@ func ReadMinorCanonicalHash(db ethdb.KeyValueReader, number uint64) common.Hash 
 
 // WriteMinorCanonicalHash stores the minor block hash assigned to a canonical block number.
 func WriteMinorCanonicalHash(db ethdb.KeyValueWriter, hash common.Hash, number uint64) {
-	if err := db.Put(minorCanonicalHashKey(number), hash.Bytes()); err != nil {
+	if err := db.Put(qkcMinorCanonicalHashKey(number), hash.Bytes()); err != nil {
 		log.Crit("Failed to store minor number to hash mapping", "err", err)
 	}
 }
 
 // DeleteMinorCanonicalHash removes the minor number to hash canonical mapping.
 func DeleteMinorCanonicalHash(db ethdb.KeyValueWriter, number uint64) {
-	if err := db.Delete(minorCanonicalHashKey(number)); err != nil {
+	if err := db.Delete(qkcMinorCanonicalHashKey(number)); err != nil {
 		log.Crit("Failed to delete minor number to hash mapping", "err", err)
 	}
 }
@@ -81,7 +76,7 @@ func WriteRootHeadHash(db ethdb.KeyValueWriter, hash common.Hash) {
 	}
 }
 
-// HasReceipts verifies the existence of all the transaction receipts belonging
+// HasQKCReceipts verifies the existence of all the transaction receipts belonging
 // to a block.
 func HasQKCReceipts(db ethdb.KeyValueReader, hash common.Hash) bool {
 	if has, err := db.Has(qkcBlockReceiptsKey(hash)); !has || err != nil {
@@ -90,7 +85,7 @@ func HasQKCReceipts(db ethdb.KeyValueReader, hash common.Hash) bool {
 	return true
 }
 
-// ReadReceipts retrieves the consensus-encoded receipts belonging to a block.
+// ReadQKCReceipts retrieves the consensus-encoded receipts belonging to a block.
 func ReadQKCReceipts(db ethdb.KeyValueReader, hash common.Hash) types.Receipts {
 	data, _ := db.Get(qkcBlockReceiptsKey(hash))
 	if len(data) == 0 {
@@ -104,7 +99,7 @@ func ReadQKCReceipts(db ethdb.KeyValueReader, hash common.Hash) types.Receipts {
 	return receipts
 }
 
-// WriteReceipts stores the consensus encoding of all receipts belonging to a block.
+// WriteQKCReceipts stores the consensus encoding of all receipts belonging to a block.
 func WriteQKCReceipts(db ethdb.KeyValueWriter, hash common.Hash, receipts types.Receipts) {
 	bytes, err := rlp.EncodeToBytes(receipts)
 	if err != nil {
@@ -116,7 +111,7 @@ func WriteQKCReceipts(db ethdb.KeyValueWriter, hash common.Hash, receipts types.
 	}
 }
 
-// DeleteReceipts removes all receipt data associated with a block hash.
+// DeleteQKCReceipts removes all receipt data associated with a block hash.
 func DeleteQKCReceipts(db ethdb.KeyValueWriter, hash common.Hash) {
 	if err := db.Delete(qkcBlockReceiptsKey(hash)); err != nil {
 		log.Crit("Failed to delete block receipts", "err", err)
