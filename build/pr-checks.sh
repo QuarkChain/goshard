@@ -8,7 +8,9 @@
 set -uo pipefail
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly TEST_JOBS="${PR_CHECK_JOBS:-8}"
+readonly TEST_JOBS="${PR_CHECK_JOBS:-1}"
+readonly TEST_PARALLEL="${PR_CHECK_TEST_PARALLEL:-1}"
+readonly GO_MEMORY_LIMIT="${PR_CHECK_GOMEMLIMIT:-8GiB}"
 readonly BASE_REF="${PR_CHECK_BASE_REF:-origin/goshard/base}"
 readonly REPORT_DIR="${PR_CHECK_REPORT_DIR:-build/cache}"
 readonly LOG_FILE="${REPORT_DIR}/pr-checks.log"
@@ -18,13 +20,20 @@ passed=()
 failed=()
 skipped=()
 goimports_cmd=()
+current_check=""
+report_ready=0
+run_complete=0
+final_reported=0
 
 usage() {
 	cat <<'EOF'
 Usage: build/pr-checks.sh
 
 Environment:
-  PR_CHECK_JOBS=N       Number of parallel Go test processes (default: 8).
+  PR_CHECK_JOBS=N       Number of parallel Go package tests (default: 1).
+  PR_CHECK_TEST_PARALLEL=N
+                        Parallel tests within each package (default: 1).
+  PR_CHECK_GOMEMLIMIT=N Go runtime memory target for tests (default: 8GiB).
   PR_CHECK_BASE_REF=REF Base ref used to find changed files (default: origin/goshard/base).
   PR_CHECK_REPORT_DIR=D Directory for the full log and summary (default: build/cache).
   PR_CHECK_SKIP_386=1   Skip the Linux 386 short-test job.
@@ -46,7 +55,9 @@ run_check() {
 	shift
 	local started=$SECONDS
 
+	current_check="$name"
 	printf '\n==> %s\n' "$name" >>"$LOG_FILE"
+	save_summary
 	"$@" >>"$LOG_FILE" 2>&1
 	local status=$?
 	local duration
@@ -58,6 +69,8 @@ run_check() {
 		failed+=("$name: exit $status ($duration)")
 		printf '<== FAIL: %s (exit %d, %s)\n' "$name" "$status" "$duration" >>"$LOG_FILE"
 	fi
+	current_check=""
+	save_summary
 }
 
 check_prerequisites() {
@@ -73,6 +86,14 @@ check_prerequisites() {
 
 	if [[ ! "$TEST_JOBS" =~ ^[1-9][0-9]*$ ]]; then
 		printf 'PR_CHECK_JOBS must be a positive integer, got: %s\n' "$TEST_JOBS" >&2
+		return 1
+	fi
+	if [[ ! "$TEST_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+		printf 'PR_CHECK_TEST_PARALLEL must be a positive integer, got: %s\n' "$TEST_PARALLEL" >&2
+		return 1
+	fi
+	if [[ -z "$GO_MEMORY_LIMIT" ]]; then
+		printf 'PR_CHECK_GOMEMLIMIT must not be empty\n' >&2
 		return 1
 	fi
 	if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null; then
@@ -97,7 +118,9 @@ check_prerequisites() {
 	fi
 
 	go version
-	printf 'test parallelism: %s\n' "$TEST_JOBS"
+	printf 'package test parallelism: %s\n' "$TEST_JOBS"
+	printf 'in-package test parallelism: %s\n' "$TEST_PARALLEL"
+	printf 'Go memory target: %s\n' "$GO_MEMORY_LIMIT"
 	printf 'PR base ref: %s\n' "$BASE_REF"
 }
 
@@ -147,13 +170,22 @@ check_formatting() {
 	return "$status"
 }
 
-write_summary() {
+save_summary() {
 	local item
 	{
 		printf 'commit: %s\n' "$(git rev-parse HEAD 2>/dev/null || printf unavailable)"
 		go version 2>/dev/null || printf 'go version: unavailable\n'
 		printf 'base: %s\n' "$BASE_REF"
-		printf 'jobs: %s\n' "$TEST_JOBS"
+		printf 'package jobs: %s\n' "$TEST_JOBS"
+		printf 'in-package parallelism: %s\n' "$TEST_PARALLEL"
+		printf 'Go memory target: %s\n' "$GO_MEMORY_LIMIT"
+		if [[ -n "$current_check" ]]; then
+			printf 'status: running %s\n' "$current_check"
+		elif ((run_complete == 1)); then
+			printf 'status: complete\n'
+		else
+			printf 'status: incomplete\n'
+		fi
 		printf '\n===== PR check summary =====\n'
 		for item in "${passed[@]}"; do
 			printf 'PASS  %s\n' "$item"
@@ -167,17 +199,55 @@ write_summary() {
 		printf '%d passed, %d skipped, %d failed\n' \
 			"${#passed[@]}" "${#skipped[@]}" "${#failed[@]}"
 
+		if [[ -n "$current_check" ]]; then
+			printf 'RUN   %s\n' "$current_check"
+		fi
 		if ((${#failed[@]} != 0)); then
 			printf '\n===== failure signatures (max 100) =====\n'
 			grep -En -m 100 \
-				'(<== FAIL:|^[[:space:]]*--- FAIL:|^FAIL([[:space:]]|$)|panic:|fatal:|undefined:|missing required command:|base ref not found:|uninitialized submodules:|build failed|File changed:|generated files were updated|untidy module|Bad dependencies detected|:[0-9]+:[0-9]+:)' \
+				'(<== FAIL:|^[[:space:]]*--- FAIL:|^FAIL([[:space:]]|$)|panic:|fatal:|undefined:|signal: killed|out of memory|missing required command:|must be a positive integer|must not be empty|base ref not found:|uninitialized submodules:|build failed|File changed:|generated files were updated|untidy module|Bad dependencies detected|:[0-9]+:[0-9]+:)' \
 				"$LOG_FILE" || true
 		fi
 
 		printf '\nfull log: %s\n' "$LOG_FILE"
 		printf 'summary: %s\n' "$SUMMARY_FILE"
 	} >"$SUMMARY_FILE"
+}
+
+finish_report() {
+	final_reported=1
+	save_summary
 	cat "$SUMMARY_FILE"
+}
+
+handle_signal() {
+	local signal="$1"
+	local status="$2"
+	trap - HUP INT TERM
+	if [[ -n "$current_check" ]]; then
+		failed+=("$current_check: interrupted by $signal")
+		printf '<== FAIL: %s (interrupted by %s)\n' "$current_check" "$signal" >>"$LOG_FILE"
+	else
+		failed+=("script: interrupted by $signal")
+	fi
+	current_check=""
+	finish_report
+	exit "$status"
+}
+
+handle_exit() {
+	local status="$1"
+	trap - EXIT HUP INT TERM
+	if ((report_ready == 1 && final_reported == 0)); then
+		if [[ -n "$current_check" ]]; then
+			failed+=("$current_check: script exited before completion")
+			current_check=""
+		elif ((status != 0)); then
+			failed+=("script: exit $status before completion")
+		fi
+		finish_report
+	fi
+	exit "$status"
 }
 
 main() {
@@ -199,9 +269,16 @@ main() {
 		printf 'cannot write full log: %s\n' "$LOG_FILE" >&2
 		return 1
 	fi
+	report_ready=1
+	trap 'handle_signal HUP 129' HUP
+	trap 'handle_signal INT 130' INT
+	trap 'handle_signal TERM 143' TERM
+	trap 'handle_exit $?' EXIT
+	save_summary
 	run_check "prerequisites" check_prerequisites
 	if ((${#failed[@]} != 0)); then
-		write_summary
+		run_complete=1
+		finish_report
 		return 1
 	fi
 
@@ -210,7 +287,8 @@ main() {
 	run_check "generated files and go.mod tidy" go run ./build/ci.go check_generate
 	run_check "forbidden dependencies" go run ./build/ci.go check_baddeps
 	run_check "all command builds" make all
-	run_check "full tests" ./build/travis_keepalive.sh go run ./build/ci.go test -p "$TEST_JOBS"
+	run_check "full tests" env GOMAXPROCS="$TEST_PARALLEL" GOMEMLIMIT="$GO_MEMORY_LIMIT" \
+		./build/travis_keepalive.sh go run ./build/ci.go test -p "$TEST_JOBS"
 	run_check "keeper target builds" go run ./build/ci.go keeper
 
 	if [[ "$(go env GOOS)" != "linux" ]]; then
@@ -218,11 +296,13 @@ main() {
 	elif [[ "${PR_CHECK_SKIP_386:-0}" == "1" ]]; then
 		skipped+=("386 short tests (PR_CHECK_SKIP_386=1)")
 	else
-		run_check "386 short tests" ./build/travis_keepalive.sh \
+		run_check "386 short tests" env GOMAXPROCS="$TEST_PARALLEL" GOMEMLIMIT="$GO_MEMORY_LIMIT" \
+			./build/travis_keepalive.sh \
 			go run ./build/ci.go test -arch 386 -short -p "$TEST_JOBS"
 	fi
 
-	write_summary
+	run_complete=1
+	finish_report
 	((${#failed[@]} == 0))
 }
 
