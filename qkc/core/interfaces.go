@@ -35,7 +35,7 @@ type MinorChain interface {
 	GetBlock(hash common.Hash) *types.MinorBlock
 	GetBlockByNumber(number uint64) *types.MinorBlock
 	HasState(root common.Hash) bool
-	InsertChainWithXShardInputs(chain []*types.MinorBlock, xShardCursors []*XShardTxCursor, options InsertOptions) (int, [][]*types.CrossShardTransactionDeposit, error)
+	InsertBlockWithXShardInput(block *types.MinorBlock, xShardCursor *XShardTxCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error)
 	SetCanonicalHead(hash common.Hash) error
 	Stop()
 }

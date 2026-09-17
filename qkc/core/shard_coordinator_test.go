@@ -49,18 +49,14 @@ func (s *minorChainStub) HasState(root common.Hash) bool {
 	return !s.missingState[root]
 }
 
-func (s *minorChainStub) InsertChainWithXShardInputs(chain []*types.MinorBlock, inputs []*XShardTxCursor, options InsertOptions) (int, [][]*types.CrossShardTransactionDeposit, error) {
-	s.inputs = append(s.inputs, inputs...)
-	outputs := make([][]*types.CrossShardTransactionDeposit, 0, len(chain))
-	for _, block := range chain {
-		if s.blocks[block.Hash()] != nil && !options.ForceInsert && !options.IsCheckDB {
-			continue
-		}
-		s.inserted = append(s.inserted, block)
-		s.blocks[block.Hash()] = block
-		outputs = append(outputs, s.outgoing[block.Hash()])
+func (s *minorChainStub) InsertBlockWithXShardInput(block *types.MinorBlock, input *XShardTxCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error) {
+	s.inputs = append(s.inputs, input)
+	if s.blocks[block.Hash()] != nil && !options.ForceInsert && !options.IsCheckDB {
+		return nil, nil
 	}
-	return len(chain), outputs, nil
+	s.inserted = append(s.inserted, block)
+	s.blocks[block.Hash()] = block
+	return s.outgoing[block.Hash()], nil
 }
 
 func (s *minorChainStub) SetCanonicalHead(hash common.Hash) error {
@@ -434,6 +430,34 @@ func TestAddRootBlockRewindsMinorHeadFromOldRootFork(t *testing.T) {
 	}
 	if len(chain.canonicalHeads) != 1 || chain.canonicalHeads[0] != minorChild.Hash() {
 		t.Fatalf("canonical head updates = %v, want one rewind to %s", chain.canonicalHeads, minorChild.Hash())
+	}
+}
+
+func TestSetMinorHeadForCanonicalRootAppliesFinalTargetOnce(t *testing.T) {
+	rootGenesis := testRootBlock(nil, 0, nil)
+	canonicalRoot := testRootBlock(rootGenesis, 1, nil)
+	sideRootHeader := canonicalRoot.Header()
+	sideRootHeader.Nonce++
+	sideRoot := types.NewRootBlock(sideRootHeader, nil, nil)
+	minorGenesis := testMinorBlock(nil, 0, common.HexToHash("0x65"), rootGenesis.Hash())
+	canonicalMinor := testMinorBlock(minorGenesis, 1, common.HexToHash("0x66"), canonicalRoot.Hash())
+	confirmedOnSideRoot := testMinorBlock(minorGenesis, 1, common.HexToHash("0x67"), sideRoot.Hash())
+	chain := newMinorChainStub(minorGenesis, canonicalMinor, confirmedOnSideRoot)
+	chain.current = canonicalMinor
+	db := rawdb.NewMemoryDatabase()
+	rawdb.WriteRootBlock(db, rootGenesis)
+	rawdb.WriteRootBlock(db, canonicalRoot)
+	rawdb.WriteRootBlock(db, sideRoot)
+	coordinator := &ShardCoordinator{db: db, minorBlockChain: chain}
+
+	if err := coordinator.setMinorHeadForCanonicalRoot(canonicalRoot, confirmedOnSideRoot); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.canonicalHeads) != 1 || chain.canonicalHeads[0] != minorGenesis.Hash() {
+		t.Fatalf("canonical head updates = %v, want [%s]", chain.canonicalHeads, minorGenesis.Hash())
+	}
+	if chain.CurrentBlock().Hash() != minorGenesis.Hash() {
+		t.Fatalf("minor head = %s, want %s", chain.CurrentBlock().Hash(), minorGenesis.Hash())
 	}
 }
 

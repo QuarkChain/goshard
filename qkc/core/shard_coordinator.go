@@ -334,27 +334,25 @@ func (c *ShardCoordinator) setMinorHeadForCanonicalRoot(root *types.RootBlock, c
 	if current == nil {
 		return ErrNoCurrentBlock
 	}
+	target := current
 	if confirmed != nil {
 		canonical := c.minorBlockChain.GetBlockByNumber(confirmed.NumberU64())
 		if canonical == nil || canonical.Hash() != confirmed.Hash() {
-			if err := c.minorBlockChain.SetCanonicalHead(confirmed.Hash()); err != nil {
-				return fmt.Errorf("select confirmed minor head %s: %w", confirmed.Hash(), err)
-			}
-			current = confirmed
+			target = confirmed
 		}
 	}
-	for !c.isRootDescendant(root, c.RootBlockByHash(current.PrevRootBlockHash())) {
-		if current.NumberU64() == 0 {
+	for !c.isRootDescendant(root, c.RootBlockByHash(target.PrevRootBlockHash())) {
+		if target.NumberU64() == 0 {
 			return ErrMinorRootNotCanonical
 		}
-		current = c.minorBlockChain.GetBlock(current.ParentHash())
-		if current == nil {
+		target = c.minorBlockChain.GetBlock(target.ParentHash())
+		if target == nil {
 			return ErrUnknownParent
 		}
 	}
-	if current.Hash() != c.minorBlockChain.CurrentBlock().Hash() {
-		if err := c.minorBlockChain.SetCanonicalHead(current.Hash()); err != nil {
-			return fmt.Errorf("rewind minor head to root chain %s: %w", current.Hash(), err)
+	if target.Hash() != current.Hash() {
+		if err := c.minorBlockChain.SetCanonicalHead(target.Hash()); err != nil {
+			return fmt.Errorf("set canonical minor head %s: %w", target.Hash(), err)
 		}
 	}
 	return nil
@@ -392,7 +390,7 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	if err := validateMinorBlockTime(block, parentBlock); err != nil {
 		return err
 	}
-	previousRoot, err := c.validateMinorBlockRootChain(block, parentBlock)
+	previousRoot, err := c.validateMinorBlockRootReference(block, parentBlock)
 	if err != nil {
 		return err
 	}
@@ -401,19 +399,16 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 		return err
 	}
 	previousHead := c.minorBlockChain.CurrentBlock()
-	_, outputs, err := c.minorBlockChain.InsertChainWithXShardInputs([]*types.MinorBlock{block}, []*XShardTxCursor{cursor}, InsertOptions{ForceInsert: true})
+	outputs, err := c.minorBlockChain.InsertBlockWithXShardInput(block, cursor, InsertOptions{ForceInsert: true})
 	if err != nil {
 		return err
-	}
-	if len(outputs) != 1 {
-		return fmt.Errorf("minor insertion returned %d x-shard output lists for 1 block", len(outputs))
 	}
 	if c.shouldUpdateMinorHead(block, previousRoot) {
 		if err := c.minorBlockChain.SetCanonicalHead(block.Hash()); err != nil {
 			return fmt.Errorf("set canonical minor head %s: %w", block.Hash(), err)
 		}
 	}
-	payload := XShardBroadcast{Block: block, Deposits: outputs[0]}
+	payload := XShardBroadcast{Block: block, Deposits: outputs}
 	if err := c.connManager.BroadcastXShardTxList(payload); err != nil {
 		return fmt.Errorf("broadcast x-shard transactions: %w", err)
 	}
@@ -471,7 +466,7 @@ func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error
 		if err := validateMinorBlockTime(block, parentBlock); err != nil {
 			return fmt.Errorf("validate sync block %d time: %w", index, err)
 		}
-		previousRoot, err := c.validateMinorBlockRootChain(block, parentBlock)
+		previousRoot, err := c.validateMinorBlockRootReference(block, parentBlock)
 		if err != nil {
 			return fmt.Errorf("validate root reference for block %d: %w", index, err)
 		}
@@ -479,18 +474,15 @@ func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error
 		if err != nil {
 			return fmt.Errorf("prepare x-shard execution input for block %d: %w", index, err)
 		}
-		_, outputs, err := c.minorBlockChain.InsertChainWithXShardInputs([]*types.MinorBlock{block}, []*XShardTxCursor{cursor}, InsertOptions{ForceInsert: true})
+		outputs, err := c.minorBlockChain.InsertBlockWithXShardInput(block, cursor, InsertOptions{ForceInsert: true})
 		if err != nil {
 			return fmt.Errorf("insert sync block %d: %w", index, err)
-		}
-		if len(outputs) != 1 {
-			return fmt.Errorf("minor insertion returned %d x-shard output lists for block %d", len(outputs), index)
 		}
 		if c.shouldUpdateMinorHead(block, previousRoot) {
 			canonicalTarget = block
 		}
 		processedBlocks = append(processedBlocks, block)
-		payloads = append(payloads, XShardBroadcast{Block: block, Deposits: outputs[0]})
+		payloads = append(payloads, XShardBroadcast{Block: block, Deposits: outputs})
 	}
 	if canonicalTarget != nil {
 		if err := c.minorBlockChain.SetCanonicalHead(canonicalTarget.Hash()); err != nil {
@@ -506,10 +498,10 @@ func (c *ShardCoordinator) AddBlockListForSync(blocks []*types.MinorBlock) error
 	return nil
 }
 
-// validateMinorBlockRootChain resolves block.PrevRootBlockHash and validates its
+// validateMinorBlockRootReference resolves block.PrevRootBlockHash and validates its
 // relationship with the root referenced by the parent minor block. Local
 // minor-chain continuity is owned by MinorBlockChain.
-func (c *ShardCoordinator) validateMinorBlockRootChain(block, parentBlock *types.MinorBlock) (*types.RootBlock, error) {
+func (c *ShardCoordinator) validateMinorBlockRootReference(block, parentBlock *types.MinorBlock) (*types.RootBlock, error) {
 	if block == nil {
 		return nil, ErrUnknownBlock
 	}
