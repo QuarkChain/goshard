@@ -1,10 +1,9 @@
 # Python Interop Tests
 
-These tests verify wire / opcode / serializer / bootstrap compatibility between
-the real Go Slave and the real Python Master (pyquarkchain). They are driven by
-a single Python harness (`master_harness.py`) that reuses the *real* pyquarkchain
-wire stack (`ClusterConnection`, the cluster OP serializer map, and the real RPC
-request classes) to drive concrete interactions against Go Slaves.
+These tests verify wire / opcode / serializer / bootstrap compatibility between the real Go Slave and pyquarkchain.
+
+The bootstrap scenario runs the full Python `master.main()` process. The remaining scenarios reuse pyquarkchain's real
+protocol implementation (`ClusterConnection`, serializers and RPC classes) through a lightweight test harness.
 
 ## Prerequisites
 
@@ -24,11 +23,13 @@ request classes) to drive concrete interactions against Go Slaves.
 ## Running
 
 All interop tests:
+
 ```bash
 PYQUARKCHAIN=/path/to/pyquarkchain go test -tags interop ./qkc/cluster/slave/
 ```
 
 Specific tests:
+
 ```bash
 PYQUARKCHAIN=/path/to/pyquarkchain go test -tags interop -run TestInteropBootstrap ./qkc/cluster/slave/
 PYQUARKCHAIN=/path/to/pyquarkchain go test -tags interop -run TestInteropMasterRpcRoundTrip ./qkc/cluster/slave/
@@ -39,6 +40,7 @@ PYQUARKCHAIN=/path/to/pyquarkchain go test -tags interop -run TestInteropAddMino
 ```
 
 With race detector:
+
 ```bash
 PYQUARKCHAIN=/path/to/pyquarkchain go test -race -tags interop ./qkc/cluster/slave/
 ```
@@ -139,6 +141,6 @@ RPC framing; it never touches MasterServer block-processing state.
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PYQUARKCHAIN` | Yes | Path to pyquarkchain checkout |
+| Variable       | Required | Description                   |
+|----------------|----------|-------------------------------|
+| `PYQUARKCHAIN` | Yes      | Path to pyquarkchain checkout |
