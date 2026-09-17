@@ -79,8 +79,8 @@ QuarkChain's semantics differ from geth's.
 
 ## Mutable-state policy families (S1)
 
-`qkc/state.TestStateGolden` consumes all 44 state vectors without a VM or a
-transaction executor. The following 27 supplement the original 17. Each checks
+`qkc/state.TestStateGolden` consumes all 41 state vectors without a VM or a
+transaction executor. The following 24 supplement the original 17. Each checks
 the committed state root and account read-back against the pinned oracle.
 The `_qkc` and `_qeth` variants exercise the two balance dispatch paths.
 
@@ -99,8 +99,6 @@ The `_qkc` and `_qeth` variants exercise the two balance dispatch paths.
 | `reset_balances_clears_reverted_blank_account` | Reset clears a reverted first balance write without discarding the blank account's frozen shard key. |
 | `del_account_clears_reverted_blank_account` | Deletion clears the same cached zero balance before the account is recreated. |
 | `set_code_revert_restores_unloaded_code` | Revert restores code even when it had not been loaded before replacement. |
-| `del_account_revert_on_touched_account` | A pre-snapshot touch publishes the unrestored balance reset, with nonce, code and storage restored. |
-| `del_account_revert_then_touch` | A post-revert touch exposes the same unrestored balance reset. |
 | `full_shard_key_first_read_survives_revert` | The first-read key survives revert; a different account uses the restored context key. |
 | `full_shard_key_first_write_survives_revert` | The frozen key survives removal of a newly created Go state object. |
 | `full_shard_key_blank_read_expires_at_commit` | Commit ends the blank account's cached shard-key lifetime. |

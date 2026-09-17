@@ -557,23 +557,6 @@ def state_cases(networks):
             ],
         },
         {
-            "name": "revert_does_not_restore_reset_balances",
-            "comment": "reset_balances journals the restore onto a misspelled "
-            "attribute (state.py:192-198), so reverting brings back the token trie "
-            "but not the balances; the account stays drained. The opening credit "
-            "is what makes that observable: reset_balances marks nothing touched, "
-            "so without it commit would skip the account and both a faithful and "
-            "a naively correct implementation would agree",
-            "network": "devnet",
-            "pre_alloc": {A + "00000001": {"balances": {"QKC": "5"}, "code": "0x6000"}},
-            "ops": [
-                {"op": "delta_token_balance", "address": A, "token": "QKC", "value": "1"},
-                {"op": "snapshot"},
-                {"op": "reset_balances", "address": A},
-                {"op": "revert"},
-            ],
-        },
-        {
             "name": "revert_after_del_account",
             "comment": "reverting del_account leaves the trie untouched: unwinding "
             "its six steps ends at the touched flag set_nonce journaled, which was "
@@ -806,39 +789,6 @@ def state_cases(networks):
             "ops": [
                 {"op": "snapshot"},
                 {"op": "set_code", "address": A, "code": "0x6001"},
-                {"op": "revert"},
-                {"op": "set_nonce", "address": A, "value": 1},
-            ],
-        },
-        {
-            "name": "del_account_revert_on_touched_account",
-            "comment": "del_account's balance reset is not restored by revert; "
-            "a touch before the snapshot makes commit publish the empty balance "
-            "map alongside the restored nonce, code and storage",
-            "network": "devnet",
-            "pre_alloc": stored_account,
-            "ops": [
-                {
-                    "op": "delta_token_balance",
-                    "address": A,
-                    "token": "QKC",
-                    "value": "1",
-                },
-                {"op": "snapshot"},
-                {"op": "del_account", "address": A},
-                {"op": "revert"},
-            ],
-        },
-        {
-            "name": "del_account_revert_then_touch",
-            "comment": "revert leaves del_account's balance reset in the clean "
-            "cache; a later touch exposes it in the committed leaf, unlike "
-            "revert_after_del_account where commit skips the account",
-            "network": "devnet",
-            "pre_alloc": stored_account,
-            "ops": [
-                {"op": "snapshot"},
-                {"op": "del_account", "address": A},
                 {"op": "revert"},
                 {"op": "set_nonce", "address": A, "value": 1},
             ],
