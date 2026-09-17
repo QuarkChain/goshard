@@ -143,8 +143,8 @@ sequenceDiagram
 
     S->>C: AddMinorBlock(block) / AddBlockListForSync(blocks)
     loop 每个需要导入或重放的 minor block
-        C->>C: 检查 root ancestry 和 confirmed barrier
-        C->>X: 根据 parent cursor 和 root barrier 构造执行输入
+        C->>C: 检查 root 祖先关系和已确认 minor block 的分支约束
+        C->>X: 从 parent cursor 继续，以 block 引用的 root 为处理上限构造执行输入
         C->>M: InsertBlockWithXShardInput(block, cursor, options)
         M->>V: ValidateBlock(block)
         M->>D: 打开 parent state
@@ -179,8 +179,8 @@ sequenceDiagram
 `AddMinorBlock` 处理一个首次收到的 minor block：
 
 1. 检查运行状态、known-block 和 parent 等基本导入条件；
-2. 验证 block 的 shard 规则，以及 previous-root 和 confirmed barrier 等 root chain 相关规则；
-3. 根据 parent cursor 和 root barrier 构造 `XShardTxCursor`；
+2. 验证 block 的 shard 规则和 previous-root 引用，并检查 parent 是否延续该 root 已确认的 minor chain；
+3. 从 parent cursor 继续，以 block 引用的 root 为处理上限构造 `XShardTxCursor`；
 4. 调用 `MinorBlockChain` 执行并保存 candidate；
 5. 执行 minor fork choice，必要时调用 `SetCanonicalHead`；
 6. 广播出站跨分片交易、提交 header，并在 head 改变时广播新 tip。
@@ -198,7 +198,7 @@ sequenceDiagram
 处理流程是：
 
 1. 检查运行状态，以及列表中 block、顺序和 parent 等基本导入条件；
-2. 逐块验证 block 的 shard 规则，以及 previous-root 和 confirmed barrier 等 root chain 相关规则；
+2. 逐块验证 block 的 shard 规则和 previous-root 引用，并检查 parent 是否延续该 root 已确认的 minor chain；
 3. 逐块构造 cursor，并使用 `ForceInsert` 执行或重放；
 4. 保留出站跨分片交易，并按 pyquarkchain 语义逐块计算 fork choice；
 5. 全部 candidate 保存后，只对最后一个 eligible block 调用一次 `SetCanonicalHead`；

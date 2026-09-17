@@ -164,8 +164,8 @@ sequenceDiagram
 
     S->>C: AddMinorBlock(block) / AddBlockListForSync(blocks)
     loop Each minor block to import or replay
-        C->>C: Check root ancestry and confirmed barrier
-        C->>X: Prepare execution input from parent cursor and root barrier
+        C->>C: Check root ancestry and confirmed-minor branch constraints
+        C->>X: Resume parent cursor with the block's referenced root as the processing limit
         C->>M: InsertBlockWithXShardInput(block, cursor, options)
         M->>V: ValidateBlock(block)
         M->>D: Open parent state
@@ -200,8 +200,8 @@ sequenceDiagram
 `AddMinorBlock` handles the first delivery of a minor block:
 
 1. Check basic import conditions, including running state, known-block status, and parent availability.
-2. Validate shard-specific rules and root-related rules such as the previous-root reference and confirmed barrier.
-3. Construct `XShardTxCursor` from the parent cursor and root barrier.
+2. Validate shard-specific rules and the previous-root reference, and check that the parent continues the minor chain confirmed by that root.
+3. Construct `XShardTxCursor` from the parent cursor, using the block's referenced root as the processing limit.
 4. Call `MinorBlockChain` to execute and store the candidate.
 5. Perform minor fork choice and call `SetCanonicalHead` if needed.
 6. Broadcast outgoing cross-shard transactions, submit the header, and broadcast a new tip if the head changed.
@@ -222,7 +222,7 @@ including blocks that are already stored.
 The flow is:
 
 1. Check running state and basic import conditions, including blocks, ordering, and parent availability.
-2. Validate each block's shard-specific and root-related rules, including the previous-root reference and confirmed barrier.
+2. Validate each block's shard-specific rules and previous-root reference, and check that the parent continues the minor chain confirmed by that root.
 3. Construct each cursor and execute or replay each block with `ForceInsert`.
 4. Collect outgoing cross-shard transactions and calculate fork choice per block according to pyquarkchain semantics.
 5. After all candidates are stored, call `SetCanonicalHead` once for the last eligible block.
