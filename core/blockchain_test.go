@@ -3228,6 +3228,7 @@ func testEIP2718Transition(t *testing.T, scheme string) {
 
 	// Import the canonical chain
 	options := DefaultConfig().WithStateScheme(scheme)
+	options.SnapshotLimit = 0 // disable snapshotting to ensure that the hot/cold SLOADs are calculated correctly
 	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, options)
 	if err != nil {
 		t.Fatalf("failed to create tester chain: %v", err)
@@ -3323,6 +3324,7 @@ func testEIP1559Transition(t *testing.T, scheme string) {
 		b.AddTx(tx)
 	})
 	options := DefaultConfig().WithStateScheme(scheme)
+	options.SnapshotLimit = 0 // disable snapshotting to ensure that the hot/cold SLOADs are calculated correctly
 	chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, options)
 	if err != nil {
 		t.Fatalf("failed to create tester chain: %v", err)
@@ -3547,6 +3549,7 @@ func testCanonicalHashMarker(t *testing.T, scheme string) {
 
 		// Initialize test chain
 		options := DefaultConfig().WithStateScheme(scheme)
+		options.SnapshotLimit = 0
 		chain, err := NewBlockChain(rawdb.NewMemoryDatabase(), gspec, engine, options)
 		if err != nil {
 			t.Fatalf("failed to create tester chain: %v", err)

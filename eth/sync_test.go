@@ -28,7 +28,9 @@ import (
 )
 
 // Tests that snap sync is disabled after a successful sync cycle.
-func TestSnapSyncDisabling69(t *testing.T) { testSnapSyncDisabling(t, eth.ETH69, snap.SNAP1) }
+func TestSnapSyncDisabling69(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 // Tests that snap sync gets disabled as soon as a real block is successfully
 // imported into the blockchain.
