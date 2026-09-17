@@ -146,12 +146,6 @@ func (db *MPTDatabase) Commit(update *StateUpdate) error {
 			return err
 		}
 	}
-	// Hash-based MPT persistence only needs trie nodes. Return early instead of
-	// calling EncodeMPTState, which converts accounts to the lossy slim encoding
-	// used solely by snapshot and path databases.
-	if db.triedb.Scheme() == rawdb.HashScheme {
-		return db.triedb.Update(update.Root, update.OriginRoot, update.BlockNumber, update.Nodes, nil)
-	}
 	// Encode the state mutations in the MPT format
 	accounts, accountOrigin, storages, storageOrigin := update.EncodeMPTState()
 
