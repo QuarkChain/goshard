@@ -400,6 +400,44 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	}
 }
 
+func TestGetTokenBalancesRetainsCachedZeros(t *testing.T) {
+	for _, tokenID := range []uint64{qkcCommon.DefaultTokenID, 100} {
+		for _, finalise := range []bool{false, true} {
+			t.Run(strconv.FormatUint(tokenID, 10)+"/finalise="+strconv.FormatBool(finalise), func(t *testing.T) {
+				state := newTestState(t)
+				addr := common.HexToAddress("0xa1")
+				snapshot := state.Snapshot()
+				state.DeltaTokenBalance(addr, tokenID, big.NewInt(7))
+				state.RevertToSnapshot(snapshot)
+				if finalise {
+					state.DeltaTokenBalance(addr, tokenID, new(big.Int))
+					state.Finalise(true)
+				}
+
+				balances := state.GetTokenBalances(addr)
+				if value, ok := balances[tokenID]; !ok || !value.IsZero() || len(balances) != 1 {
+					t.Fatalf("cached balances = %v, want only token %d at zero", balances, tokenID)
+				}
+				if state.Exist(addr) {
+					t.Fatal("reading cached balances created a live account")
+				}
+				balances[tokenID].SetUint64(9)
+				delete(balances, tokenID)
+				state.SetNonce(addr, 1)
+				if value, ok := state.GetTokenBalances(addr)[tokenID]; !ok || !value.IsZero() {
+					t.Fatal("mutating returned balances changed the retained zero entry")
+				}
+				if _, err := state.Commit(0); err != nil {
+					t.Fatalf("commit: %v", err)
+				}
+				if balances := state.GetTokenBalances(addr); len(balances) != 0 {
+					t.Fatalf("balances after commit = %v, want no cached zeros", balances)
+				}
+			})
+		}
+	}
+}
+
 func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -444,7 +482,17 @@ func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 			state.SetTokenBalance(addr, qkcCommon.DefaultTokenID, new(uint256.Int))
 			state.SelfDestruct(addr)
 			state.Finalise(true)
+			state.SetFullShardKey(2)
+			if got := state.GetFullShardKey(addr); got != 1 {
+				t.Errorf("shard key before recreation = %d, want 1", got)
+			}
+			if balances := state.GetTokenBalances(addr); len(balances) != 0 {
+				t.Errorf("destroyed balances = %v, want empty", balances)
+			}
 			tc.recreate(state, addr)
+			if got := state.GetFullShardKey(addr); got != 1 {
+				t.Errorf("shard key after recreation = %d, want 1", got)
+			}
 			state.Finalise(true)
 			if _, err := state.Commit(1); err != nil {
 				t.Fatalf("commit recreated account: %v", err)

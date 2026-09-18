@@ -160,6 +160,9 @@ func (s *StateDB) GetFullShardKey(addr common.Address) uint32 {
 	if obj := s.getStateObject(addr); obj != nil {
 		return obj.data.FullShardKey
 	}
+	if obj := s.stateObjectsDestruct[addr]; obj != nil {
+		return obj.data.FullShardKey
+	}
 	// An address with no account yet would be created with this key, which is
 	// what pyquarkchain's blank account reports too.
 	return s.qkcShardKey(addr)
@@ -170,10 +173,14 @@ func (s *StateDB) GetFullShardKey(addr common.Address) uint32 {
 // never held, and callers reporting state have to be able to tell them apart.
 func (s *StateDB) GetTokenBalances(addr common.Address) map[uint64]*uint256.Int {
 	obj := s.getStateObject(addr)
-	if obj == nil || obj.data.MntBalances == nil {
-		return make(map[uint64]*uint256.Int)
+	if obj != nil {
+		if obj.data.MntBalances != nil {
+			return obj.data.MntBalances.GetBalanceMap()
+		}
+	} else if cached := s.qkcAccountCache[addr]; cached.balances != nil {
+		return cached.balances.GetBalanceMap()
 	}
-	return obj.data.MntBalances.GetBalanceMap()
+	return make(map[uint64]*uint256.Int)
 }
 
 // SetError records a failure raised by a caller working on top of this state, so
