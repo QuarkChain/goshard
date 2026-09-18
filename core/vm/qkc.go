@@ -138,28 +138,27 @@ func (evm *EVM) QKCPOSWDisallows(sender common.Address, value *uint256.Int) bool
 	return evm.QKC != nil && evm.QKC.poswDisallows(sender, value)
 }
 
-func (evm *EVM) qkcSelfdestruct(scope *ScopeContext) ([]byte, error) {
-	ctx := evm.QKC
-	from := scope.Contract.Address()
-	beneficiaryWord := scope.Stack.pop()
-	beneficiary := common.Address(beneficiaryWord.Bytes20())
-	balance := ctx.defaultBalance(from)
-
-	if from != beneficiary {
-		ctx.state.AddBalanceByTokenID(beneficiary, balance, ctx.DefaultChainToken, tracing.BalanceIncreaseSelfdestruct)
+func (evm *EVM) selfdestructBalance(addr common.Address) *uint256.Int {
+	if evm.QKC != nil {
+		return evm.QKC.defaultBalance(addr)
 	}
-	ctx.state.SubBalanceByTokenID(from, balance, ctx.DefaultChainToken, tracing.BalanceDecreaseSelfdestruct)
-	evm.StateDB.SelfDestruct(from)
+	return evm.StateDB.GetBalance(addr)
+}
 
-	if tracer := evm.Config.Tracer; tracer != nil {
-		if tracer.OnEnter != nil {
-			tracer.OnEnter(evm.depth, byte(SELFDESTRUCT), from, beneficiary, nil, 0, balance.ToBig())
-		}
-		if tracer.OnExit != nil {
-			tracer.OnExit(evm.depth, nil, 0, nil, false)
-		}
+func (evm *EVM) selfdestructAddBalance(addr common.Address, amount *uint256.Int) {
+	if evm.QKC != nil {
+		evm.QKC.state.AddBalanceByTokenID(addr, amount, evm.QKC.DefaultChainToken, tracing.BalanceIncreaseSelfdestruct)
+		return
 	}
-	return nil, errStopToken
+	evm.StateDB.AddBalance(addr, amount, tracing.BalanceIncreaseSelfdestruct)
+}
+
+func (evm *EVM) selfdestructSubBalance(addr common.Address, amount *uint256.Int) {
+	if evm.QKC != nil {
+		evm.QKC.state.SubBalanceByTokenID(addr, amount, evm.QKC.DefaultChainToken, tracing.BalanceDecreaseSelfdestruct)
+		return
+	}
+	evm.StateDB.SubBalance(addr, amount, tracing.BalanceDecreaseSelfdestruct)
 }
 
 type qkcMessage struct {
@@ -213,18 +212,26 @@ func (evm *EVM) qkcSpecial(addr common.Address) (qkcSpecialFunc, uint64, bool) {
 
 // qkcApplyMsg is pyquarkchain's _apply_msg: it applies the PoSW gate and value
 // transfer, runs one frame, and rolls the frame back on failure.
-func (evm *EVM) qkcApplyMsg(msg *qkcMessage) (ret []byte, leftOver GasBudget, err error) {
+func (evm *EVM) qkcApplyMsg(msg *qkcMessage) (ret []byte, contract *Contract, leftOver GasBudget, err error) {
 	ctx := evm.QKC
+	if msg.isCreate {
+		contract = evm.newContract(msg.sender, msg.to, msg.codeAddress, msg.value, msg.gas, msg.code, true, false)
+	}
+	defer func() {
+		if contract != nil {
+			contract.Gas = leftOver
+		}
+	}()
 	if msg.transferTokenID != ctx.DefaultChainToken {
-		return nil, msg.gas, ctx.markUnsupported()
+		return nil, contract, msg.gas, ctx.markUnsupported()
 	}
 	if ctx.poswDisallows(msg.sender, msg.value) {
-		return nil, GasBudget{}, ErrQKCSenderDisallowed
+		return nil, contract, GasBudget{}, ErrQKCSenderDisallowed
 	}
 
 	snapshot := evm.StateDB.Snapshot()
 	if msg.transfersValue && !ctx.transferValue(msg.sender, msg.to, msg.transferTokenID, msg.value) {
-		return nil, GasBudget{}, ErrQKCTransferFailed
+		return nil, contract, GasBudget{}, ErrQKCTransferFailed
 	}
 
 	previousFrame := ctx.enterFrame(qkcFrame{
@@ -233,46 +240,32 @@ func (evm *EVM) qkcApplyMsg(msg *qkcMessage) (ret []byte, leftOver GasBudget, er
 	})
 	defer func() { ctx.frame = previousFrame }()
 
-	code := msg.code
-	if !msg.isCreate {
-		code = evm.StateDB.GetCode(msg.codeAddress)
-	}
 	gas := msg.gas
 	if special, enableTs, ok := evm.qkcSpecial(msg.codeAddress); ok && evm.Context.Time > enableTs {
 		ret, gas, err = special(evm, msg)
-	} else if len(code) == 0 {
-		ret, err = nil, nil
 	} else {
-		contract := NewContract(msg.sender, msg.to, msg.value, msg.gas, evm.jumpDests)
-		contract.IsDeployment = msg.isCreate
-		if msg.isCreate {
-			contract.SetCallCode(common.Hash{}, code)
-		} else {
-			contract.SetCallCode(evm.StateDB.GetCodeHash(msg.codeAddress), code)
+		if contract == nil {
+			contract = evm.newContract(msg.sender, msg.to, msg.codeAddress, msg.value, msg.gas, nil, false, false)
 		}
-		ret, err = evm.Run(contract, msg.input, msg.static)
+		if len(contract.Code) != 0 {
+			ret, err = evm.runContract(contract, msg.input, msg.static)
+		}
 		gas = contract.Gas
 	}
 	if ctx.unsupportedErr != nil {
 		err = ctx.unsupportedErr
 	}
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted && !errors.Is(err, ErrQKCUnsupportedMNT) {
-			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-				evm.Config.Tracer.OnGasChange(gas.RegularGas, 0, tracing.GasChangeCallFailedExecution)
-			}
-			gas.Exhaust()
-		}
+		evm.revertToSnapshot(snapshot, &gas, err != ErrExecutionReverted && !errors.Is(err, ErrQKCUnsupportedMNT))
 	}
-	return ret, gas, err
+	return ret, contract, gas, err
 }
 
 // QKCApplyMessage enters the profile from a transaction or cross-shard
 // deposit. It intentionally skips the CALL opcode's balance pre-check.
 func (evm *EVM) QKCApplyMessage(sender, to common.Address, input []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64, toFullShardKey uint32) ([]byte, GasBudget, error) {
 	evm.QKC.state.SetFullShardKey(toFullShardKey)
-	return evm.qkcApplyMsg(&qkcMessage{
+	ret, _, leftOver, err := evm.qkcApplyMsg(&qkcMessage{
 		sender:          sender,
 		to:              to,
 		codeAddress:     to,
@@ -283,6 +276,7 @@ func (evm *EVM) QKCApplyMessage(sender, to common.Address, input []byte, gas Gas
 		transferTokenID: transferTokenID,
 		toFullShardKey:  &toFullShardKey,
 	})
+	return ret, leftOver, err
 }
 
 func (evm *EVM) qkcCall(msg *qkcMessage) ([]byte, GasBudget, error) {
@@ -292,7 +286,8 @@ func (evm *EVM) qkcCall(msg *qkcMessage) ([]byte, GasBudget, error) {
 	if msg.transfersValue && !evm.QKC.canTransfer(msg.sender, msg.value) {
 		return nil, msg.gas, ErrInsufficientBalance
 	}
-	return evm.qkcApplyMsg(msg)
+	ret, _, leftOver, err := evm.qkcApplyMsg(msg)
+	return ret, leftOver, err
 }
 
 func (evm *EVM) qkcCreateContract(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, tokenID uint64, shardKey *uint32, recipient *common.Address, salt *common.Hash) (ret []byte, address common.Address, leftOver GasBudget, err error) {

@@ -883,22 +883,19 @@ func opSelfdestruct(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.readOnly {
 		return nil, ErrWriteProtection
 	}
-	if evm.QKC != nil {
-		return evm.qkcSelfdestruct(scope)
-	}
 	var (
 		this        = scope.Contract.Address()
-		balance     = evm.StateDB.GetBalance(this)
+		balance     = evm.selfdestructBalance(this)
 		top         = scope.Stack.pop()
 		beneficiary = common.Address(top.Bytes20())
 	)
 	// The funds are burned immediately if the beneficiary is the caller itself,
 	// in this case, the beneficiary's balance is not increased.
 	if this != beneficiary {
-		evm.StateDB.AddBalance(beneficiary, balance, tracing.BalanceIncreaseSelfdestruct)
+		evm.selfdestructAddBalance(beneficiary, balance)
 	}
 	// Clear any leftover funds for the account being destructed.
-	evm.StateDB.SubBalance(this, balance, tracing.BalanceDecreaseSelfdestruct)
+	evm.selfdestructSubBalance(this, balance)
 	evm.StateDB.SelfDestruct(this)
 
 	if tracer := evm.Config.Tracer; tracer != nil {
