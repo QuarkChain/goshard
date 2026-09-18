@@ -11,6 +11,14 @@ import (
 	"github.com/holiman/uint256"
 )
 
+// ===== QuarkChain account lifetime =====
+//
+// Contract creation and destruction use geth's native CreateAccount,
+// CreateContract, SelfDestruct and Finalise lifecycle. Finalise(true) at each
+// top-level message boundary removes a destroyed incarnation while retaining it
+// in stateObjectsDestruct, so a later message can recreate the address without
+// reading its old storage.
+
 // qkcCachedAccount stores the parts of pyquarkchain's cached blank account
 // that can affect persisted account encoding. The full shard key is retained
 // until block commit, while balances are transferred to a recreated state
@@ -127,8 +135,12 @@ func (s *StateDB) GetBalanceByTokenID(addr common.Address, tokenID uint64) *uint
 // cross-shard deposit execution use the same boundary in pyquarkchain and
 // goquarkchain.
 func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
+	s.journal.append(qkcFullShardKeyChange{prev: s.fullShardKey})
 	s.fullShardKey = fullShardKey
 }
+
+// FullShardKey is the key set by the last SetFullShardKey.
+func (s *StateDB) FullShardKey() uint32 { return s.fullShardKey }
 
 func (s *StateDB) noteQKCShardKey(addr common.Address) {
 	if _, ok := s.qkcAccountCache[addr]; !ok {
@@ -142,6 +154,39 @@ func (s *StateDB) qkcShardKey(addr common.Address) uint32 {
 	}
 	return s.fullShardKey
 }
+
+// GetFullShardKey is the shard key frozen into the account when it was created.
+func (s *StateDB) GetFullShardKey(addr common.Address) uint32 {
+	if obj := s.getStateObject(addr); obj != nil {
+		return obj.data.FullShardKey
+	}
+	if obj := s.stateObjectsDestruct[addr]; obj != nil {
+		return obj.data.FullShardKey
+	}
+	// An address with no account yet would be created with this key, which is
+	// what pyquarkchain's blank account reports too.
+	return s.qkcShardKey(addr)
+}
+
+// GetTokenBalances returns every balance the account holds, zero-valued entries
+// included: an entry that exists at zero is not the same as a token the account
+// never held, and callers reporting state have to be able to tell them apart.
+func (s *StateDB) GetTokenBalances(addr common.Address) map[uint64]*uint256.Int {
+	obj := s.getStateObject(addr)
+	if obj != nil {
+		if obj.data.MntBalances != nil {
+			return obj.data.MntBalances.GetBalanceMap()
+		}
+	} else if cached := s.qkcAccountCache[addr]; cached.balances != nil {
+		return cached.balances.GetBalanceMap()
+	}
+	return make(map[uint64]*uint256.Int)
+}
+
+// SetError records a failure raised by a caller working on top of this state, so
+// that a mistake it cannot report through its own return value still stops
+// Commit from producing a root.
+func (s *StateDB) SetError(err error) { s.setError(err) }
 
 func (s *StateDB) cacheQKCBlankBalances(obj *stateObject) {
 	if balances := obj.data.MntBalances; balances != nil && balances.Len() != 0 && balances.IsBlank() {
