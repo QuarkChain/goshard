@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"sort"
 
 	ethcom "github.com/ethereum/go-ethereum/common"
@@ -390,6 +391,19 @@ func (q *QuarkChainConfig) initAndValidate() {
 
 func (q *QuarkChainConfig) GetShardConfigByFullShardID(fullShardID uint32) *ShardConfig {
 	return q.shards[fullShardID]
+}
+
+// ClusterFullShardIDs returns every full shard id defined in the cluster
+// configuration, in ascending order (py: QuarkChainConfig.get_full_shard_ids()).
+// It is the cluster-wide shard set a slave validates incoming branches against
+// and routes x-shard traffic by.
+func (q *QuarkChainConfig) ClusterFullShardIDs() []uint32 {
+	ids := make([]uint32, 0, len(q.shards))
+	for id := range q.shards {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 func (q *QuarkChainConfig) IsSameFullShard(key1, key2 uint32) bool {
