@@ -250,6 +250,10 @@ func opAddress(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opBalance(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	slot := scope.Stack.peek()
 	address := common.Address(slot.Bytes20())
+	if evm.QKC != nil {
+		slot.Set(evm.QKC.defaultBalance(address))
+		return nil, nil
+	}
 	slot.Set(evm.StateDB.GetBalance(address))
 	return nil, nil
 }
@@ -878,6 +882,9 @@ func opStop(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opSelfdestruct(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.readOnly {
 		return nil, ErrWriteProtection
+	}
+	if evm.QKC != nil {
+		return evm.qkcSelfdestruct(scope)
 	}
 	var (
 		this        = scope.Contract.Address()

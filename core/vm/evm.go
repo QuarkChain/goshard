@@ -96,6 +96,10 @@ type EVM struct {
 	// StateDB gives access to the underlying state
 	StateDB StateDB
 
+	// QKC selects the QuarkChain execution profile. It is nil for ordinary
+	// geth callers, which keeps Ethereum execution unchanged.
+	QKC *QKCContext
+
 	// table holds the opcode specific handlers
 	table *JumpTable
 
@@ -253,6 +257,20 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
 	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          caller,
+			to:              addr,
+			codeAddress:     addr,
+			value:           value,
+			gas:             gas,
+			input:           input,
+			transfersValue:  true,
+			static:          evm.readOnly,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
+	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
@@ -344,6 +362,20 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
 	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          caller,
+			to:              caller,
+			codeAddress:     addr,
+			value:           value,
+			gas:             gas,
+			input:           input,
+			transfersValue:  true,
+			static:          evm.readOnly,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
+	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
@@ -394,6 +426,20 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
 	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          originCaller,
+			to:              caller,
+			codeAddress:     addr,
+			value:           value,
+			gas:             gas,
+			input:           input,
+			transfersValue:  false,
+			static:          evm.readOnly,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
+	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
@@ -435,6 +481,20 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 		defer func(startGas uint64) {
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
+	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          caller,
+			to:              addr,
+			codeAddress:     addr,
+			value:           new(uint256.Int),
+			gas:             gas,
+			input:           input,
+			transfersValue:  true,
+			static:          true,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
 	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
@@ -622,6 +682,13 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
+	if evm.QKC != nil {
+		if !evm.QKC.canTransfer(caller, value) {
+			return nil, common.Address{}, gas, ErrInsufficientBalance
+		}
+		return evm.qkcCreateContract(caller, code, gas, value,
+			evm.QKC.frame.transferTokenID, evm.QKC.frame.toFullShardKey, nil, nil)
+	}
 	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
 	return evm.create(caller, code, gas, value, contractAddr, CREATE)
 }
@@ -631,6 +698,14 @@ func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value 
 // The different between Create2 with Create is Create2 uses keccak256(0xff ++ msg.sender ++ salt ++ keccak256(init_code))[12:]
 // instead of the usual sender-and-nonce-hash as the address where the contract is initialized at.
 func (evm *EVM) Create2(caller common.Address, code []byte, gas GasBudget, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
+	if evm.QKC != nil {
+		if !evm.QKC.canTransfer(caller, endowment) {
+			return nil, common.Address{}, gas, ErrInsufficientBalance
+		}
+		saltHash := common.Hash(salt.Bytes32())
+		return evm.qkcCreateContract(caller, code, gas, endowment,
+			evm.QKC.frame.transferTokenID, evm.QKC.frame.toFullShardKey, nil, &saltHash)
+	}
 	inithash := crypto.Keccak256Hash(code)
 	contractAddr = crypto.CreateAddress2(caller, salt.Bytes32(), inithash[:])
 	return evm.create(caller, code, gas, endowment, contractAddr, CREATE2)
