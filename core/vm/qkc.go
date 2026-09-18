@@ -1,0 +1,342 @@
+// Copyright 2026-2027, QuarkChain.
+
+package vm
+
+import (
+	"errors"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/holiman/uint256"
+)
+
+var (
+	qkcCurrentMntIDAddress         = common.HexToAddress("0x000000000000000000000000000000514b430001")
+	qkcTransferMntAddress          = common.HexToAddress("0x000000000000000000000000000000514b430002")
+	qkcDeploySystemContractAddress = common.HexToAddress("0x000000000000000000000000000000514b430003")
+	qkcMintMntAddress              = common.HexToAddress("0x000000000000000000000000000000514b430004")
+	qkcBalanceMntAddress           = common.HexToAddress("0x000000000000000000000000000000514b430005")
+)
+
+var (
+	// ErrQKCSenderDisallowed rejects a transfer that would spend locked PoSW stake.
+	ErrQKCSenderDisallowed = errors.New("qkc: sender barred by proof-of-staked-work")
+	// ErrQKCTransferFailed reports a value transfer not covered by the token balance.
+	ErrQKCTransferFailed = errors.New("qkc: token transfer failed")
+	// ErrQKCUnsupportedMNT abandons a block that reaches multi-native-token execution.
+	ErrQKCUnsupportedMNT = errors.New("qkc: multi-native-token execution is unsupported")
+	// ErrQKCUnsupportedRules rejects EVM rules that differ from QuarkChain's Petersburg profile.
+	ErrQKCUnsupportedRules = errors.New("qkc: execution profile requires Petersburg-only EVM rules")
+)
+
+// qkcStateDB is the state surface needed by the QuarkChain execution profile.
+// SetQKCContext checks the interface once so an attached profile cannot silently
+// fall back to geth's scalar balance.
+type qkcStateDB interface {
+	GetBalanceByTokenID(common.Address, uint64) *uint256.Int
+	AddBalanceByTokenID(common.Address, *uint256.Int, uint64, tracing.BalanceChangeReason)
+	SubBalanceByTokenID(common.Address, *uint256.Int, uint64, tracing.BalanceChangeReason)
+	SetFullShardKey(uint32)
+}
+
+// QKCContext holds the QuarkChain policy that does not belong in geth's block
+// or transaction context. One context is used for one top-level message.
+type QKCContext struct {
+	DefaultChainToken uint64
+	FromFullShardKey  uint32
+	SenderDisallowMap map[common.Address]*uint256.Int
+
+	// Calls to QuarkChain's native-token precompiles are active only after the
+	// corresponding timestamp. MNT execution is deliberately unsupported in
+	// this delivery, so an active call records ErrQKCUnsupportedMNT.
+	EvmEnableTs uint64
+	MntEnableTs uint64
+
+	state          qkcStateDB
+	frame          qkcFrame
+	unsupportedErr error
+}
+
+type qkcFrame struct {
+	transferTokenID uint64
+	toFullShardKey  *uint32
+}
+
+// SetQKCContext attaches the QuarkChain profile. A nil profile is the default,
+// and leaves every geth execution path unchanged.
+func (evm *EVM) SetQKCContext(ctx *QKCContext) error {
+	if ctx == nil {
+		evm.QKC = nil
+		return nil
+	}
+	rules := evm.chainRules
+	// QKC consensus is Petersburg-only. Reject newer instruction sets before
+	// their handlers can bypass token-aware semantics.
+	if !rules.IsPetersburg || rules.IsIstanbul || rules.IsBerlin || rules.IsLondon || rules.IsMerge ||
+		rules.IsShanghai || rules.IsCancun || rules.IsPrague || rules.IsOsaka || rules.IsAmsterdam ||
+		rules.IsUBT || len(evm.Config.ExtraEips) != 0 {
+		return ErrQKCUnsupportedRules
+	}
+	state, ok := evm.StateDB.(qkcStateDB)
+	if !ok {
+		return errors.New("qkc: state database does not support token-indexed balances")
+	}
+	ctx.state = state
+	fromKey := ctx.FromFullShardKey
+	ctx.frame = qkcFrame{
+		transferTokenID: ctx.DefaultChainToken,
+		toFullShardKey:  &fromKey,
+	}
+	ctx.unsupportedErr = nil
+	evm.QKC = ctx
+	return nil
+}
+
+func (ctx *QKCContext) enterFrame(frame qkcFrame) qkcFrame {
+	previous := ctx.frame
+	ctx.frame = frame
+	return previous
+}
+
+func (ctx *QKCContext) defaultBalance(addr common.Address) *uint256.Int {
+	return ctx.state.GetBalanceByTokenID(addr, ctx.DefaultChainToken)
+}
+
+func (ctx *QKCContext) canTransfer(addr common.Address, value *uint256.Int) bool {
+	return ctx.defaultBalance(addr).Cmp(value) >= 0
+}
+
+func (ctx *QKCContext) transferValue(from, to common.Address, tokenID uint64, value *uint256.Int) bool {
+	if ctx.state.GetBalanceByTokenID(from, tokenID).Cmp(value) < 0 {
+		return false
+	}
+	ctx.state.SubBalanceByTokenID(from, value, tokenID, tracing.BalanceChangeTransfer)
+	ctx.state.AddBalanceByTokenID(to, value, tokenID, tracing.BalanceChangeTransfer)
+	return true
+}
+
+func (ctx *QKCContext) poswDisallows(sender common.Address, value *uint256.Int) bool {
+	locked, ok := ctx.SenderDisallowMap[sender]
+	if !ok {
+		return false
+	}
+	required, overflow := new(uint256.Int).AddOverflow(value, locked)
+	return overflow || required.Gt(ctx.defaultBalance(sender))
+}
+
+func (ctx *QKCContext) markUnsupported() error {
+	ctx.unsupportedErr = ErrQKCUnsupportedMNT
+	return ctx.unsupportedErr
+}
+
+// QKCPOSWDisallows exposes the source-side transfer gate without entering an
+// EVM frame.
+func (evm *EVM) QKCPOSWDisallows(sender common.Address, value *uint256.Int) bool {
+	return evm.QKC != nil && evm.QKC.poswDisallows(sender, value)
+}
+
+func (evm *EVM) selfdestructBalance(addr common.Address) *uint256.Int {
+	if evm.QKC != nil {
+		return evm.QKC.defaultBalance(addr)
+	}
+	return evm.StateDB.GetBalance(addr)
+}
+
+func (evm *EVM) selfdestructAddBalance(addr common.Address, amount *uint256.Int) {
+	if evm.QKC != nil {
+		evm.QKC.state.AddBalanceByTokenID(addr, amount, evm.QKC.DefaultChainToken, tracing.BalanceIncreaseSelfdestruct)
+		return
+	}
+	evm.StateDB.AddBalance(addr, amount, tracing.BalanceIncreaseSelfdestruct)
+}
+
+func (evm *EVM) selfdestructSubBalance(addr common.Address, amount *uint256.Int) {
+	if evm.QKC != nil {
+		evm.QKC.state.SubBalanceByTokenID(addr, amount, evm.QKC.DefaultChainToken, tracing.BalanceDecreaseSelfdestruct)
+		return
+	}
+	evm.StateDB.SubBalance(addr, amount, tracing.BalanceDecreaseSelfdestruct)
+}
+
+type qkcMessage struct {
+	sender      common.Address
+	to          common.Address
+	codeAddress common.Address
+	value       *uint256.Int
+	gas         GasBudget
+	input       []byte
+
+	transfersValue bool
+	static         bool
+
+	transferTokenID uint64
+	toFullShardKey  *uint32
+	isCreate        bool
+	code            []byte
+}
+
+type qkcSpecialFunc func(*EVM, *qkcMessage) ([]byte, GasBudget, error)
+
+func wrapQKCEthereumPrecompile(precompile PrecompiledContract, addr common.Address) qkcSpecialFunc {
+	return func(evm *EVM, msg *qkcMessage) ([]byte, GasBudget, error) {
+		return RunPrecompiledContract(evm.StateDB, precompile, addr, msg.input, msg.gas, evm.Config.Tracer, evm.chainRules)
+	}
+}
+
+func qkcUnsupportedPrecompile(evm *EVM, msg *qkcMessage) ([]byte, GasBudget, error) {
+	return nil, msg.gas, evm.QKC.markUnsupported()
+}
+
+func (evm *EVM) qkcSpecial(addr common.Address) (qkcSpecialFunc, uint64, bool) {
+	switch addr {
+	case qkcCurrentMntIDAddress, qkcTransferMntAddress, qkcDeploySystemContractAddress:
+		return qkcUnsupportedPrecompile, evm.QKC.EvmEnableTs, true
+	case qkcMintMntAddress, qkcBalanceMntAddress:
+		return qkcUnsupportedPrecompile, evm.QKC.MntEnableTs, true
+	}
+	// Pyquarkchain exposes only the first eight Ethereum precompiles. Their
+	// enable timestamp is zero and the activation comparison is strict.
+	if addr.Big().BitLen() <= 8 {
+		last := addr[common.AddressLength-1]
+		if last >= 1 && last <= 8 {
+			if precompile, ok := evm.precompile(addr); ok {
+				return wrapQKCEthereumPrecompile(precompile, addr), 0, true
+			}
+		}
+	}
+	return nil, 0, false
+}
+
+// qkcApplyMsg is pyquarkchain's _apply_msg: it applies the PoSW gate and value
+// transfer, runs one frame, and rolls the frame back on failure.
+func (evm *EVM) qkcApplyMsg(msg *qkcMessage) (ret []byte, contract *Contract, leftOver GasBudget, err error) {
+	ctx := evm.QKC
+	if msg.isCreate {
+		contract = evm.newContract(msg.sender, msg.to, msg.codeAddress, msg.value, msg.gas, msg.code, true, false)
+	}
+	defer func() {
+		if contract != nil {
+			contract.Gas = leftOver
+		}
+	}()
+	if msg.transferTokenID != ctx.DefaultChainToken {
+		return nil, contract, msg.gas, ctx.markUnsupported()
+	}
+	if ctx.poswDisallows(msg.sender, msg.value) {
+		return nil, contract, GasBudget{}, ErrQKCSenderDisallowed
+	}
+
+	snapshot := evm.StateDB.Snapshot()
+	if msg.transfersValue && !ctx.transferValue(msg.sender, msg.to, msg.transferTokenID, msg.value) {
+		return nil, contract, GasBudget{}, ErrQKCTransferFailed
+	}
+
+	previousFrame := ctx.enterFrame(qkcFrame{
+		transferTokenID: msg.transferTokenID,
+		toFullShardKey:  msg.toFullShardKey,
+	})
+	defer func() { ctx.frame = previousFrame }()
+
+	gas := msg.gas
+	if special, enableTs, ok := evm.qkcSpecial(msg.codeAddress); ok && evm.Context.Time > enableTs {
+		ret, gas, err = special(evm, msg)
+	} else {
+		if contract == nil {
+			contract = evm.newContract(msg.sender, msg.to, msg.codeAddress, msg.value, msg.gas, nil, false, false)
+		}
+		if len(contract.Code) != 0 {
+			ret, err = evm.runContract(contract, msg.input, msg.static)
+		}
+		gas = contract.Gas
+	}
+	if ctx.unsupportedErr != nil {
+		err = ctx.unsupportedErr
+	}
+	if err != nil {
+		evm.revertToSnapshot(snapshot, &gas, err != ErrExecutionReverted && !errors.Is(err, ErrQKCUnsupportedMNT))
+	}
+	return ret, contract, gas, err
+}
+
+// QKCApplyMessage enters the profile from a transaction or cross-shard
+// deposit. It intentionally skips the CALL opcode's balance pre-check.
+func (evm *EVM) QKCApplyMessage(sender, to common.Address, input []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64, toFullShardKey uint32) ([]byte, GasBudget, error) {
+	evm.QKC.state.SetFullShardKey(toFullShardKey)
+	ret, _, leftOver, err := evm.qkcApplyMsg(&qkcMessage{
+		sender:          sender,
+		to:              to,
+		codeAddress:     to,
+		value:           value,
+		gas:             gas,
+		input:           input,
+		transfersValue:  true,
+		transferTokenID: transferTokenID,
+		toFullShardKey:  &toFullShardKey,
+	})
+	return ret, leftOver, err
+}
+
+func (evm *EVM) qkcCall(msg *qkcMessage) ([]byte, GasBudget, error) {
+	if evm.depth > int(params.CallCreateDepth) {
+		return nil, msg.gas, ErrDepth
+	}
+	if msg.transfersValue && !evm.QKC.canTransfer(msg.sender, msg.value) {
+		return nil, msg.gas, ErrInsufficientBalance
+	}
+	ret, _, leftOver, err := evm.qkcApplyMsg(msg)
+	return ret, leftOver, err
+}
+
+func (evm *EVM) qkcCreateContract(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, tokenID uint64, shardKey *uint32, recipient *common.Address, salt *common.Hash) (ret []byte, address common.Address, leftOver GasBudget, err error) {
+	ctx := evm.QKC
+	if tokenID != ctx.DefaultChainToken {
+		return nil, common.Address{}, gas, ctx.markUnsupported()
+	}
+
+	typ := CREATE
+	switch {
+	case recipient != nil:
+		address = *recipient
+	case salt != nil:
+		address = crypto.CreateAddress2(caller, *salt, crypto.Keccak256(code))
+		typ = CREATE2
+	default:
+		nonce := evm.StateDB.GetNonce(caller)
+		if evm.TxContext.Origin == caller {
+			nonce-- // Admission already incremented a top-level creator's nonce.
+		}
+		address = qkcContractAddress(caller, shardKey, nonce)
+	}
+	previousFrame := ctx.enterFrame(qkcFrame{transferTokenID: tokenID, toFullShardKey: shardKey})
+	defer func() { ctx.frame = previousFrame }()
+	ret, address, leftOver, err = evm.create(caller, code, gas, value, address, typ)
+	if err != nil {
+		address = common.Address{}
+	}
+	return ret, address, leftOver, err
+}
+
+// QKCCreateContract enters contract creation from outside the interpreter.
+func (evm *EVM) QKCCreateContract(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64, toFullShardKey uint32, recipient *common.Address) ([]byte, common.Address, GasBudget, error) {
+	evm.QKC.state.SetFullShardKey(toFullShardKey)
+	return evm.qkcCreateContract(caller, code, gas, value, transferTokenID, &toFullShardKey, recipient, nil)
+}
+
+// QKCContractAddress is pyquarkchain's mk_contract_address.
+func QKCContractAddress(sender common.Address, fullShardKey uint32, nonce uint64) common.Address {
+	return qkcContractAddress(sender, &fullShardKey, nonce)
+}
+
+func qkcContractAddress(sender common.Address, fullShardKey *uint32, nonce uint64) common.Address {
+	var value any
+	if fullShardKey == nil {
+		value = []any{sender, nonce}
+	} else {
+		value = []any{sender, *fullShardKey, nonce}
+	}
+	encoded, _ := rlp.EncodeToBytes(value)
+	return common.BytesToAddress(crypto.Keccak256(encoded)[12:])
+}

@@ -96,6 +96,10 @@ type EVM struct {
 	// StateDB gives access to the underlying state
 	StateDB StateDB
 
+	// QKC selects the QuarkChain execution profile. It is nil for ordinary
+	// geth callers, which keeps Ethereum execution unchanged.
+	QKC *QKCContext
+
 	// table holds the opcode specific handlers
 	table *JumpTable
 
@@ -241,6 +245,33 @@ func isSystemCall(caller common.Address) bool {
 	return caller == params.SystemAddress
 }
 
+func (evm *EVM) newContract(caller, address, codeAddress common.Address, value *uint256.Int, gas GasBudget, code []byte, isDeployment, isSystemCall bool) *Contract {
+	contract := NewContract(caller, address, value, gas, evm.jumpDests)
+	contract.IsDeployment = isDeployment
+	contract.IsSystemCall = isSystemCall
+	if isDeployment {
+		contract.SetCallCode(common.Hash{}, code)
+	} else {
+		contract.SetCallCode(evm.resolveCodeHash(codeAddress), evm.resolveCode(codeAddress))
+	}
+	return contract
+}
+
+func (evm *EVM) runContract(contract *Contract, input []byte, readOnly bool) ([]byte, error) {
+	return evm.Run(contract, input, readOnly)
+}
+
+func (evm *EVM) revertToSnapshot(snapshot int, gas *GasBudget, exhaust bool) {
+	evm.StateDB.RevertToSnapshot(snapshot)
+	if !exhaust {
+		return
+	}
+	if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
+		evm.Config.Tracer.OnGasChange(gas.RegularGas, 0, tracing.GasChangeCallFailedExecution)
+	}
+	gas.Exhaust()
+}
+
 // Call executes the contract associated with the addr with the given input as
 // parameters. It also handles any necessary value transfer required and takse
 // the necessary steps to create accounts and reverses the state in case of an
@@ -252,6 +283,20 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 		defer func(startGas uint64) {
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
+	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          caller,
+			to:              addr,
+			codeAddress:     addr,
+			value:           value,
+			gas:             gas,
+			input:           input,
+			transfersValue:  true,
+			static:          evm.readOnly,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
 	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
@@ -298,16 +343,9 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
-		// Initialise a new contract and set the code that is to be used by the EVM.
-		code := evm.resolveCode(addr)
-		if len(code) == 0 {
-			ret, err = nil, nil // gas is unchanged
-		} else {
-			// The contract is a scoped environment for this execution context only.
-			contract := NewContract(caller, addr, value, gas, evm.jumpDests)
-			contract.IsSystemCall = isSystemCall(caller)
-			contract.SetCallCode(evm.resolveCodeHash(addr), code)
-			ret, err = evm.Run(contract, input, false)
+		contract := evm.newContract(caller, addr, addr, value, gas, nil, false, isSystemCall(caller))
+		if len(contract.Code) != 0 {
+			ret, err = evm.runContract(contract, input, false)
 			gas = contract.Gas
 		}
 	}
@@ -315,13 +353,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	// above we revert to the snapshot and consume any gas remaining. Additionally,
 	// when we're in homestead this also counts for code storage gas errors.
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted {
-			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-				evm.Config.Tracer.OnGasChange(gas.RegularGas, 0, tracing.GasChangeCallFailedExecution)
-			}
-			gas.Exhaust()
-		}
+		evm.revertToSnapshot(snapshot, &gas, err != ErrExecutionReverted)
 		// TODO: consider clearing up unused snapshots:
 		//} else {
 		//	evm.StateDB.DiscardSnapshot(snapshot)
@@ -344,6 +376,20 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
 	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          caller,
+			to:              caller,
+			codeAddress:     addr,
+			value:           value,
+			gas:             gas,
+			input:           input,
+			transfersValue:  true,
+			static:          evm.readOnly,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
+	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
@@ -361,21 +407,12 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
-		// Initialise a new contract and set the code that is to be used by the EVM.
-		// The contract is a scoped environment for this execution context only.
-		contract := NewContract(caller, caller, value, gas, evm.jumpDests)
-		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
-		ret, err = evm.Run(contract, input, false)
+		contract := evm.newContract(caller, caller, addr, value, gas, nil, false, false)
+		ret, err = evm.runContract(contract, input, false)
 		gas = contract.Gas
 	}
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted {
-			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-				evm.Config.Tracer.OnGasChange(gas.RegularGas, 0, tracing.GasChangeCallFailedExecution)
-			}
-			gas.Exhaust()
-		}
+		evm.revertToSnapshot(snapshot, &gas, err != ErrExecutionReverted)
 	}
 	return ret, gas, err
 }
@@ -394,6 +431,20 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
 	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          originCaller,
+			to:              caller,
+			codeAddress:     addr,
+			value:           value,
+			gas:             gas,
+			input:           input,
+			transfersValue:  false,
+			static:          evm.readOnly,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
+	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
@@ -404,22 +455,13 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
-		// Initialise a new contract and make initialise the delegate values
-		//
 		// Note: The value refers to the original value from the parent call.
-		contract := NewContract(originCaller, caller, value, gas, evm.jumpDests)
-		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
-		ret, err = evm.Run(contract, input, false)
+		contract := evm.newContract(originCaller, caller, addr, value, gas, nil, false, false)
+		ret, err = evm.runContract(contract, input, false)
 		gas = contract.Gas
 	}
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted {
-			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-				evm.Config.Tracer.OnGasChange(gas.RegularGas, 0, tracing.GasChangeCallFailedExecution)
-			}
-			gas.Exhaust()
-		}
+		evm.revertToSnapshot(snapshot, &gas, err != ErrExecutionReverted)
 	}
 	return ret, gas, err
 }
@@ -435,6 +477,20 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 		defer func(startGas uint64) {
 			evm.captureEnd(evm.depth, startGas, leftOverGas.RegularGas, ret, err)
 		}(gas.RegularGas)
+	}
+	if evm.QKC != nil {
+		return evm.qkcCall(&qkcMessage{
+			sender:          caller,
+			to:              addr,
+			codeAddress:     addr,
+			value:           new(uint256.Int),
+			gas:             gas,
+			input:           input,
+			transfersValue:  true,
+			static:          true,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+		})
 	}
 	// Fail if we're trying to execute above the call depth limit
 	if evm.depth > int(params.CallCreateDepth) {
@@ -456,25 +512,12 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
-		// Initialise a new contract and set the code that is to be used by the EVM.
-		// The contract is a scoped environment for this execution context only.
-		contract := NewContract(caller, addr, new(uint256.Int), gas, evm.jumpDests)
-		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
-
-		// When an error was returned by the EVM or when setting the creation code
-		// above we revert to the snapshot and consume any gas remaining. Additionally
-		// when we're in Homestead this also counts for code storage gas errors.
-		ret, err = evm.Run(contract, input, true)
+		contract := evm.newContract(caller, addr, addr, new(uint256.Int), gas, nil, false, false)
+		ret, err = evm.runContract(contract, input, true)
 		gas = contract.Gas
 	}
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted {
-			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-				evm.Config.Tracer.OnGasChange(gas.RegularGas, 0, tracing.GasChangeCallFailedExecution)
-			}
-			gas.Exhaust()
-		}
+		evm.revertToSnapshot(snapshot, &gas, err != ErrExecutionReverted)
 	}
 	return ret, gas, err
 }
@@ -492,14 +535,20 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, common.Address{}, gas, ErrDepth
 	}
-	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
+	if evm.QKC != nil {
+		if evm.TxContext.Origin != caller && !evm.QKC.canTransfer(caller, value) {
+			return nil, common.Address{}, gas, ErrInsufficientBalance
+		}
+	} else if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
-	nonce := evm.StateDB.GetNonce(caller)
-	if nonce+1 < nonce {
-		return nil, common.Address{}, gas, ErrNonceUintOverflow
+	if evm.QKC == nil || evm.TxContext.Origin != caller {
+		nonce := evm.StateDB.GetNonce(caller)
+		if nonce+1 < nonce {
+			return nil, common.Address{}, gas, ErrNonceUintOverflow
+		}
+		evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
 	}
-	evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
 
 	// Charge the contract creation init gas in verkle mode
 	if evm.chainRules.IsEIP4762 {
@@ -562,35 +611,44 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 			evm.Config.Tracer.OnGasChange(prior, gas.RegularGas, tracing.GasChangeWitnessContractInit)
 		}
 	}
-	evm.Context.Transfer(evm.StateDB, caller, address, value, &evm.chainRules)
-
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
-	contract := NewContract(caller, address, value, gas, evm.jumpDests)
-
-	// Explicitly set the code to a null hash to prevent caching of jump analysis
-	// for the initialization code.
-	contract.SetCallCode(common.Hash{}, code)
-	contract.IsDeployment = true
-
-	ret, err = evm.initNewContract(contract, address)
+	var contract *Contract
+	if evm.QKC != nil {
+		ret, contract, gas, err = evm.qkcApplyMsg(&qkcMessage{
+			sender:          caller,
+			to:              address,
+			codeAddress:     address,
+			value:           value,
+			gas:             gas,
+			transfersValue:  true,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+			isCreate:        true,
+			code:            code,
+		})
+		if err == nil {
+			ret, err = evm.completeNewContract(contract, address, ret)
+		}
+	} else {
+		evm.Context.Transfer(evm.StateDB, caller, address, value, &evm.chainRules)
+		contract = evm.newContract(caller, address, address, value, gas, code, true, false)
+		ret, err = evm.runContract(contract, nil, false)
+		if err == nil {
+			ret, err = evm.completeNewContract(contract, address, ret)
+		}
+	}
 	if err != nil && (evm.chainRules.IsHomestead || err != ErrCodeStoreOutOfGas) {
 		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted {
+		if err != ErrExecutionReverted && !errors.Is(err, ErrQKCUnsupportedMNT) {
 			contract.UseGas(GasCosts{RegularGas: contract.Gas.RegularGas}, evm.Config.Tracer, tracing.GasChangeCallFailedExecution)
 		}
 	}
 	return ret, address, contract.Gas, err
 }
 
-// initNewContract runs a new contract's creation code, performs checks on the
-// resulting code that is to be deployed, and consumes necessary gas.
-func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]byte, error) {
-	ret, err := evm.Run(contract, nil, false)
-	if err != nil {
-		return ret, err
-	}
-
+// completeNewContract validates and stores code returned by contract creation.
+func (evm *EVM) completeNewContract(contract *Contract, address common.Address, ret []byte) ([]byte, error) {
 	// Check whether the max code size has been exceeded, assign err if the case.
 	if err := CheckMaxCodeSize(&evm.chainRules, uint64(len(ret))); err != nil {
 		return ret, err
@@ -622,6 +680,10 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
+	if evm.QKC != nil {
+		return evm.qkcCreateContract(caller, code, gas, value,
+			evm.QKC.frame.transferTokenID, evm.QKC.frame.toFullShardKey, nil, nil)
+	}
 	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
 	return evm.create(caller, code, gas, value, contractAddr, CREATE)
 }
@@ -631,6 +693,11 @@ func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value 
 // The different between Create2 with Create is Create2 uses keccak256(0xff ++ msg.sender ++ salt ++ keccak256(init_code))[12:]
 // instead of the usual sender-and-nonce-hash as the address where the contract is initialized at.
 func (evm *EVM) Create2(caller common.Address, code []byte, gas GasBudget, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
+	if evm.QKC != nil {
+		saltHash := common.Hash(salt.Bytes32())
+		return evm.qkcCreateContract(caller, code, gas, endowment,
+			evm.QKC.frame.transferTokenID, evm.QKC.frame.toFullShardKey, nil, &saltHash)
+	}
 	inithash := crypto.Keccak256Hash(code)
 	contractAddr = crypto.CreateAddress2(caller, salt.Bytes32(), inithash[:])
 	return evm.create(caller, code, gas, endowment, contractAddr, CREATE2)

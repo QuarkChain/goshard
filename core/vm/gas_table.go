@@ -22,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/holiman/uint256"
 )
 
 // memoryGasCost calculates the quadratic gas for memory expansion. It does so
@@ -491,7 +492,7 @@ func gasSelfdestruct(evm *EVM, contract *Contract, stack *Stack, mem *Memory, me
 
 		if evm.chainRules.IsEIP158 {
 			// if empty and transfers value
-			if evm.StateDB.Empty(address) && evm.StateDB.GetBalance(contract.Address()).Sign() != 0 {
+			if evm.StateDB.Empty(address) && selfdestructBalance(evm, contract.Address()).Sign() != 0 {
 				gas += params.CreateBySelfdestructGas
 			}
 		} else if !evm.StateDB.Exist(address) {
@@ -503,4 +504,11 @@ func gasSelfdestruct(evm *EVM, contract *Contract, stack *Stack, mem *Memory, me
 		evm.StateDB.AddRefund(params.SelfdestructRefundGas)
 	}
 	return GasCosts{RegularGas: gas}, nil
+}
+
+func selfdestructBalance(evm *EVM, addr common.Address) *uint256.Int {
+	if evm.QKC != nil {
+		return evm.QKC.defaultBalance(addr)
+	}
+	return evm.StateDB.GetBalance(addr)
 }
