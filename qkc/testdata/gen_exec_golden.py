@@ -5,7 +5,7 @@ The vectors pin what goshard's execution layer must reproduce byte for byte:
 a pre-allocation, a sequence of inputs, and the resulting state root plus every
 consensus-visible side effect. Three granularities are emitted:
 
-  state    direct EvmState mutations (balances, nonce, code, storage, deletion)
+  state    direct EvmState mutations (balances, nonce, code, storage, snapshots)
            -> post state root. Covers the account and storage encoding rules.
   message  a signed transaction or a cross-shard deposit run through
            apply_transaction / apply_xshard_deposit -> post state root,
@@ -119,7 +119,7 @@ try:
     from quarkchain.evm.messages import apply_transaction, apply_xshard_deposit
     from quarkchain.evm.state import State as EvmState
     from quarkchain.evm.transactions import Transaction as EvmTransaction
-    from quarkchain.evm.utils import privtoaddr
+    from quarkchain.evm.utils import privtoaddr, sha3
     from quarkchain.genesis import GenesisManager
     from quarkchain.utils import Logger, token_id_encode
 except ImportError as exc:  # pragma: no cover - operator feedback only
@@ -312,12 +312,6 @@ def run_state_ops(state, ops):
             state.set_storage_data(
                 _recipient(op["address"]), int(op["key"], 16), int(op["value"], 16)
             )
-        elif kind == "reset_balances":
-            state.reset_balances(_recipient(op["address"]))
-        elif kind == "reset_storage":
-            state.reset_storage(_recipient(op["address"]))
-        elif kind == "del_account":
-            state.del_account(_recipient(op["address"]))
         elif kind == "snapshot":
             snapshots.append(state.snapshot())
         elif kind == "revert":
@@ -512,21 +506,6 @@ def state_cases(networks):
             ],
         },
         {
-            "name": "del_account_removes_leaf",
-            "comment": "del_account clears balances, nonce, code and storage and "
-            "unsets touched, so commit deletes the leaf (state.py:596-610)",
-            "network": "devnet",
-            "pre_alloc": {
-                A
-                + "00000001": {
-                    "balances": {"QKC": "9"},
-                    "code": "0x6001",
-                    "storage": {"0x01": "0x2a"},
-                }
-            },
-            "ops": [{"op": "del_account", "address": A}],
-        },
-        {
             "name": "revert_undoes_mutations",
             "comment": "snapshot/revert restores balances, nonce, code and storage; "
             "the post root equals the untouched allocation's",
@@ -554,44 +533,6 @@ def state_cases(networks):
             },
             "ops": [
                 {"op": "set_token_balance", "address": A, "token": "QKC", "value": "0"}
-            ],
-        },
-        {
-            "name": "revert_does_not_restore_reset_balances",
-            "comment": "reset_balances journals the restore onto a misspelled "
-            "attribute (state.py:192-198), so reverting brings back the token trie "
-            "but not the balances; the account stays drained. The opening credit "
-            "is what makes that observable: reset_balances marks nothing touched, "
-            "so without it commit would skip the account and both a faithful and "
-            "a naively correct implementation would agree",
-            "network": "devnet",
-            "pre_alloc": {A + "00000001": {"balances": {"QKC": "5"}, "code": "0x6000"}},
-            "ops": [
-                {"op": "delta_token_balance", "address": A, "token": "QKC", "value": "1"},
-                {"op": "snapshot"},
-                {"op": "reset_balances", "address": A},
-                {"op": "revert"},
-            ],
-        },
-        {
-            "name": "revert_after_del_account",
-            "comment": "reverting del_account leaves the trie untouched: unwinding "
-            "its six steps ends at the touched flag set_nonce journaled, which was "
-            "False, so commit skips the account rather than rewriting the leaf it "
-            "would otherwise have drained (a selfdestruct in a reverted frame)",
-            "network": "devnet",
-            "pre_alloc": {
-                A
-                + "00000001": {
-                    "balances": {"QKC": "5"},
-                    "code": "0x6000",
-                    "storage": {"0x01": "0x2a"},
-                }
-            },
-            "ops": [
-                {"op": "snapshot"},
-                {"op": "del_account", "address": A},
-                {"op": "revert"},
             ],
         },
         {
@@ -644,6 +585,157 @@ def state_cases(networks):
             ],
         },
     ]
+    # These families isolate the account policy from VM and transaction rules,
+    # so the mutable state layer can consume them before an executor exists.
+    stored_account = {
+        A + "00000001": {
+            "balances": {"QKC": "5", "QETH": "7"},
+            "code": "0x6000",
+            "storage": {"0x01": "0x11", "0x02": "0x22"},
+        }
+    }
+    cases += [
+        {
+            "name": "full_shard_key_first_read_survives_revert",
+            "comment": "revert restores the current shard key to 1 but keeps "
+            "the blank account first cached under key 2; its later credit "
+            "must therefore write key 2 into the leaf, while B's first credit "
+            "uses the restored key 1",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 1},
+                {"op": "snapshot"},
+                {"op": "set_full_shard_key", "value": 2},
+                {"op": "read_account", "address": A},
+                {"op": "revert"},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {
+                    "op": "delta_token_balance",
+                    "address": B,
+                    "token": "QKC",
+                    "value": "1",
+                },
+            ],
+        },
+        {
+            "name": "full_shard_key_first_write_survives_revert",
+            "comment": "reverting the first credit leaves the cached account "
+            "and its key 2 behind; geth's journal removes newly created objects, "
+            "so the frozen key must outlive that object to survive the next "
+            "credit; B checks that the current key was restored to 1",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 1},
+                {"op": "snapshot"},
+                {"op": "set_full_shard_key", "value": 2},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {"op": "revert"},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+                {
+                    "op": "delta_token_balance",
+                    "address": B,
+                    "token": "QKC",
+                    "value": "1",
+                },
+            ],
+        },
+        {
+            "name": "full_shard_key_blank_read_expires_at_commit",
+            "comment": "commit clears the blank account cached by a read; "
+            "a later first credit uses the new shard key 2, not the key 1 "
+            "remembered before the commit",
+            "network": "devnet",
+            "pre_alloc": {},
+            "ops": [
+                {"op": "set_full_shard_key", "value": 1},
+                {"op": "read_account", "address": A},
+                {"op": "commit"},
+                {"op": "set_full_shard_key", "value": 2},
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "QKC",
+                    "value": "1",
+                },
+            ],
+        },
+    ]
+    # QKC and other tokens use different native entry points in Go. Both must
+    # preserve the same touch and absent-entry rules.
+    for token in ("QKC", "QETH"):
+        for operation in ("set_token_balance", "delta_token_balance"):
+            cases.append(
+                {
+                    "name": operation + "_zero_keeps_token_absent_" + token.lower(),
+                    "comment": "a zero write for a token never held must not "
+                    "create an entry; nonce keeps the account alive so empty "
+                    "bytes versus the 00c0 zero-entry blob changes its leaf",
+                    "network": "devnet",
+                    "pre_alloc": {},
+                    "ops": [
+                        {"op": "increment_nonce", "address": A},
+                        {"op": operation, "address": A, "token": token, "value": "0"},
+                    ],
+                }
+            )
+
+    # Stay on the list-encoded side of the token-trie boundary supported by S1.
+    # The threshold counts nonzero balances, not all entries in the cache.
+    sixteen_credits = [
+        {"op": "delta_token_balance", "address": A, "token": "T" + str(i), "value": "1"}
+        for i in range(16)
+    ]
+    for name, extra_ops in (
+        ("sixteen_tokens_stay_list_encoded", []),
+        (
+            "seventeenth_zero_token_does_not_enable_trie",
+            [
+                {
+                    "op": "delta_token_balance",
+                    "address": A,
+                    "token": "T16",
+                    "value": "1",
+                },
+                {"op": "set_token_balance", "address": A, "token": "T16", "value": "0"},
+            ],
+        ),
+    ):
+        cases.append(
+            {
+                "name": name,
+                "comment": "sixteen nonzero balances remain a sorted pair list, "
+                "even with a seventeenth zero cache entry; commit and read-back "
+                "must preserve this representation without requiring a token trie",
+                "network": "devnet",
+                "pre_alloc": {},
+                "ops": sixteen_credits + extra_ops + [
+                    {"op": "commit"},
+                    {
+                        "op": "delta_token_balance",
+                        "address": A,
+                        "token": "T0",
+                        "value": "0",
+                    },
+                ],
+            }
+        )
     return cases
 
 
@@ -776,6 +868,8 @@ def build_message_case(networks, case):
     state.commit()
 
     recipients = {a[:40] for a in case["pre_alloc"]}
+    observed_storage = case.get("observe_storage", {})
+    recipients.update(observed_storage)
     recipients.add(case.get("block_coinbase", C))
 
     # Building and dumping the input stays outside the guarded call below: only
@@ -855,7 +949,7 @@ def build_message_case(networks, case):
         "receipts": [dump_receipt(r) for r in state.receipts],
         "xshard_deposit_receipts": [dump_receipt(r) for r in state.xshard_deposit_receipts],
         "xshard_list": [dump_deposit(d) for d in state.xshard_list],
-        "accounts": observe(state, recipients, {}),
+        "accounts": observe(state, recipients, observed_storage),
     }
 
 
@@ -904,7 +998,8 @@ ANSWER_INIT = "0x69602a60005260206000f3600052600a6016f3"
 REVERT_RUNTIME = "0x60006000fd"
 INFINITE_RUNTIME = "0x5b600056"
 LOG_RUNTIME = "0x7fbeef" + "00" * 29 + "60206000a100"
-CREATE2_RUNTIME = "0x6460006000f36000526000600560" + "1b" + "6000f500"
+CREATE2_INIT = "60006000f3"
+CREATE2_RUNTIME = "0x64" + CREATE2_INIT + "60005260006005601b6000f500"
 
 # CREATE2_WORD_GAS_RUNTIME expands memory to exactly 3072 bytes and then runs
 # CREATE2 over all of it, as the last instruction in the code.
@@ -964,6 +1059,16 @@ def word(value):
 def selfdestruct_runtime(beneficiary_hex):
     """selfdestruct(beneficiary)."""
     return "0x73" + beneficiary_hex + "ff"
+
+
+def create2_address(creator_hex, init_hex=CREATE2_INIT, salt=0):
+    """Address produced by CREATE2 for the fixed inputs used in a case."""
+    return sha3(
+        b"\xff"
+        + bytes.fromhex(creator_hex)
+        + salt.to_bytes(32, byteorder="big")
+        + sha3(bytes.fromhex(init_hex))
+    )[12:].hex()
 
 
 def _push(value, width=None):
@@ -1047,6 +1152,11 @@ def call_runtime(callee_hex):
     return "0x" + "6000" * 5 + "73" + callee_hex + "5af100"
 
 
+def call_then_revert_runtime(callee_hex):
+    """Call a contract, then revert the parent frame."""
+    return "0x" + _call(callee_hex, 100000, 0, 0, 0, 0) + "50" + _push(0) * 2 + "fd"
+
+
 def mint_mnt_runtime(minter_hex, token_id, amount_word, args_size, forwarded_gas):
     """call the mint precompile with args_size bytes of the three-word argument.
 
@@ -1124,6 +1234,11 @@ def returning_init(size):
 def message_cases():
     """A first, deliberately small set: S3-S6 grow it per semantics entry."""
     funded = {"balances": {"QKC": "1000000000000000000"}}
+    # keccak(rlp([SENDER_A, full_shard_key=1, nonce=0]))[12:]. The existing
+    # creation vector also returns this address, so prefunding it makes balance
+    # preservation part of the reachable CREATE path instead of a direct state
+    # reset test.
+    first_created_by_a = "2e51de24dc44092078776c0c6d31d5837cf8e13f"
     # devnet has every hard fork switch at 0, so these run post-EVM throughout.
     return [
         {
@@ -1466,10 +1581,16 @@ def message_cases():
             "comment": "a deployment: the address is "
             "keccak(rlp([sender, full_shard_key, nonce]))[12:], the top-level "
             "nonce does not move for the CREATE itself, and the receipt carries "
-            "the address and its shard key (messages.py:704)",
+            "the address and its shard key; balances sent to that address before "
+            "creation survive the lifecycle (messages.py:704)",
             "network": "devnet",
             "timestamp": 1,
-            "pre_alloc": {SENDER_A + "00000001": funded},
+            "pre_alloc": {
+                SENDER_A + "00000001": funded,
+                first_created_by_a + "00000001": {
+                    "balances": {"QKC": "777", "QETH": "888"}
+                },
+            },
             "tx": {
                 "nonce": 0,
                 "gas_price": 1,
@@ -1554,12 +1675,44 @@ def message_cases():
                 A + "00000001": {
                     "balances": {"QKC": "5000"},
                     "code": selfdestruct_runtime(B),
+                    "storage": {"0x01": "0x2a"},
                 },
             },
+            "observe_storage": {A: ["0x01"]},
             "tx": {
                 "nonce": 0,
                 "gas_price": 1,
                 "start_gas": 200000,
+                "to": A,
+                "value": 0,
+                "signer": "A",
+            },
+        },
+        {
+            "name": "contract_selfdestruct_reverted_with_parent",
+            "expect": "success",
+            "comment": "a child SELFDESTRUCT is rolled back when its parent "
+            "reverts: the child keeps its code, balances and storage, and the "
+            "receipt records an ordinary failed execution",
+            "network": "devnet",
+            "timestamp": 1,
+            "pre_alloc": {
+                SENDER_A + "00000001": funded,
+                A + "00000001": {
+                    "balances": {},
+                    "code": call_then_revert_runtime(B),
+                },
+                B + "00000001": {
+                    "balances": {"QKC": "5000", "QETH": "7"},
+                    "code": selfdestruct_runtime(C),
+                    "storage": {"0x01": "0x2a"},
+                },
+            },
+            "observe_storage": {B: ["0x01"]},
+            "tx": {
+                "nonce": 0,
+                "gas_price": 1,
+                "start_gas": 300000,
                 "to": A,
                 "value": 0,
                 "signer": "A",
@@ -2262,6 +2415,8 @@ def build_block_case(case):
 
     genesis_block = state.db.get_minor_block_by_height(0)
     recipients = {a[:40] for a in case["genesis_alloc"]}
+    observed_storage = case.get("observe_storage", {})
+    recipients.update(observed_storage)
 
     # The genesis root block is where every cursor starts: the shard's genesis
     # meta names its height, and the traversal's first deposit is that block's
@@ -2355,7 +2510,7 @@ def build_block_case(case):
                     ],
                     "produced_deposits": [dump_deposit(d) for d in evm_state.xshard_list],
                     "consumed_deposits": [dump_deposit(d) for d in consumed],
-                    "accounts": observe(evm_state, recipients, {}),
+                    "accounts": observe(evm_state, recipients, observed_storage),
                 },
             }
         )
@@ -2388,6 +2543,7 @@ def block_cases():
     # (chain << 16) | 1.
     local, remote = 0x00000001, 0x00010001
     genesis_time = 1556639999
+    create2_target = create2_address(A)
 
     def transfer(nonce, value, signer="A", to=None, gas=21000, gas_price=1):
         return {
@@ -2775,7 +2931,7 @@ def block_cases():
             "name": "devnet_selfdestruct_then_paid_again",
             "comment": "the same rule inside one block: the account is stripped "
             "by the transaction that destroys it and brought back by the next "
-            "transaction that pays it",
+            "transaction that pays it, without exposing its old storage",
             "network": "devnet",
             "full_shard_id": local,
             "genesis_alloc": {
@@ -2783,8 +2939,10 @@ def block_cases():
                 A + "00000001": {
                     "balances": {"QKC": "5000"},
                     "code": selfdestruct_runtime(B),
+                    "storage": {"0x01": "0x2a"},
                 },
             },
+            "observe_storage": {A: ["0x01"]},
             "blocks": [
                 {
                     "timestamp": genesis_time + 10,
@@ -2805,6 +2963,52 @@ def block_cases():
                             "start_gas": 200000,
                             "to": A,
                             "value": "777",
+                            "signer": "A",
+                            "from_full_shard_key": 1,
+                            "to_full_shard_key": 1,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            "name": "devnet_selfdestruct_then_create2",
+            "comment": "a contract with storage is destroyed by one transaction "
+            "and recreated at the same address by CREATE2 in the next; the new "
+            "contract starts with an empty storage trie",
+            "network": "devnet",
+            "full_shard_id": local,
+            "genesis_alloc": {
+                SENDER_A + "00000001": funded,
+                A + "00000001": {"balances": {}, "code": CREATE2_RUNTIME},
+                create2_target
+                + "00000001": {
+                    "balances": {"QKC": "5000"},
+                    "code": selfdestruct_runtime(B),
+                    "storage": {"0x01": "0x2a"},
+                },
+            },
+            "observe_storage": {create2_target: ["0x01"]},
+            "blocks": [
+                {
+                    "timestamp": genesis_time + 10,
+                    "txs": [
+                        {
+                            "nonce": 0,
+                            "gas_price": 1,
+                            "start_gas": 200000,
+                            "to": create2_target,
+                            "value": "0",
+                            "signer": "A",
+                            "from_full_shard_key": 1,
+                            "to_full_shard_key": 1,
+                        },
+                        {
+                            "nonce": 1,
+                            "gas_price": 1,
+                            "start_gas": 200000,
+                            "to": A,
+                            "value": "0",
                             "signer": "A",
                             "from_full_shard_key": 1,
                             "to_full_shard_key": 1,

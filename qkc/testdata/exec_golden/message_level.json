@@ -1465,7 +1465,7 @@
     },
     {
       "name": "contract_creation",
-      "comment": "a deployment: the address is keccak(rlp([sender, full_shard_key, nonce]))[12:], the top-level nonce does not move for the CREATE itself, and the receipt carries the address and its shard key (messages.py:704)",
+      "comment": "a deployment: the address is keccak(rlp([sender, full_shard_key, nonce]))[12:], the top-level nonce does not move for the CREATE itself, and the receipt carries the address and its shard key; balances sent to that address before creation survive the lifecycle (messages.py:704)",
       "network": "devnet",
       "full_shard_id": 1,
       "expect": "success",
@@ -1480,6 +1480,12 @@
         "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000001": {
           "balances": {
             "QKC": "1000000000000000000"
+          }
+        },
+        "2e51de24dc44092078776c0c6d31d5837cf8e13f00000001": {
+          "balances": {
+            "QKC": "777",
+            "QETH": "888"
           }
         }
       },
@@ -1512,7 +1518,7 @@
         "success": true,
         "output": "0x2e51de24dc44092078776c0c6d31d5837cf8e13f"
       },
-      "post_state_root": "0xbfa80749831241efd821fad7dbaa9a650623dedf84436769d716543f27fdea99",
+      "post_state_root": "0x47821751ca9764e8956c8a081c7d9a6b8093452a3818181b4c2967f64f71e465",
       "gas_used": 56118,
       "xshard_receive_gas_used": 0,
       "block_fee_tokens": {
@@ -1538,6 +1544,16 @@
           "exists": true,
           "balances": {
             "35760": "999999999999943882"
+          }
+        },
+        "2e51de24dc44092078776c0c6d31d5837cf8e13f": {
+          "nonce": 1,
+          "code_hash": "0x98e3a357b0a9519e7773d42cf7912a620a18c8f53cd8e1525ce5344917d07e76",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "777",
+            "1280249": "888"
           }
         },
         "cccc0000000000000000000000000000000000cc": {
@@ -1871,7 +1887,10 @@
           "balances": {
             "QKC": "5000"
           },
-          "code": "0x73bbbb0000000000000000000000000000000000bbff"
+          "code": "0x73bbbb0000000000000000000000000000000000bbff",
+          "storage": {
+            "0x01": "0x2a"
+          }
         }
       },
       "inputs": [
@@ -1936,7 +1955,10 @@
           "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
           "full_shard_key": 1,
           "exists": false,
-          "balances": {}
+          "balances": {},
+          "storage": {
+            "0x01": "0x0"
+          }
         },
         "cccc0000000000000000000000000000000000cc": {
           "nonce": 0,
@@ -1945,6 +1967,128 @@
           "exists": true,
           "balances": {
             "35760": "13501"
+          }
+        }
+      }
+    },
+    {
+      "name": "contract_selfdestruct_reverted_with_parent",
+      "comment": "a child SELFDESTRUCT is rolled back when its parent reverts: the child keeps its code, balances and storage, and the receipt records an ordinary failed execution",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "expect": "success",
+      "context": {
+        "timestamp": 1,
+        "gas_limit": 12000000,
+        "block_number": 1,
+        "block_coinbase": "0xcccc0000000000000000000000000000000000cc",
+        "block_difficulty": 1
+      },
+      "pre_alloc": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000001": {
+          "balances": {
+            "QKC": "1000000000000000000"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa00000001": {
+          "balances": {},
+          "code": "0x6000600060006000600073bbbb0000000000000000000000000000000000bb620186a0f15060006000fd"
+        },
+        "bbbb0000000000000000000000000000000000bb00000001": {
+          "balances": {
+            "QKC": "5000",
+            "QETH": "7"
+          },
+          "code": "0x73cccc0000000000000000000000000000000000ccff",
+          "storage": {
+            "0x01": "0x2a"
+          }
+        }
+      },
+      "inputs": [
+        {
+          "kind": "transaction",
+          "transaction": {
+            "nonce": 0,
+            "gas_price": "1",
+            "start_gas": 300000,
+            "to": "0xaaaa0000000000000000000000000000000000aa",
+            "value": "0",
+            "data": "0x",
+            "network_id": 255,
+            "from_full_shard_key": 1,
+            "to_full_shard_key": 1,
+            "gas_token_id": 35760,
+            "transfer_token_id": 35760,
+            "version": 0,
+            "v": "27",
+            "r": "64988277407414884430676272209717019506151073786108823506034087051129269020144",
+            "s": "43496922543408922549513211720197949302033763861141913312495146163656209354435",
+            "sender": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "hash": "0xc9e57c200ee4e3efc297a49ef2fdd593abe114ce6e0f2742fe078f3585cf2207"
+          }
+        }
+      ],
+      "gas_used_start": 0,
+      "result": {
+        "success": false,
+        "output": "0x"
+      },
+      "post_state_root": "0x1309df09d6a650ce00c8bfd5f865e12a55789efe8eae0b8c87d587ac65203129",
+      "gas_used": 51732,
+      "xshard_receive_gas_used": 0,
+      "block_fee_tokens": {
+        "35760": "25866"
+      },
+      "receipts": [
+        {
+          "success": false,
+          "cumulative_gas_used": 51732,
+          "bloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "contract_address": "0x",
+          "contract_full_shard_key": 1,
+          "logs": []
+        }
+      ],
+      "xshard_deposit_receipts": [],
+      "xshard_list": [],
+      "accounts": {
+        "19e7e376e7c213b7e7e7e46cc70a5dd086daff2a": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "999999999999948268"
+          }
+        },
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0x74c6bf3a9ab50971104f311f6b8c3876d284787efd2e1d3e2df8aa3ac4cbf753",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {}
+        },
+        "bbbb0000000000000000000000000000000000bb": {
+          "nonce": 1,
+          "code_hash": "0x2c15a3a6718b8684605311cb48cb8f99d82d90fa08ca6facb58877a4caeba9df",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "5000",
+            "1280249": "7"
+          },
+          "storage": {
+            "0x01": "0x2a"
+          }
+        },
+        "cccc0000000000000000000000000000000000cc": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "25866"
           }
         }
       }
