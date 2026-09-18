@@ -11,6 +11,7 @@ import (
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/qkc/account"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -27,6 +28,47 @@ var (
 	qkcHeader3 = &types.MinorBlockHeader{Number: uint64(43)}
 	qkcHeaders = types.MinorBlockHeaders{qkcHeader1, qkcHeader2, qkcHeader3}
 )
+
+func TestQKCCrossShardLists(t *testing.T) {
+	db := memorydb.New()
+	defer db.Close()
+	hash := common.HexToHash("0x1234")
+	if got := ReadCrossShardTxList(db, hash); got != nil {
+		t.Fatal("missing list must be distinguishable from an empty list")
+	}
+	for _, deposits := range [][]*types.CrossShardTransactionDeposit{nil, {{
+		TxHash:      common.HexToHash("0x56"),
+		Value:       &serialize.Uint256{Value: big.NewInt(7)},
+		GasPrice:    &serialize.Uint256{Value: big.NewInt(8)},
+		GasRemained: &serialize.Uint256{Value: big.NewInt(9)},
+		MessageData: []byte{0xaa},
+		RefundRate:  100,
+	}}} {
+		list := types.NewCrossShardTransactionList(deposits)
+		if err := WriteCrossShardTxList(db, hash, list); err != nil {
+			t.Fatal(err)
+		}
+		stored := ReadCrossShardTxList(db, hash)
+		if stored == nil {
+			t.Fatal("stored list is missing")
+		}
+		want, err := serialize.SerializeToBytes(list)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := serialize.SerializeToBytes(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("list round trip: got %x, want %x", got, want)
+		}
+		key := append([]byte("qkc_xSL"), hash.Bytes()...)
+		if data, err := db.Get(key); err != nil || !bytes.Equal(data, want) {
+			t.Fatalf("source minor hash did not select the reference storage key: %x, %v", data, err)
+		}
+	}
+}
 
 func TestQKCBlockKeys(t *testing.T) {
 	hash := common.HexToHash("0x1234")

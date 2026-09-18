@@ -14,6 +14,7 @@ var (
 	minorHashPrefixQKC  = []byte("mn")       // qkcPrefix + minorHashPrefixQKC + num (uint64 big endian) -> minor canonical hash
 	rootBlockPrefixQKC  = []byte("rb")       // qkcPrefix + rootBlockPrefixQKC + hash -> root block
 	minorBlockPrefixQKC = []byte("mb")       // qkcPrefix + minorBlockPrefixQKC + hash -> minor block
+	xShardListPrefixQKC = []byte("xSL")      // qkcPrefix + xShardListPrefixQKC + source minor hash -> cross-shard tx list
 	rootHeadKey         = []byte("LastRoot") // qkcPrefix + rootHeadKey -> canonical root head hash
 )
 
@@ -47,6 +48,10 @@ func qkcRootBlockKey(hash common.Hash) []byte {
 
 func qkcMinorBlockKey(hash common.Hash) []byte {
 	return qkcKey(minorBlockPrefixQKC, hash.Bytes())
+}
+
+func qkcXShardTxListKey(hash common.Hash) []byte {
+	return qkcKey(xShardListPrefixQKC, hash.Bytes())
 }
 
 func qkcRootHeadKey() []byte {
