@@ -672,6 +672,72 @@ func TestSlaveComm_ConnectToSlaves(t *testing.T) {
 	})
 }
 
+// TestSlaveComm_ConnectToSlavesReportsPerEntryFailure pins the per-entry
+// contract of connectToSlaves: a failing dial fills that result slot with the
+// error text, a good entry next to it still lands in the pool, and the master
+// connection survives the failure (the bootstrap shutdown decision is the
+// master's, not the slave's). This is the path the removed Python interop test
+// used to validate, so a plain Go test stands in for it.
+func TestSlaveComm_ConnectToSlavesReportsPerEntryFailure(t *testing.T) {
+	comm, addr := startTestSlaveComm(t)
+	masterConn := dialComm(t, addr)
+
+	rs := startRemoteSlave(t, []byte("S1"), []uint32{0x00010001})
+	defer rs.close()
+
+	// A port we just freed: dialing it is refused, so this slot reports failure.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve dead port: %v", err)
+	}
+	deadPort := uint16(ln.Addr().(*net.TCPAddr).Port)
+	ln.Close()
+
+	req := &wire.ConnectToSlavesRequest{
+		SlaveInfoList: []wire.SlaveInfo{
+			// Unreachable entry: dial fails and is reported in its own slot.
+			{ID: []byte("S-dead"), Host: []byte("127.0.0.1"), Port: deadPort, FullShardIDList: []uint32{0x00010001}},
+			// Good entry beside it must still land in the pool.
+			rs.slaveInfo([]byte("S1"), []uint32{0x00010001}),
+		},
+	}
+	payload, err := serialize.SerializeToBytes(req)
+	if err != nil {
+		t.Fatalf("serialize connect request: %v", err)
+	}
+	sendFrame(t, masterConn, &wire.Frame{
+		Meta:    wire.ClusterMetadata{},
+		Opcode:  byte(wire.ClusterOpConnectToSlavesRequest),
+		RPCID:   1,
+		Payload: payload,
+	})
+
+	resp := readFrame(t, masterConn)
+	if resp.Opcode != byte(wire.ClusterOpConnectToSlavesResponse) {
+		t.Fatalf("unexpected response opcode 0x%x", resp.Opcode)
+	}
+	var out wire.ConnectToSlavesResponse
+	if err := serialize.DeserializeFromBytes(resp.Payload, &out); err != nil {
+		t.Fatalf("deserialize connect response: %v", err)
+	}
+	if len(out.ResultList) != 2 {
+		t.Fatalf("result list has %d entries, want 2", len(out.ResultList))
+	}
+	if len(out.ResultList[0]) == 0 {
+		t.Fatal("dead entry reported success, want failure text")
+	}
+	if len(out.ResultList[1]) != 0 {
+		t.Fatalf("good entry reported failure: %q", out.ResultList[1])
+	}
+	waitFor(t, "xshard pool registration of S1", func() bool {
+		return comm.xshardPool.hasSlaveID([]byte("S1"))
+	})
+
+	// The master connection survived the per-entry failure: a later PING is
+	// still answered.
+	sendPingRootTip(t, masterConn, 2, nil)
+}
+
 // TestSlaveComm_MasterCloseCascade verifies the Python close cascade: losing
 // the master closes all PeerConns, the xshard pool, and the listener.
 func TestSlaveComm_MasterCloseCascade(t *testing.T) {
