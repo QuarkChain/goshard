@@ -52,6 +52,18 @@ func setQKCTestBalance(statedb *state.StateDB, addr common.Address, tokenID, amo
 	statedb.SetBalanceByTokenID(addr, uint256.NewInt(amount), tokenID, tracing.BalanceChangeUnspecified)
 }
 
+func TestQKCProfileRejectsUnsupportedRules(t *testing.T) {
+	statedb, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+	require.NoError(t, err)
+	blockContext := qkcTestBlockContext(1)
+	random := common.Hash{}
+	blockContext.Random = &random
+	evm := NewEVM(blockContext, statedb, params.AllDevChainProtocolChanges, Config{})
+	t.Cleanup(evm.Release)
+	err = evm.SetQKCContext(&QKCContext{DefaultChainToken: qkccommon.DefaultTokenID})
+	require.ErrorIs(t, err, ErrQKCUnsupportedRules)
+}
+
 func TestQKCProfileUsesChainDefaultToken(t *testing.T) {
 	qeth := qkccommon.TokenIDEncode("QETH")
 	sender := common.HexToAddress("0x1001")
@@ -156,6 +168,46 @@ func TestQKCProfileCreateAddressAndTopLevelNonce(t *testing.T) {
 	require.Equal(t, uint64(1), statedb.GetNonce(address))
 	require.Equal(t, uint64(777), statedb.GetBalance(address).Uint64())
 	require.Equal(t, uint64(888), statedb.GetBalanceByTokenID(address, qkccommon.TokenIDEncode("QETH")).Uint64())
+}
+
+func TestQKCProfileCreateUsesNativeTracing(t *testing.T) {
+	caller := common.HexToAddress("0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a")
+	initCode := hexutil.MustDecode("0x60006000f3")
+	wantAddress := QKCContractAddress(caller, 1, 0)
+	var (
+		enterCount int
+		exitCount  int
+		enterType  byte
+		enterTo    common.Address
+	)
+	hooks := &tracing.Hooks{
+		OnEnter: func(_ int, typ byte, _ common.Address, to common.Address, _ []byte, _ uint64, _ *big.Int) {
+			enterCount++
+			enterType = typ
+			enterTo = to
+		},
+		OnExit: func(_ int, _ []byte, _ uint64, _ error, _ bool) {
+			exitCount++
+		},
+	}
+	statedb, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+	require.NoError(t, err)
+	evm := NewEVM(qkcTestBlockContext(1), statedb, petersburgOnlyChainConfig(), Config{Tracer: hooks})
+	evm.SetTxContext(TxContext{Origin: caller})
+	require.NoError(t, evm.SetQKCContext(&QKCContext{
+		DefaultChainToken: qkccommon.DefaultTokenID,
+		FromFullShardKey:  1,
+	}))
+	t.Cleanup(evm.Release)
+	statedb.SetNonce(caller, 1, tracing.NonceChangeUnspecified)
+
+	_, address, _, err := evm.QKCCreateContract(caller, initCode, NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, 1, nil)
+	require.NoError(t, err)
+	require.Equal(t, wantAddress, address)
+	require.Equal(t, 1, enterCount)
+	require.Equal(t, byte(CREATE), enterType)
+	require.Equal(t, wantAddress, enterTo)
+	require.Equal(t, 1, exitCount)
 }
 
 func TestQKCProfileNestedCreateChecksDefaultTokenBalance(t *testing.T) {

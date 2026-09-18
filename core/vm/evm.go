@@ -552,14 +552,20 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, common.Address{}, gas, ErrDepth
 	}
-	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
+	if evm.QKC != nil {
+		if evm.TxContext.Origin != caller && !evm.QKC.canTransfer(caller, value) {
+			return nil, common.Address{}, gas, ErrInsufficientBalance
+		}
+	} else if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
-	nonce := evm.StateDB.GetNonce(caller)
-	if nonce+1 < nonce {
-		return nil, common.Address{}, gas, ErrNonceUintOverflow
+	if evm.QKC == nil || evm.TxContext.Origin != caller {
+		nonce := evm.StateDB.GetNonce(caller)
+		if nonce+1 < nonce {
+			return nil, common.Address{}, gas, ErrNonceUintOverflow
+		}
+		evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
 	}
-	evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
 
 	// Charge the contract creation init gas in verkle mode
 	if evm.chainRules.IsEIP4762 {
@@ -622,21 +628,39 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 			evm.Config.Tracer.OnGasChange(prior, gas.RegularGas, tracing.GasChangeWitnessContractInit)
 		}
 	}
-	evm.Context.Transfer(evm.StateDB, caller, address, value, &evm.chainRules)
-
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
-	contract := NewContract(caller, address, value, gas, evm.jumpDests)
+	var contract *Contract
+	if evm.QKC != nil {
+		ret, gas, err = evm.qkcApplyMsg(&qkcMessage{
+			sender:          caller,
+			to:              address,
+			codeAddress:     address,
+			value:           value,
+			gas:             gas,
+			transfersValue:  true,
+			transferTokenID: evm.QKC.frame.transferTokenID,
+			toFullShardKey:  evm.QKC.frame.toFullShardKey,
+			isCreate:        true,
+			code:            code,
+		})
+		contract = NewContract(caller, address, value, gas, evm.jumpDests)
+		if err == nil {
+			ret, err = evm.completeNewContract(contract, address, ret)
+		}
+	} else {
+		evm.Context.Transfer(evm.StateDB, caller, address, value, &evm.chainRules)
+		contract = NewContract(caller, address, value, gas, evm.jumpDests)
 
-	// Explicitly set the code to a null hash to prevent caching of jump analysis
-	// for the initialization code.
-	contract.SetCallCode(common.Hash{}, code)
-	contract.IsDeployment = true
-
-	ret, err = evm.initNewContract(contract, address)
+		// Explicitly set the code to a null hash to prevent caching of jump analysis
+		// for the initialization code.
+		contract.SetCallCode(common.Hash{}, code)
+		contract.IsDeployment = true
+		ret, err = evm.initNewContract(contract, address)
+	}
 	if err != nil && (evm.chainRules.IsHomestead || err != ErrCodeStoreOutOfGas) {
 		evm.StateDB.RevertToSnapshot(snapshot)
-		if err != ErrExecutionReverted {
+		if err != ErrExecutionReverted && !errors.Is(err, ErrQKCUnsupportedMNT) {
 			contract.UseGas(GasCosts{RegularGas: contract.Gas.RegularGas}, evm.Config.Tracer, tracing.GasChangeCallFailedExecution)
 		}
 	}
@@ -650,7 +674,11 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 	if err != nil {
 		return ret, err
 	}
+	return evm.completeNewContract(contract, address, ret)
+}
 
+// completeNewContract validates and stores code returned by contract creation.
+func (evm *EVM) completeNewContract(contract *Contract, address common.Address, ret []byte) ([]byte, error) {
 	// Check whether the max code size has been exceeded, assign err if the case.
 	if err := CheckMaxCodeSize(&evm.chainRules, uint64(len(ret))); err != nil {
 		return ret, err
@@ -683,9 +711,6 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	if evm.QKC != nil {
-		if !evm.QKC.canTransfer(caller, value) {
-			return nil, common.Address{}, gas, ErrInsufficientBalance
-		}
 		return evm.qkcCreateContract(caller, code, gas, value,
 			evm.QKC.frame.transferTokenID, evm.QKC.frame.toFullShardKey, nil, nil)
 	}
@@ -699,9 +724,6 @@ func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value 
 // instead of the usual sender-and-nonce-hash as the address where the contract is initialized at.
 func (evm *EVM) Create2(caller common.Address, code []byte, gas GasBudget, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	if evm.QKC != nil {
-		if !evm.QKC.canTransfer(caller, endowment) {
-			return nil, common.Address{}, gas, ErrInsufficientBalance
-		}
 		saltHash := common.Hash(salt.Bytes32())
 		return evm.qkcCreateContract(caller, code, gas, endowment,
 			evm.QKC.frame.transferTokenID, evm.QKC.frame.toFullShardKey, nil, &saltHash)

@@ -7,7 +7,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -29,6 +28,8 @@ var (
 	ErrQKCTransferFailed = errors.New("qkc: token transfer failed")
 	// ErrQKCUnsupportedMNT abandons a block that reaches multi-native-token execution.
 	ErrQKCUnsupportedMNT = errors.New("qkc: multi-native-token execution is unsupported")
+	// ErrQKCUnsupportedRules rejects EVM rules that differ from QuarkChain's Petersburg profile.
+	ErrQKCUnsupportedRules = errors.New("qkc: execution profile requires Petersburg-only EVM rules")
 )
 
 // qkcStateDB is the state surface needed by the QuarkChain execution profile.
@@ -70,6 +71,14 @@ func (evm *EVM) SetQKCContext(ctx *QKCContext) error {
 	if ctx == nil {
 		evm.QKC = nil
 		return nil
+	}
+	rules := evm.chainRules
+	// QKC consensus is Petersburg-only. Reject newer instruction sets before
+	// their handlers can bypass token-aware semantics.
+	if !rules.IsPetersburg || rules.IsIstanbul || rules.IsBerlin || rules.IsLondon || rules.IsMerge ||
+		rules.IsShanghai || rules.IsCancun || rules.IsPrague || rules.IsOsaka || rules.IsAmsterdam ||
+		rules.IsUBT || len(evm.Config.ExtraEips) != 0 {
+		return ErrQKCUnsupportedRules
 	}
 	state, ok := evm.StateDB.(qkcStateDB)
 	if !ok {
@@ -291,64 +300,28 @@ func (evm *EVM) qkcCreateContract(caller common.Address, code []byte, gas GasBud
 	if tokenID != ctx.DefaultChainToken {
 		return nil, common.Address{}, gas, ctx.markUnsupported()
 	}
-	if evm.depth > int(params.CallCreateDepth) {
-		return nil, common.Address{}, gas, ErrDepth
-	}
-	if evm.TxContext.Origin != caller {
-		nonce := evm.StateDB.GetNonce(caller)
-		if nonce+1 < nonce {
-			return nil, common.Address{}, gas, ErrNonceUintOverflow
-		}
-		evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
-	}
 
+	typ := CREATE
 	switch {
 	case recipient != nil:
 		address = *recipient
 	case salt != nil:
 		address = crypto.CreateAddress2(caller, *salt, crypto.Keccak256(code))
+		typ = CREATE2
 	default:
-		address = qkcContractAddress(caller, shardKey, evm.StateDB.GetNonce(caller)-1)
+		nonce := evm.StateDB.GetNonce(caller)
+		if evm.TxContext.Origin == caller {
+			nonce-- // Admission already incremented a top-level creator's nonce.
+		}
+		address = qkcContractAddress(caller, shardKey, nonce)
 	}
-	codeHash := evm.StateDB.GetCodeHash(address)
-	if evm.StateDB.GetNonce(address) != 0 || (codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash) {
-		gas.Exhaust()
-		return nil, common.Address{}, gas, ErrContractAddressCollision
-	}
-	snapshot := evm.StateDB.Snapshot()
-	if !evm.StateDB.Exist(address) {
-		evm.StateDB.CreateAccount(address)
-	}
-	evm.StateDB.CreateContract(address)
-	evm.StateDB.SetNonce(address, 1, tracing.NonceChangeNewContract)
-
-	ret, gas, err = evm.qkcApplyMsg(&qkcMessage{
-		sender:          caller,
-		to:              address,
-		codeAddress:     address,
-		value:           value,
-		gas:             gas,
-		transfersValue:  true,
-		transferTokenID: tokenID,
-		toFullShardKey:  shardKey,
-		isCreate:        true,
-		code:            code,
-	})
+	previousFrame := ctx.enterFrame(qkcFrame{transferTokenID: tokenID, toFullShardKey: shardKey})
+	defer func() { ctx.frame = previousFrame }()
+	ret, address, leftOver, err = evm.create(caller, code, gas, value, address, typ)
 	if err != nil {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		return ret, common.Address{}, gas, err
+		address = common.Address{}
 	}
-	if len(ret) == 0 {
-		return nil, address, gas, nil
-	}
-	storeCost := uint64(len(ret)) * params.CreateDataGas
-	if _, ok := gas.Charge(GasCosts{RegularGas: storeCost}); !ok || uint64(len(ret)) > params.MaxCodeSize {
-		evm.StateDB.RevertToSnapshot(snapshot)
-		gas.Exhaust()
-		return nil, common.Address{}, gas, ErrCodeStoreOutOfGas
-	}
-	evm.StateDB.SetCode(address, ret, tracing.CodeChangeContractCreation)
-	return ret, address, gas, nil
+	return ret, address, leftOver, err
 }
 
 // QKCCreateContract enters contract creation from outside the interpreter.
