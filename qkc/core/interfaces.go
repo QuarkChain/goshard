@@ -4,6 +4,10 @@ package core
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/state"
+	coretypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
@@ -19,6 +23,39 @@ type ConnManager interface {
 type InsertOptions struct {
 	IsCheckDB   bool
 	ForceInsert bool
+}
+
+// XShardDepositCursor is the execution layer's view of incoming cross-shard
+// deposits. Root ancestry and eligibility remain owned by ShardCoordinator.
+type XShardDepositCursor interface {
+	GetNextTx() (*types.CrossShardTransactionDeposit, error)
+	GetCursorInfo() *types.XShardTxCursorInfo
+}
+
+// Processor applies a minor block to its parent state and returns the
+// deterministic outputs that must be validated and persisted with the block.
+// The concrete block processor is supplied by a separate PR.
+type Processor interface {
+	Process(block *types.MinorBlock, statedb *state.StateDB, cursor XShardDepositCursor, cfg vm.Config) (*ProcessResult, error)
+}
+
+// ProcessResult contains the values computed by Processor.Process.
+type ProcessResult struct {
+	Receipts       types.Receipts
+	Logs           []*coretypes.Log
+	GasUsed        uint64
+	XShardGasUsed  uint64
+	XShardCursor   *types.XShardTxCursorInfo
+	CoinbaseAmount *qkccommon.TokenBalances
+	OutgoingXShard []*types.CrossShardTransactionDeposit
+}
+
+// MinorBlockValidator checks context-free block commitments and compares them
+// with the outputs returned by Processor. Root-chain policy remains in
+// ShardCoordinator.
+type MinorBlockValidator interface {
+	ValidateBlock(block *types.MinorBlock) error
+	ValidateState(block *types.MinorBlock, statedb *state.StateDB, result *ProcessResult) error
 }
 
 // MinorChain owns local minor block execution, persistence and canonical indexes.
