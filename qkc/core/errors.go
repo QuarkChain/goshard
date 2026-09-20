@@ -14,6 +14,7 @@ var (
 	ErrNoCurrentBlock              = errors.New("minor chain current block is missing")
 	ErrUnknownBlock                = errors.New("unknown minor block")
 	ErrUnknownParent               = errors.New("unknown minor block parent")
+	ErrNonContiguousBlock          = errors.New("minor block does not extend its parent")
 	ErrStateUnavailable            = errors.New("minor block state is unavailable")
 	ErrExecutorUnavailable         = errors.New("block processor is unavailable")
 	ErrValidatorUnavailable        = errors.New("minor block validator is unavailable")
