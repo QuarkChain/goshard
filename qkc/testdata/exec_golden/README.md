@@ -9,11 +9,12 @@ the two configs in
 the configs goshard ships rather than to whatever a pyquarkchain checkout happens
 to carry.
 
-Three granularities are emitted, each with its own file and its own consumer. The first two are for unit tests, the last is for integration tests.
+Four granularities are emitted, each with its own file and its own consumer. The first three are for unit tests, the last is for integration tests.
 
 | file | input | pinned output |
 | --- | --- | --- |
 | `state_level.json` | direct pyquarkchain `State` mutations | post state root, per-account reads |
+| `vm_level.json` | direct pyquarkchain EVM messages | output, remaining gas, logs, post state root, per-account reads |
 | `message_level.json` | one signed transaction or one cross-shard deposit | post state root, receipts, gas counters, produced deposits, coinbase fees |
 | `block_level.json` | whole minor blocks against a shard built from its genesis, with a root chain alongside | the seven values a block commits to, plus the deposits it consumed |
 

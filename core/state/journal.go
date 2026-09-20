@@ -161,6 +161,10 @@ func (j *journal) createContract(addr common.Address) {
 	j.append(createContractChange{account: addr})
 }
 
+func (j *journal) contractStorageReset(addr common.Address) {
+	j.append(contractStorageResetChange{account: addr})
+}
+
 func (j *journal) destruct(addr common.Address) {
 	j.append(selfDestructChange{account: addr})
 }
@@ -239,6 +243,12 @@ type (
 	// This event happens prior to executing initcode. The journal-event simply
 	// manages the created-flag, in order to allow same-tx destruction.
 	createContractChange struct {
+		account common.Address
+	}
+	// contractStorageResetChange replaces a pre-existing balance-only account
+	// with its deployment incarnation. The old object remains in
+	// stateObjectsDestruct until commit removes its storage.
+	contractStorageResetChange struct {
 		account common.Address
 	}
 	selfDestructChange struct {
@@ -323,6 +333,23 @@ func (ch createContractChange) dirtied() (common.Address, bool) {
 
 func (ch createContractChange) copy() journalEntry {
 	return createContractChange{
+		account: ch.account,
+	}
+}
+
+func (ch contractStorageResetChange) revert(s *StateDB) {
+	if obj := s.stateObjectsDestruct[ch.account]; obj != nil {
+		s.setStateObject(obj)
+		delete(s.stateObjectsDestruct, ch.account)
+	}
+}
+
+func (ch contractStorageResetChange) dirtied() (common.Address, bool) {
+	return ch.account, true
+}
+
+func (ch contractStorageResetChange) copy() journalEntry {
+	return contractStorageResetChange{
 		account: ch.account,
 	}
 }

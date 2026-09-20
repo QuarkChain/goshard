@@ -67,6 +67,10 @@ func (s *hookedStateDB) GetMntBalance(addr common.Address, tokenID uint64) *uint
 	return s.inner.GetMntBalance(addr, tokenID)
 }
 
+func (s *hookedStateDB) SetFullShardKey(fullShardKey uint32) {
+	s.inner.SetFullShardKey(fullShardKey)
+}
+
 func (s *hookedStateDB) GetNonce(addr common.Address) uint64 {
 	return s.inner.GetNonce(addr)
 }

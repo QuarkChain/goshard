@@ -67,6 +67,15 @@ type BlockContext struct {
 	BlobBaseFee *big.Int       // Provides information for BLOBBASEFEE (0 if vm runs with NoBaseFee flag and 0 blob gas price)
 	Random      *common.Hash   // Provides information for PREVRANDAO
 	SlotNum     uint64         // Provides information for SLOTNUM
+
+	// SenderDisallowMap contains the proof-of-staked-work lock for each sender.
+	// A transfer is rejected when it would spend a locked balance.
+	SenderDisallowMap map[common.Address]*uint256.Int
+	// EVMEnableTimestamp and MNTEnableTimestamp gate QuarkChain's system
+	// contracts. The comparison is strict: a contract is active after its
+	// configured timestamp.
+	EVMEnableTimestamp uint64
+	MNTEnableTimestamp uint64
 }
 
 // TxContext provides the EVM with information about a transaction.
@@ -77,6 +86,12 @@ type TxContext struct {
 	GasPrice     *uint256.Int        // Provides information for GASPRICE (and is used to zero the basefee if NoBaseFee is set)
 	BlobHashes   []common.Hash       // Provides information for BLOBHASH
 	AccessEvents *state.AccessEvents // Capture all state accesses for this tx
+
+	// ToFullShardKey is the shard key inherited by accounts first observed while
+	// executing this message. FromFullShardKey is retained for the transaction
+	// boundary even though the VM only needs the destination key.
+	FromFullShardKey uint32
+	ToFullShardKey   uint32
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
@@ -128,6 +143,14 @@ type EVM struct {
 	readOnly   bool   // Whether to throw on stateful modifications
 	returnData []byte // Last CALL's return data for subsequent reuse
 
+	// qkcUnsupportedMNT is set by a nested MNT precompile call. Opcode handlers
+	// turn child errors into failure results, so the enclosing message checks it
+	// after Run and abandons the whole block.
+	qkcUnsupportedMNT error
+	// qkcExecution applies QKC's top-level CREATE nonce convention after
+	// QKCApplyMessage or QKCCreateContract has entered the VM.
+	qkcExecution bool
+
 	arena *stackArena
 }
 
@@ -145,7 +168,7 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		jumpDests:   newMapJumpDests(),
 		arena:       newArena(),
 	}
-	evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	evm.precompiles = qkcPrecompiledContracts(evm.chainRules)
 
 	switch {
 	case evm.chainRules.IsAmsterdam:
@@ -218,6 +241,11 @@ func (evm *EVM) SetTxContext(txCtx TxContext) {
 		txCtx.AccessEvents = state.NewAccessEvents()
 	}
 	evm.TxContext = txCtx
+	evm.qkcUnsupportedMNT = nil
+	evm.qkcExecution = false
+	if evm.StateDB != nil {
+		evm.StateDB.SetFullShardKey(txCtx.ToFullShardKey)
+	}
 }
 
 // Cancel cancels any running EVM operation. This may be called concurrently and
@@ -263,8 +291,15 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 	if !syscall && !value.IsZero() && !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, gas, ErrInsufficientBalance
 	}
+	if evm.qkcPOSWDisallows(caller, value) {
+		return nil, GasBudget{}, ErrQKCSenderDisallowed
+	}
 	snapshot := evm.StateDB.Snapshot()
-	p, isPrecompile := evm.precompile(addr)
+	p, isPrecompile, specialErr := evm.qkcSpecial(addr)
+	if specialErr != nil {
+		evm.StateDB.RevertToSnapshot(snapshot)
+		return nil, gas, specialErr
+	}
 	if !evm.StateDB.Exist(addr) {
 		if !isPrecompile && evm.chainRules.IsEIP4762 && !isSystemCall(caller) {
 			// Add proof of absence to witness
@@ -309,6 +344,9 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			contract.SetCallCode(evm.resolveCodeHash(addr), code)
 			ret, err = evm.Run(contract, input, false)
 			gas = contract.Gas
+			if evm.qkcUnsupportedMNT != nil {
+				err = evm.qkcUnsupportedMNT
+			}
 		}
 	}
 	// When an error was returned by the EVM or when setting the creation code
@@ -355,10 +393,16 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, gas, ErrInsufficientBalance
 	}
+	if evm.qkcPOSWDisallows(caller, value) {
+		return nil, GasBudget{}, ErrQKCSenderDisallowed
+	}
 	var snapshot = evm.StateDB.Snapshot()
 
 	// It is allowed to call precompiles, even via delegatecall
-	if p, isPrecompile := evm.precompile(addr); isPrecompile {
+	if p, isPrecompile, specialErr := evm.qkcSpecial(addr); specialErr != nil {
+		evm.StateDB.RevertToSnapshot(snapshot)
+		return nil, gas, specialErr
+	} else if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
@@ -367,6 +411,9 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
 		gas = contract.Gas
+		if evm.qkcUnsupportedMNT != nil {
+			err = evm.qkcUnsupportedMNT
+		}
 	}
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
@@ -398,10 +445,16 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
+	if evm.qkcPOSWDisallows(originCaller, value) {
+		return nil, GasBudget{}, ErrQKCSenderDisallowed
+	}
 	var snapshot = evm.StateDB.Snapshot()
 
 	// It is allowed to call precompiles, even via delegatecall
-	if p, isPrecompile := evm.precompile(addr); isPrecompile {
+	if p, isPrecompile, specialErr := evm.qkcSpecial(addr); specialErr != nil {
+		evm.StateDB.RevertToSnapshot(snapshot)
+		return nil, gas, specialErr
+	} else if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
 		// Initialise a new contract and make initialise the delegate values
@@ -411,6 +464,9 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
 		gas = contract.Gas
+		if evm.qkcUnsupportedMNT != nil {
+			err = evm.qkcUnsupportedMNT
+		}
 	}
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
@@ -440,6 +496,9 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	if evm.depth > int(params.CallCreateDepth) {
 		return nil, gas, ErrDepth
 	}
+	if evm.qkcPOSWDisallows(caller, new(uint256.Int)) {
+		return nil, GasBudget{}, ErrQKCSenderDisallowed
+	}
 	// We take a snapshot here. This is a bit counter-intuitive, and could probably be skipped.
 	// However, even a staticcall is considered a 'touch'. On mainnet, static calls were introduced
 	// after all empty accounts were deleted, so this is not required. However, if we omit this,
@@ -453,7 +512,10 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	// future scenarios
 	evm.StateDB.AddBalance(addr, new(uint256.Int), tracing.BalanceChangeTouchAccount)
 
-	if p, isPrecompile := evm.precompile(addr); isPrecompile {
+	if p, isPrecompile, specialErr := evm.qkcSpecial(addr); specialErr != nil {
+		evm.StateDB.RevertToSnapshot(snapshot)
+		return nil, gas, specialErr
+	} else if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
@@ -466,6 +528,9 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 		// when we're in Homestead this also counts for code storage gas errors.
 		ret, err = evm.Run(contract, input, true)
 		gas = contract.Gas
+		if evm.qkcUnsupportedMNT != nil {
+			err = evm.qkcUnsupportedMNT
+		}
 	}
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
@@ -495,11 +560,13 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
-	nonce := evm.StateDB.GetNonce(caller)
-	if nonce+1 < nonce {
-		return nil, common.Address{}, gas, ErrNonceUintOverflow
+	if !evm.qkcExecution || evm.TxContext.Origin != caller {
+		nonce := evm.StateDB.GetNonce(caller)
+		if nonce+1 < nonce {
+			return nil, common.Address{}, gas, ErrNonceUintOverflow
+		}
+		evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
 	}
-	evm.StateDB.SetNonce(caller, nonce+1, tracing.NonceChangeContractCreator)
 
 	// Charge the contract creation init gas in verkle mode
 	if evm.chainRules.IsEIP4762 {
@@ -587,6 +654,9 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 // resulting code that is to be deployed, and consumes necessary gas.
 func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]byte, error) {
 	ret, err := evm.Run(contract, nil, false)
+	if evm.qkcUnsupportedMNT != nil {
+		return ret, evm.qkcUnsupportedMNT
+	}
 	if err != nil {
 		return ret, err
 	}
@@ -622,7 +692,18 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
-	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
+	if !evm.qkcExecution {
+		contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
+		return evm.create(caller, code, gas, value, contractAddr, CREATE)
+	}
+	nonce := evm.StateDB.GetNonce(caller)
+	if evm.TxContext.Origin == caller {
+		if nonce == 0 {
+			return nil, common.Address{}, gas, ErrNonceUintOverflow
+		}
+		nonce--
+	}
+	contractAddr = QKCContractAddress(caller, evm.TxContext.ToFullShardKey, nonce)
 	return evm.create(caller, code, gas, value, contractAddr, CREATE)
 }
 

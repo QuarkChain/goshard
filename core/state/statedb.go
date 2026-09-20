@@ -685,6 +685,23 @@ func (s *StateDB) CreateAccount(addr common.Address) {
 // correctly handle EIP-6780 'delete-in-same-transaction' logic.
 func (s *StateDB) CreateContract(addr common.Address) {
 	obj := s.getStateObject(addr)
+	// QKC permits deployment onto an existing balance-only account. Its storage
+	// belongs to the old account incarnation and must not survive deployment.
+	// Keep the old object in the normal destruction lifecycle so both commit and
+	// snapshot reverts handle the storage wipe atomically.
+	if obj.origin != nil {
+		if _, reset := s.stateObjectsDestruct[addr]; !reset {
+			s.stateObjectsDestruct[addr] = obj
+			s.journal.contractStorageReset(addr)
+
+			obj = newObject(s, addr, nil)
+			obj.data.FullShardKey = s.stateObjectsDestruct[addr].data.FullShardKey
+			if balances := s.stateObjectsDestruct[addr].data.MntBalances; balances != nil {
+				obj.data.MntBalances = balances.Copy()
+			}
+			s.setStateObject(obj)
+		}
+	}
 	if !obj.newContract {
 		obj.newContract = true
 		s.journal.createContract(addr)
