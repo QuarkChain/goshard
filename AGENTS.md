@@ -31,11 +31,6 @@ This builds all executables under `cmd/`, including `keeper` which has special b
 
 ### 3. Tests
 
-After code change is complete or required by code review, delegate testing to
-`test_runner` (fixed model: `gpt-5.6-luna`). The test agent must not modify
-code and must report the executed checks and their factual results; the main
-agent handles interpretation and any follow-up fixes.
-
 While iterating during development, use `-short` for faster feedback:
 
 ```sh
