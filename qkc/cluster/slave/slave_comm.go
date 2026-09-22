@@ -17,11 +17,11 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/types"
 )
 
-// MasterBackend defines the business operations required by the Master side
-// of SlaveComm. It is implemented by the external slave runtime; SlaveComm
+// Backend is the slave-side business logic that serves requests received
+// from the master. It is implemented by the external slave runtime; SlaveComm
 // owns the communication orchestration and does not expose MasterConn's
 // protocol-level handler interface to the runtime.
-type MasterBackend interface {
+type Backend interface {
 	// ShardCreator creates the business runtime's shards for a root tip
 	// and returns the newly-created branches.
 	ShardCreator(rootTip *types.RootBlock) ([]uint32, error)
@@ -60,9 +60,9 @@ type MasterBackend interface {
 // masterHandler is the MasterHandler SlaveComm installs into MasterConn. It
 // combines SlaveComm's communication orchestration with the external business
 // backend: the topology & shard-activation commands below are served by
-// SlaveComm itself; the business RPCs are embedded MasterBackend methods.
+// SlaveComm itself; the business RPCs are embedded Backend methods.
 type masterHandler struct {
-	MasterBackend
+	Backend
 	comm *SlaveComm
 }
 
@@ -71,8 +71,8 @@ var _ MasterHandler = (*masterHandler)(nil)
 // newMasterHandler builds the MasterHandler MasterConn is configured with.
 func (s *SlaveComm) newMasterHandler() MasterHandler {
 	return &masterHandler{
-		MasterBackend: s.cfg.Master,
-		comm:          s,
+		Backend: s.cfg.Backend,
+		comm:    s,
 	}
 }
 
@@ -117,8 +117,8 @@ type SlaveConfig struct {
 	// MaxPayloadSize limits incoming frame payload size; 0 disables the limit.
 	MaxPayloadSize uint32
 
-	// Master handles business RPCs routed through MasterConn.
-	Master MasterBackend
+	// Backend serves the business RPCs routed through MasterConn.
+	Backend Backend
 	// Peer builds and serves slave-to-slave PeerConns for virtual cluster peers.
 	Peer PeerHandler
 	// Xshard serves requests received through XshardConns.
@@ -144,8 +144,8 @@ func (cfg *SlaveConfig) Validate() error {
 		return errors.New("cluster full shard id list is required")
 	}
 
-	if cfg.Master == nil {
-		return errors.New("master handler must not be nil")
+	if cfg.Backend == nil {
+		return errors.New("backend must not be nil")
 	}
 	if cfg.Peer == nil {
 		return errors.New("peer handler must not be nil")
@@ -452,7 +452,7 @@ func (s *SlaveComm) connectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.Con
 // are skipped.
 func (s *SlaveComm) createShards(rootTip *types.RootBlock) error {
 	// A business failure fails the PING before any topology change.
-	createdBranches, err := s.cfg.Master.ShardCreator(rootTip)
+	createdBranches, err := s.cfg.Backend.ShardCreator(rootTip)
 	if err != nil {
 		return err
 	}

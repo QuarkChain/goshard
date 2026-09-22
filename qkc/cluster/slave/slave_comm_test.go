@@ -88,7 +88,7 @@ func startTestSlaveCommWithBranches(t *testing.T, preCreated []uint32) (*SlaveCo
 			ClusterFullShardIDList: append([]uint32(nil), testSlaveShards...),
 			Port:                   port,
 			Logger:                 log.New(),
-			Master:                 handler,
+			Backend:                handler,
 			Peer:                   stubPeerHandler{},
 			Xshard:                 testXshardHandler{},
 		})
@@ -379,7 +379,7 @@ func TestSlaveComm_CreateAndDestroyPeerConn(t *testing.T) {
 func TestSlaveComm_PingDelegatesCreateShardsAndBackfills(t *testing.T) {
 	comm, addr := startTestSlaveComm(t)
 	masterConn := dialComm(t, addr)
-	handler := comm.cfg.Master.(*commTestHandler)
+	handler := comm.cfg.Backend.(*commTestHandler)
 
 	// PING with a RootTip before any peer exists: business CreateShards runs,
 	// the registry stays empty.
@@ -429,7 +429,7 @@ func TestSlaveComm_PingDelegatesCreateShardsAndBackfills(t *testing.T) {
 func TestSlaveComm_PingAfterDestroyKeepsPeerGone(t *testing.T) {
 	comm, addr := startTestSlaveComm(t)
 	masterConn := dialComm(t, addr)
-	handler := comm.cfg.Master.(*commTestHandler)
+	handler := comm.cfg.Backend.(*commTestHandler)
 
 	const cid = 15
 	if code := sendCreatePeer(t, masterConn, 1, cid); code != 0 {
@@ -465,7 +465,7 @@ func TestSlaveComm_PingAfterDestroyKeepsPeerGone(t *testing.T) {
 // afterwards lands on every already-created branch.
 func TestSlaveComm_CreateShardsEquipsEveryConfiguredBranch(t *testing.T) {
 	comm, addr := startTestSlaveCommWithBranches(t, nil)
-	handler := comm.cfg.Master.(*commTestHandler)
+	handler := comm.cfg.Backend.(*commTestHandler)
 	masterConn := dialComm(t, addr)
 
 	const cid = 21
@@ -512,7 +512,7 @@ func TestSlaveComm_CreateShardsEquipsEveryConfiguredBranch(t *testing.T) {
 // once (py: the create_shards exception propagates through handle_ping).
 func TestSlaveComm_CreateShardsFailureLeavesTopology(t *testing.T) {
 	comm, addr := startTestSlaveCommWithBranches(t, nil)
-	handler := comm.cfg.Master.(*commTestHandler)
+	handler := comm.cfg.Backend.(*commTestHandler)
 	masterConn := dialComm(t, addr)
 
 	const cid = 31
@@ -544,7 +544,7 @@ func TestSlaveComm_CreateShardsFailureLeavesTopology(t *testing.T) {
 // changes nothing.
 func TestSlaveComm_PingCreatesEveryReportedBranch(t *testing.T) {
 	comm, addr := startTestSlaveCommWithBranches(t, nil)
-	handler := comm.cfg.Master.(*commTestHandler)
+	handler := comm.cfg.Backend.(*commTestHandler)
 	masterConn := dialComm(t, addr)
 
 	const cid = 32
