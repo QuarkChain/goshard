@@ -266,3 +266,197 @@ func storageTestShardConfig() *config.ShardConfig {
 	shardConfig.ShardID = 0
 	return shardConfig
 }
+
+func TestMinorBlockChainCanonicalTransitions(t *testing.T) {
+	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
+		return validImportTestResult(block)
+	}}
+	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	first := insertHeadTestBlock(t, chain, genesis, 1)
+	second := insertHeadTestBlock(t, chain, first, 2)
+	third := insertHeadTestBlock(t, chain, second, 3)
+	side := insertHeadTestBlock(t, chain, genesis, 101)
+	sideChild := insertHeadTestBlock(t, chain, side, 102)
+
+	transitions := []struct {
+		name   string
+		target *types.MinorBlock
+		want   [3]common.Hash
+	}{
+		{name: "extension", target: third, want: [3]common.Hash{first.Hash(), second.Hash(), third.Hash()}},
+		{name: "shorter fork", target: sideChild, want: [3]common.Hash{side.Hash(), sideChild.Hash(), {}}},
+		{name: "same-height fork", target: second, want: [3]common.Hash{first.Hash(), second.Hash(), {}}},
+		{name: "longer extension", target: third, want: [3]common.Hash{first.Hash(), second.Hash(), third.Hash()}},
+		{name: "rewind", target: genesis, want: [3]common.Hash{}},
+		{name: "extend after rewind", target: second, want: [3]common.Hash{first.Hash(), second.Hash(), {}}},
+	}
+	for _, transition := range transitions {
+		t.Run(transition.name, func(t *testing.T) {
+			if err := chain.SetCanonicalHead(transition.target.Hash()); err != nil {
+				t.Fatal(err)
+			}
+			if current := chain.CurrentBlock(); current == nil || current.Hash() != transition.target.Hash() {
+				t.Fatalf("current block = %v, want %s", current, transition.target.Hash())
+			}
+			if got := rawdb.ReadHeadBlockHash(db); got != transition.target.Hash() {
+				t.Fatalf("head block marker = %s, want %s", got, transition.target.Hash())
+			}
+			if got := rawdb.ReadHeadHeaderHash(db); got != transition.target.Hash() {
+				t.Fatalf("head header marker = %s, want %s", got, transition.target.Hash())
+			}
+			for index, want := range transition.want {
+				number := uint64(index + 1)
+				if got := rawdb.ReadMinorCanonicalHash(db, number); got != want {
+					t.Errorf("canonical height %d = %s, want %s", number, got, want)
+				}
+			}
+		})
+	}
+	for _, block := range []*types.MinorBlock{first, second, third, side, sideChild} {
+		if !chain.HasBlockAndState(block.Hash()) {
+			t.Errorf("canonical transitions removed candidate %s", block.Hash())
+		}
+	}
+}
+
+func TestMinorBlockChainSetCanonicalHeadRejectsUnavailableTarget(t *testing.T) {
+	t.Run("unknown block", func(t *testing.T) {
+		chain, _, _ := newHeadTestChain(t)
+		if err := chain.SetCanonicalHead(common.HexToHash("0x1234")); !errors.Is(err, ErrUnknownBlock) {
+			t.Fatalf("error = %v, want %v", err, ErrUnknownBlock)
+		}
+	})
+
+	t.Run("missing state", func(t *testing.T) {
+		chain, db, genesis := newHeadTestChain(t)
+		block := storageTestBlock(genesis, 1, common.HexToHash("0xdeadbeef"))
+		rawdb.WriteMinorBlock(db, block)
+		if err := chain.SetCanonicalHead(block.Hash()); !errors.Is(err, ErrStateUnavailable) {
+			t.Fatalf("error = %v, want %v", err, ErrStateUnavailable)
+		}
+		assertHeadTestGenesis(t, chain, db, genesis)
+	})
+
+	t.Run("missing ancestor", func(t *testing.T) {
+		chain, db, genesis := newHeadTestChain(t)
+		block := storageTestBlock(nil, 2, coretypes.EmptyRootHash)
+		rawdb.WriteMinorBlock(db, block)
+		if err := chain.SetCanonicalHead(block.Hash()); !errors.Is(err, ErrUnknownParent) {
+			t.Fatalf("error = %v, want %v", err, ErrUnknownParent)
+		}
+		assertHeadTestGenesis(t, chain, db, genesis)
+	})
+
+	t.Run("non-contiguous ancestor", func(t *testing.T) {
+		chain, db, genesis := newHeadTestChain(t)
+		block := storageTestBlock(genesis, 2, coretypes.EmptyRootHash)
+		rawdb.WriteMinorBlock(db, block)
+		if err := chain.SetCanonicalHead(block.Hash()); !errors.Is(err, ErrNonContiguousBlock) {
+			t.Fatalf("error = %v, want %v", err, ErrNonContiguousBlock)
+		}
+		assertHeadTestGenesis(t, chain, db, genesis)
+	})
+}
+
+func TestMinorBlockChainSetCanonicalHeadBatchFailureIsAtomic(t *testing.T) {
+	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
+		return validImportTestResult(block)
+	}}
+	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	first := insertHeadTestBlock(t, chain, genesis, 1)
+	second := insertHeadTestBlock(t, chain, first, 2)
+	third := insertHeadTestBlock(t, chain, second, 3)
+	side := insertHeadTestBlock(t, chain, genesis, 101)
+	sideChild := insertHeadTestBlock(t, chain, side, 102)
+	if err := chain.SetCanonicalHead(third.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	db.failWrites = true
+
+	err := chain.SetCanonicalHead(sideChild.Hash())
+	if !errors.Is(err, errMinorChainTestBatch) {
+		t.Fatalf("error = %v, want %v", err, errMinorChainTestBatch)
+	}
+	if db.openBatches != 0 {
+		t.Fatalf("failed canonical update left %d batches open", db.openBatches)
+	}
+	if current := chain.CurrentBlock(); current == nil || current.Hash() != third.Hash() {
+		t.Fatalf("current block = %v, want %s", current, third.Hash())
+	}
+	if got := rawdb.ReadHeadBlockHash(db); got != third.Hash() {
+		t.Fatalf("head block marker = %s, want %s", got, third.Hash())
+	}
+	if got := rawdb.ReadHeadHeaderHash(db); got != third.Hash() {
+		t.Fatalf("head header marker = %s, want %s", got, third.Hash())
+	}
+	for number, want := range map[uint64]common.Hash{1: first.Hash(), 2: second.Hash(), 3: third.Hash()} {
+		if got := rawdb.ReadMinorCanonicalHash(db, number); got != want {
+			t.Errorf("canonical height %d = %s, want %s", number, got, want)
+		}
+	}
+}
+
+func TestMinorBlockChainCanonicalHeadSurvivesRestart(t *testing.T) {
+	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
+		return validImportTestResult(block)
+	}}
+	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	block := insertHeadTestBlock(t, chain, genesis, 1)
+	if err := chain.SetCanonicalHead(block.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	chain.Stop()
+
+	reopened, err := NewMinorBlockChain(db, storageTestShardConfig(), processor, NewBasicMinorBlockValidator(), vm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(reopened.Stop)
+	if current := reopened.CurrentBlock(); current == nil || current.Hash() != block.Hash() {
+		t.Fatalf("restored current block = %v, want %s", current, block.Hash())
+	}
+	if canonical := reopened.GetBlockByNumber(1); canonical == nil || canonical.Hash() != block.Hash() {
+		t.Fatalf("restored canonical block = %v, want %s", canonical, block.Hash())
+	}
+}
+
+func TestMinorBlockChainSetCanonicalHeadAfterStop(t *testing.T) {
+	chain, _, genesis := newHeadTestChain(t)
+	chain.Stop()
+	if err := chain.SetCanonicalHead(genesis.Hash()); !errors.Is(err, ErrChainStopped) {
+		t.Fatalf("error = %v, want %v", err, ErrChainStopped)
+	}
+}
+
+func newHeadTestChain(t *testing.T) (*MinorBlockChain, *batchTrackingDatabase, *types.MinorBlock) {
+	t.Helper()
+	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
+		return validImportTestResult(block)
+	}}
+	return newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+}
+
+func insertHeadTestBlock(t *testing.T, chain *MinorBlockChain, parent *types.MinorBlock, nonce uint64) *types.MinorBlock {
+	t.Helper()
+	block := newImportTestBlock(t, parent, nonce)
+	if _, err := chain.InsertBlockWithXShardInput(block, nil, InsertOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	return block
+}
+
+func assertHeadTestGenesis(t *testing.T, chain *MinorBlockChain, db *batchTrackingDatabase, genesis *types.MinorBlock) {
+	t.Helper()
+	if current := chain.CurrentBlock(); current == nil || current.Hash() != genesis.Hash() {
+		t.Fatalf("current block = %v, want genesis %s", current, genesis.Hash())
+	}
+	if got := rawdb.ReadHeadBlockHash(db); got != genesis.Hash() {
+		t.Fatalf("head block marker = %s, want genesis %s", got, genesis.Hash())
+	}
+	if got := rawdb.ReadHeadHeaderHash(db); got != genesis.Hash() {
+		t.Fatalf("head header marker = %s, want genesis %s", got, genesis.Hash())
+	}
+	if got := rawdb.ReadMinorCanonicalHash(db, 1); got != (common.Hash{}) {
+		t.Fatalf("canonical height 1 = %s, want empty", got)
+	}
+}

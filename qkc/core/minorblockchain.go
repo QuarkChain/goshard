@@ -176,6 +176,101 @@ func (c *MinorBlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, state.NewMPTDatabase(c.triedb, c.codedb))
 }
 
+// SetCanonicalHead applies the local canonical indexes for a candidate chosen
+// by ShardCoordinator. Root-chain fork choice remains outside MinorBlockChain.
+func (c *MinorBlockChain) SetCanonicalHead(hash common.Hash) error {
+	if !c.chainmu.TryLock() {
+		return ErrChainStopped
+	}
+	defer c.chainmu.Unlock()
+	target := c.GetBlock(hash)
+	if target == nil {
+		return ErrUnknownBlock
+	}
+	return c.setHead(target)
+}
+
+// setHead assumes chainmu is held.
+func (c *MinorBlockChain) setHead(target *types.MinorBlock) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if target == nil {
+		return ErrUnknownBlock
+	}
+	if !c.HasState(target.Root()) {
+		return ErrStateUnavailable
+	}
+	current := c.current
+	if current == nil {
+		return ErrNoCurrentBlock
+	}
+	type canonicalBlock struct {
+		hash   common.Hash
+		number uint64
+	}
+	newCanonicalBlocks := make([]canonicalBlock, 0)
+	oldHead := current
+	newHead := target
+	for oldHead.NumberU64() > newHead.NumberU64() {
+		var err error
+		oldHead, err = c.parentBlock(oldHead)
+		if err != nil {
+			return err
+		}
+	}
+	for newHead.NumberU64() > oldHead.NumberU64() {
+		newCanonicalBlocks = append(newCanonicalBlocks, canonicalBlock{hash: newHead.Hash(), number: newHead.NumberU64()})
+		var err error
+		newHead, err = c.parentBlock(newHead)
+		if err != nil {
+			return err
+		}
+	}
+	for oldHead.Hash() != newHead.Hash() {
+		newCanonicalBlocks = append(newCanonicalBlocks, canonicalBlock{hash: newHead.Hash(), number: newHead.NumberU64()})
+		var err error
+		oldHead, err = c.parentBlock(oldHead)
+		if err != nil {
+			return err
+		}
+		newHead, err = c.parentBlock(newHead)
+		if err != nil {
+			return err
+		}
+	}
+	batch := c.db.NewBatch()
+	defer batch.Close()
+	for number := current.NumberU64(); number > target.NumberU64(); number-- {
+		rawdb.DeleteMinorCanonicalHash(batch, number)
+	}
+	for index := len(newCanonicalBlocks) - 1; index >= 0; index-- {
+		block := newCanonicalBlocks[index]
+		rawdb.WriteMinorCanonicalHash(batch, block.hash, block.number)
+	}
+	rawdb.WriteHeadHeaderHash(batch, target.Hash())
+	rawdb.WriteHeadBlockHash(batch, target.Hash())
+	if err := batch.Write(); err != nil {
+		return fmt.Errorf("write canonical minor head: %w", err)
+	}
+	c.current = target
+	return nil
+}
+
+func (c *MinorBlockChain) parentBlock(block *types.MinorBlock) (*types.MinorBlock, error) {
+	if block.NumberU64() == 0 {
+		return nil, fmt.Errorf("minor block %s at height 0 has no valid parent: %w", block.Hash(), ErrNonContiguousBlock)
+	}
+	parent := c.GetBlock(block.ParentHash())
+	if parent == nil {
+		return nil, fmt.Errorf("minor block %s parent %s: %w", block.Hash(), block.ParentHash(), ErrUnknownParent)
+	}
+	if parent.NumberU64() != block.NumberU64()-1 {
+		return nil, fmt.Errorf("minor block %s at height %d has parent %s at height %d: %w",
+			block.Hash(), block.NumberU64(), parent.Hash(), parent.NumberU64(), ErrNonContiguousBlock)
+	}
+	return parent, nil
+}
+
 // Stop closes the chain's state backend. The caller retains ownership of db.
 func (c *MinorBlockChain) Stop() {
 	c.stopOnce.Do(func() {
