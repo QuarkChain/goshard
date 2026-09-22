@@ -161,6 +161,9 @@ func (s *StateDB) DeltaTokenBalance(addr common.Address, tokenID uint64, delta *
 		if overflow {
 			return fmt.Errorf("account %s: token %d credit overflows 256 bits", addr.Hex(), tokenID)
 		}
+		if _, overflow := new(uint256.Int).AddOverflow(s.GetBalanceByTokenID(addr, tokenID), amount); overflow {
+			return fmt.Errorf("account %s: token %d balance overflows 256 bits", addr.Hex(), tokenID)
+		}
 		s.AddBalanceByTokenID(addr, amount, tokenID, tracing.BalanceChangeUnspecified)
 		return nil
 	}
