@@ -135,8 +135,13 @@ func checkQKCVMGoldenAccounts(t *testing.T, statedb *state.StateDB, accounts map
 			codeHash = types.EmptyCodeHash
 		}
 		require.Equal(t, common.HexToHash(expected.CodeHash), codeHash, "%s code hash", encoded)
-		require.Equal(t, expected.FullShardKey, statedb.GetFullShardKey(address), "%s full shard key", encoded)
 		require.Equal(t, expected.Exists, statedb.Exist(address), "%s existence", encoded)
+		if expected.Exists {
+			account, err := statedb.Reader().Account(address)
+			require.NoError(t, err, "%s account", encoded)
+			require.NotNil(t, account, "%s account", encoded)
+			require.Equal(t, expected.FullShardKey, account.FullShardKey, "%s full shard key", encoded)
+		}
 
 		balances := statedb.GetTokenBalances(address)
 		require.Len(t, balances, len(expected.Balances), "%s token balance count", encoded)

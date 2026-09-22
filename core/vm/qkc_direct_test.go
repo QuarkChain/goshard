@@ -210,27 +210,28 @@ func TestQKCMNTPrecompileInInitCodeAbandonsMessage(t *testing.T) {
 	require.False(t, statedb.Exist(contract))
 }
 
-func TestQKCCreateClearsStorageOnBalanceOnlyAccount(t *testing.T) {
+func TestQKCCreatePreservesPreexistingAccountStorage(t *testing.T) {
 	caller := common.HexToAddress("0x7201")
 	contract := common.HexToAddress("0x7202")
 	key := common.HexToHash("0x01")
+	value := common.HexToHash("0x2a")
 	evm, statedb := newQKCDirectEVM(t, BlockContext{BlockNumber: big.NewInt(1)}, caller, 1)
 	statedb.SetBalance(contract, uint256.NewInt(7), tracing.BalanceChangeUnspecified)
-	statedb.SetState(contract, key, common.HexToHash("0x2a"))
+	statedb.SetState(contract, key, value)
 	statedb = persistQKCState(t, evm, statedb)
 
 	_, address, _, err := evm.QKCCreateContract(caller, common.FromHex("0x60006000f3"), NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, 1, &contract)
 	require.NoError(t, err)
 	require.Equal(t, contract, address)
 	require.Equal(t, uint64(7), statedb.GetBalance(contract).Uint64())
-	require.Equal(t, common.Hash{}, statedb.GetState(contract, key))
+	require.Equal(t, value, statedb.GetState(contract, key))
 	statedb.Finalise(true)
 	root, err := statedb.Commit(0, false, false)
 	require.NoError(t, err)
 	statedb, err = state.New(root, statedb.Database())
 	require.NoError(t, err)
 	require.Equal(t, uint64(7), statedb.GetBalance(contract).Uint64())
-	require.Equal(t, common.Hash{}, statedb.GetState(contract, key))
+	require.Equal(t, value, statedb.GetState(contract, key))
 }
 
 func TestQKCCreateRevertPreservesExistingStorage(t *testing.T) {
