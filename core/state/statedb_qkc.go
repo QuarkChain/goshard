@@ -4,12 +4,35 @@ package state
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/ethdb"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 )
+
+// NewQKCDatabase opens the lossless hash-keyed MPT database required by
+// QuarkChain account encoding.
+func NewQKCDatabase(db ethdb.Database) Database {
+	return NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), NewCodeDB(db))
+}
+
+// NewQKC opens the state named by root after checking that the database can
+// encode QuarkChain accounts without loss.
+func NewQKC(root common.Hash, db Database) (*StateDB, error) {
+	if db.Type() != TypeMPT || db.TrieDB().Scheme() != rawdb.HashScheme {
+		return nil, fmt.Errorf("unsupported state database: QuarkChain state requires a hash-based MPT")
+	}
+	sdb, err := New(root, db)
+	if err != nil {
+		return nil, fmt.Errorf("open state %s: %w", root, err)
+	}
+	return sdb, nil
+}
 
 // ===== QuarkChain account lifetime =====
 //
@@ -129,6 +152,29 @@ func (s *StateDB) GetBalanceByTokenID(addr common.Address, tokenID uint64) *uint
 	return s.GetMntBalance(addr, tokenID)
 }
 
+// DeltaTokenBalance adds a signed amount, as delta_token_balance (state.py:461).
+// A zero delta reaches the credit path, which marks the account without creating
+// an entry. A negative result is returned rather than wrapped around.
+func (s *StateDB) DeltaTokenBalance(addr common.Address, tokenID uint64, delta *big.Int) error {
+	if delta.Sign() >= 0 {
+		amount, overflow := uint256.FromBig(delta)
+		if overflow {
+			return fmt.Errorf("account %s: token %d credit overflows 256 bits", addr.Hex(), tokenID)
+		}
+		s.AddBalanceByTokenID(addr, amount, tokenID, tracing.BalanceChangeUnspecified)
+		return nil
+	}
+	amount, overflow := uint256.FromBig(new(big.Int).Neg(delta))
+	if overflow {
+		return fmt.Errorf("account %s: token %d debit overflows 256 bits", addr.Hex(), tokenID)
+	}
+	if s.GetBalanceByTokenID(addr, tokenID).Lt(amount) {
+		return fmt.Errorf("account %s: token %d balance underflow", addr.Hex(), tokenID)
+	}
+	s.SubBalanceByTokenID(addr, amount, tokenID, tracing.BalanceChangeUnspecified)
+	return nil
+}
+
 // SetFullShardKey sets the shard key inherited by accounts first observed while
 // processing the current QKC message. The QKC message executor must call this
 // with Message.ToFullShardKey before any account access. Transaction and
@@ -138,9 +184,6 @@ func (s *StateDB) SetFullShardKey(fullShardKey uint32) {
 	s.journal.append(qkcFullShardKeyChange{prev: s.fullShardKey})
 	s.fullShardKey = fullShardKey
 }
-
-// FullShardKey is the key set by the last SetFullShardKey.
-func (s *StateDB) FullShardKey() uint32 { return s.fullShardKey }
 
 func (s *StateDB) noteQKCShardKey(addr common.Address) {
 	if _, ok := s.qkcAccountCache[addr]; !ok {
@@ -182,11 +225,6 @@ func (s *StateDB) GetTokenBalances(addr common.Address) map[uint64]*uint256.Int 
 	}
 	return make(map[uint64]*uint256.Int)
 }
-
-// SetError records a failure raised by a caller working on top of this state, so
-// that a mistake it cannot report through its own return value still stops
-// Commit from producing a root.
-func (s *StateDB) SetError(err error) { s.setError(err) }
 
 func (s *StateDB) cacheQKCBlankBalances(obj *stateObject) {
 	if balances := obj.data.MntBalances; balances != nil && balances.Len() != 0 && balances.IsBlank() {

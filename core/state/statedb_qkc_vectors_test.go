@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package state
+package state_test
 
 import (
 	"encoding/json"
@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	corestate "github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
@@ -21,7 +22,7 @@ import (
 	"github.com/holiman/uint256"
 )
 
-const stateGoldenPath = "../testdata/exec_golden/state_level.json"
+const stateGoldenPath = "../../qkc/testdata/exec_golden/state_level.json"
 
 type goldenAllocation struct {
 	Balances map[string]string `json:"balances"`
@@ -79,23 +80,45 @@ func loadStateGolden(t *testing.T) []goldenStateCase {
 	return file.Cases
 }
 
-func newTestState(t *testing.T) *EvmState {
+func newTestState(t *testing.T) *corestate.StateDB {
 	t.Helper()
-	state, err := New(coretypes.EmptyRootHash, NewDatabase(rawdb.NewMemoryDatabase()))
+	state, err := corestate.NewQKC(coretypes.EmptyRootHash, corestate.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewQKC: %v", err)
 	}
 	return state
 }
 
-func TestNewRejectsPathDatabase(t *testing.T) {
+func commitAndReopen(t *testing.T, state *corestate.StateDB, block uint64, fullShardKey uint32) (*corestate.StateDB, common.Hash) {
+	t.Helper()
+	db := state.Database()
+	root, err := state.Commit(block, true, false)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	reopened, err := corestate.NewQKC(root, db)
+	if err != nil {
+		t.Fatalf("reopen state %s: %v", root, err)
+	}
+	reopened.SetFullShardKey(fullShardKey)
+	return reopened, root
+}
+
+func mustDeltaTokenBalance(t *testing.T, state *corestate.StateDB, addr account.Recipient, tokenID uint64, delta *big.Int) {
+	t.Helper()
+	if err := state.DeltaTokenBalance(addr, tokenID, delta); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewQKCRejectsPathDatabase(t *testing.T) {
 	disk := rawdb.NewMemoryDatabase()
 	db := corestate.NewDatabase(
 		triedb.NewDatabase(disk, &triedb.Config{PathDB: pathdb.Defaults}),
 		corestate.NewCodeDB(disk),
 	)
-	if _, err := New(coretypes.EmptyRootHash, db); err == nil {
-		t.Fatal("New accepted a path-based state database")
+	if _, err := corestate.NewQKC(coretypes.EmptyRootHash, db); err == nil {
+		t.Fatal("NewQKC accepted a path-based state database")
 	}
 }
 
@@ -124,7 +147,7 @@ func mustBig(t *testing.T, raw json.RawMessage) *big.Int {
 // applyAlloc is quarkchain/genesis.py:55-86: the shard key is set per address
 // before its account is created, code comes with nonce 1, and balances arrive as
 // deltas.
-func applyAlloc(t *testing.T, state *EvmState, alloc map[string]goldenAllocation) {
+func applyAlloc(t *testing.T, state *corestate.StateDB, alloc map[string]goldenAllocation) uint32 {
 	t.Helper()
 	addresses := make([]string, 0, len(alloc))
 	for addr := range alloc {
@@ -132,6 +155,7 @@ func applyAlloc(t *testing.T, state *EvmState, alloc map[string]goldenAllocation
 	}
 	sort.Strings(addresses)
 
+	var fullShardKey uint32
 	for _, addrHex := range addresses {
 		entry := alloc[addrHex]
 		raw := common.FromHex(addrHex)
@@ -142,10 +166,11 @@ func applyAlloc(t *testing.T, state *EvmState, alloc map[string]goldenAllocation
 		if err != nil {
 			t.Fatalf("allocation key %q: %v", addrHex, err)
 		}
-		state.SetFullShardKey(addr.FullShardKey)
+		fullShardKey = addr.FullShardKey
+		state.SetFullShardKey(fullShardKey)
 		if entry.Code != nil {
-			state.SetCode(addr.Recipient, common.FromHex(*entry.Code))
-			state.SetNonce(addr.Recipient, 1)
+			state.SetCode(addr.Recipient, common.FromHex(*entry.Code), tracing.CodeChangeUnspecified)
+			state.SetNonce(addr.Recipient, 1, tracing.NonceChangeUnspecified)
 		}
 		for slot, value := range entry.Storage {
 			state.SetState(addr.Recipient, common.HexToHash(slot), common.HexToHash(value))
@@ -159,12 +184,13 @@ func applyAlloc(t *testing.T, state *EvmState, alloc map[string]goldenAllocation
 			if !ok {
 				t.Fatalf("allocation %q: balance %q is not a decimal integer", addrHex, amount)
 			}
-			state.DeltaTokenBalance(addr.Recipient, tokenID, value)
+			mustDeltaTokenBalance(t, state, addr.Recipient, tokenID, value)
 		}
 	}
+	return fullShardKey
 }
 
-func runOps(t *testing.T, state *EvmState, ops []goldenOp) {
+func runOps(t *testing.T, state *corestate.StateDB, ops []goldenOp, fullShardKey uint32) (*corestate.StateDB, uint32) {
 	t.Helper()
 	var snapshots []int
 	for i, op := range ops {
@@ -187,29 +213,30 @@ func runOps(t *testing.T, state *EvmState, ops []goldenOp) {
 			if err := json.Unmarshal(op.Value, &key); err != nil {
 				t.Fatalf("op %d: full shard key %s: %v", i, op.Value, err)
 			}
-			state.SetFullShardKey(key)
+			fullShardKey = key
+			state.SetFullShardKey(fullShardKey)
 		case "delta_token_balance":
-			state.DeltaTokenBalance(addr, tokenID, mustBig(t, op.Value))
+			mustDeltaTokenBalance(t, state, addr, tokenID, mustBig(t, op.Value))
 		case "set_token_balance":
 			value, overflow := uint256.FromBig(mustBig(t, op.Value))
 			if overflow {
 				t.Fatalf("op %d: balance overflows 256 bits", i)
 			}
-			state.SetTokenBalance(addr, tokenID, value)
+			state.SetBalanceByTokenID(addr, value, tokenID, tracing.BalanceChangeUnspecified)
 		case "read_account":
 			// A read is not inert: it is where an absent account's shard key
 			// freezes, so the op has to reach the state rather than be skipped.
-			state.GetBalance(addr, qkcCommon.DefaultTokenID)
+			state.GetBalanceByTokenID(addr, qkcCommon.DefaultTokenID)
 		case "set_nonce":
 			var nonce uint64
 			if err := json.Unmarshal(op.Value, &nonce); err != nil {
 				t.Fatalf("op %d: nonce %s: %v", i, op.Value, err)
 			}
-			state.SetNonce(addr, nonce)
+			state.SetNonce(addr, nonce, tracing.NonceChangeUnspecified)
 		case "increment_nonce":
-			state.IncrementNonce(addr)
+			state.SetNonce(addr, state.GetNonce(addr)+1, tracing.NonceChangeUnspecified)
 		case "set_code":
-			state.SetCode(addr, common.FromHex(op.Code))
+			state.SetCode(addr, common.FromHex(op.Code), tracing.CodeChangeUnspecified)
 		case "set_storage":
 			var value string
 			if err := json.Unmarshal(op.Value, &value); err != nil {
@@ -225,29 +252,32 @@ func runOps(t *testing.T, state *EvmState, ops []goldenOp) {
 			state.RevertToSnapshot(snapshots[len(snapshots)-1])
 			snapshots = snapshots[:len(snapshots)-1]
 		case "commit":
-			if _, err := state.Commit(0); err != nil {
-				t.Fatalf("op %d: commit: %v", i, err)
-			}
+			state, _ = commitAndReopen(t, state, 0, fullShardKey)
 		default:
 			t.Fatalf("op %d: unknown op %q", i, op.Op)
 		}
 	}
+	return state, fullShardKey
 }
 
-func checkAccounts(t *testing.T, state *EvmState, want map[string]goldenAccount) {
+func checkAccounts(t *testing.T, state *corestate.StateDB, want map[string]goldenAccount) {
 	t.Helper()
 	for addrHex, expected := range want {
 		addr := mustRecipient(t, addrHex)
 		if got := state.GetNonce(addr); got != expected.Nonce {
 			t.Errorf("%s: nonce = %d, want %d", addrHex, got, expected.Nonce)
 		}
-		if got := state.GetCodeHash(addr); got != common.HexToHash(expected.CodeHash) {
-			t.Errorf("%s: code hash = %s, want %s", addrHex, got, expected.CodeHash)
+		codeHash := state.GetCodeHash(addr)
+		if codeHash == (common.Hash{}) {
+			codeHash = coretypes.EmptyCodeHash
+		}
+		if codeHash != common.HexToHash(expected.CodeHash) {
+			t.Errorf("%s: code hash = %s, want %s", addrHex, codeHash, expected.CodeHash)
 		}
 		if got := state.GetFullShardKey(addr); got != expected.FullShardKey {
 			t.Errorf("%s: full shard key = %d, want %d", addrHex, got, expected.FullShardKey)
 		}
-		if got := state.Exists(addr); got != expected.Exists {
+		if got := !state.Empty(addr); got != expected.Exists {
 			t.Errorf("%s: exists = %v, want %v", addrHex, got, expected.Exists)
 		}
 
@@ -260,7 +290,7 @@ func checkAccounts(t *testing.T, state *EvmState, want map[string]goldenAccount)
 			if err != nil {
 				t.Fatalf("%s: token id %q: %v", addrHex, token, err)
 			}
-			if got := state.GetBalance(addr, tokenID).Dec(); got != amount {
+			if got := state.GetBalanceByTokenID(addr, tokenID).Dec(); got != amount {
 				t.Errorf("%s: token %s = %s, want %s", addrHex, token, got, amount)
 			}
 		}
@@ -285,21 +315,15 @@ func TestStateGolden(t *testing.T) {
 	for _, tc := range loadStateGolden(t) {
 		t.Run(tc.Name, func(t *testing.T) {
 			state := newTestState(t)
-			applyAlloc(t, state, tc.PreAlloc)
-			preRoot, err := state.Commit(0)
-			if err != nil {
-				t.Fatalf("commit allocation: %v", err)
-			}
+			fullShardKey := applyAlloc(t, state, tc.PreAlloc)
+			state, preRoot := commitAndReopen(t, state, 0, fullShardKey)
 			if want := common.HexToHash(tc.PreRoot); preRoot != want {
 				t.Fatalf("allocation state root = %s, want %s", preRoot, want)
 			}
 
-			runOps(t, state, tc.Ops)
+			state, fullShardKey = runOps(t, state, tc.Ops, fullShardKey)
 
-			root, err := state.Commit(0)
-			if err != nil {
-				t.Fatalf("commit: %v", err)
-			}
+			state, root := commitAndReopen(t, state, 0, fullShardKey)
 			if want := common.HexToHash(tc.Root); root != want {
 				t.Errorf("state root = %s, want %s\ncase: %s", root, want, tc.Comment)
 			}
@@ -318,13 +342,13 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 			continue
 		}
 		t.Run(tc.Name, func(t *testing.T) {
-			db := NewDatabase(rawdb.NewMemoryDatabase())
-			state, err := New(coretypes.EmptyRootHash, db)
+			db := corestate.NewQKCDatabase(rawdb.NewMemoryDatabase())
+			state, err := corestate.NewQKC(coretypes.EmptyRootHash, db)
 			if err != nil {
-				t.Fatalf("New: %v", err)
+				t.Fatalf("NewQKC: %v", err)
 			}
 			applyAlloc(t, state, tc.PreAlloc)
-			root, err := state.Commit(0)
+			root, err := state.Commit(0, true, false)
 			if err != nil {
 				t.Fatalf("commit: %v", err)
 			}
@@ -332,15 +356,15 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 				t.Fatalf("state root = %s, want %s", root, want)
 			}
 
-			reopened, err := New(root, db)
+			reopened, err := corestate.NewQKC(root, db)
 			if err != nil {
 				t.Fatalf("reopen: %v", err)
 			}
 			for addrHex := range tc.PreAlloc {
 				addr := mustRecipient(t, addrHex[:2*account.RecipientLength])
-				reopened.SetNonce(addr, reopened.GetNonce(addr))
+				reopened.SetNonce(addr, reopened.GetNonce(addr), tracing.NonceChangeUnspecified)
 			}
-			again, err := reopened.Commit(0)
+			again, err := reopened.Commit(0, true, false)
 			if err != nil {
 				t.Fatalf("recommit: %v", err)
 			}
@@ -359,21 +383,18 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	other := mustRecipient(t, "0x00000000000000000000000000000000000000b2")
 
 	state.SetFullShardKey(1)
-	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(1000))
-	state.SetNonce(addr, 3)
+	mustDeltaTokenBalance(t, state, addr, qkcCommon.DefaultTokenID, big.NewInt(1000))
+	state.SetNonce(addr, 3, tracing.NonceChangeUnspecified)
 	state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x11"))
-	base, err := state.Commit(0)
-	if err != nil {
-		t.Fatalf("commit: %v", err)
-	}
+	state, base := commitAndReopen(t, state, 0, 1)
 
 	outer := state.Snapshot()
-	state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(-500))
+	mustDeltaTokenBalance(t, state, addr, qkcCommon.DefaultTokenID, big.NewInt(-500))
 
 	inner := state.Snapshot()
 	state.SetState(addr, common.HexToHash("0x01"), common.HexToHash("0x22"))
-	state.SetCode(addr, []byte{0xfe})
-	state.DeltaTokenBalance(other, qkcCommon.DefaultTokenID, big.NewInt(7))
+	state.SetCode(addr, []byte{0xfe}, tracing.CodeChangeUnspecified)
+	mustDeltaTokenBalance(t, state, other, qkcCommon.DefaultTokenID, big.NewInt(7))
 	state.RevertToSnapshot(inner)
 
 	if got := state.GetState(addr, common.HexToHash("0x01")); got != common.HexToHash("0x11") {
@@ -382,19 +403,16 @@ func TestSnapshotRevertRestoresEverything(t *testing.T) {
 	if got := state.GetCodeSize(addr); got != 0 {
 		t.Errorf("code size after inner revert = %d, want 0", got)
 	}
-	if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != 500 {
+	if got := state.GetBalanceByTokenID(addr, qkcCommon.DefaultTokenID).Uint64(); got != 500 {
 		t.Errorf("balance after inner revert = %d, want 500", got)
 	}
 
 	state.RevertToSnapshot(outer)
-	if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != 1000 {
+	if got := state.GetBalanceByTokenID(addr, qkcCommon.DefaultTokenID).Uint64(); got != 1000 {
 		t.Errorf("balance after outer revert = %d, want 1000", got)
 	}
 
-	root, err := state.Commit(0)
-	if err != nil {
-		t.Fatalf("recommit: %v", err)
-	}
+	_, root := commitAndReopen(t, state, 0, 1)
 	if root != base {
 		t.Errorf("root after reverting everything = %s, want the committed %s", root, base)
 	}
@@ -407,10 +425,10 @@ func TestGetTokenBalancesRetainsCachedZeros(t *testing.T) {
 				state := newTestState(t)
 				addr := common.HexToAddress("0xa1")
 				snapshot := state.Snapshot()
-				state.DeltaTokenBalance(addr, tokenID, big.NewInt(7))
+				mustDeltaTokenBalance(t, state, addr, tokenID, big.NewInt(7))
 				state.RevertToSnapshot(snapshot)
 				if finalise {
-					state.DeltaTokenBalance(addr, tokenID, new(big.Int))
+					mustDeltaTokenBalance(t, state, addr, tokenID, new(big.Int))
 					state.Finalise(true)
 				}
 
@@ -423,13 +441,11 @@ func TestGetTokenBalancesRetainsCachedZeros(t *testing.T) {
 				}
 				balances[tokenID].SetUint64(9)
 				delete(balances, tokenID)
-				state.SetNonce(addr, 1)
+				state.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
 				if value, ok := state.GetTokenBalances(addr)[tokenID]; !ok || !value.IsZero() {
 					t.Fatal("mutating returned balances changed the retained zero entry")
 				}
-				if _, err := state.Commit(0); err != nil {
-					t.Fatalf("commit: %v", err)
-				}
+				state, _ = commitAndReopen(t, state, 0, 0)
 				if balances := state.GetTokenBalances(addr); len(balances) != 0 {
 					t.Fatalf("balances after commit = %v, want no cached zeros", balances)
 				}
@@ -441,23 +457,23 @@ func TestGetTokenBalancesRetainsCachedZeros(t *testing.T) {
 func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		recreate  func(*EvmState, account.Recipient)
+		recreate  func(*testing.T, *corestate.StateDB, account.Recipient)
 		wantNonce uint64
 		wantQKC   uint64
 	}{
 		{
 			name: "paid after finalise",
-			recreate: func(state *EvmState, addr account.Recipient) {
-				state.DeltaTokenBalance(addr, qkcCommon.DefaultTokenID, big.NewInt(777))
+			recreate: func(t *testing.T, state *corestate.StateDB, addr account.Recipient) {
+				mustDeltaTokenBalance(t, state, addr, qkcCommon.DefaultTokenID, big.NewInt(777))
 			},
 			wantQKC: 777,
 		},
 		{
 			name: "contract recreation",
-			recreate: func(state *EvmState, addr account.Recipient) {
+			recreate: func(_ *testing.T, state *corestate.StateDB, addr account.Recipient) {
 				state.CreateAccount(addr)
 				state.CreateContract(addr)
-				state.SetNonce(addr, 1)
+				state.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
 			},
 			wantNonce: 1,
 		},
@@ -468,18 +484,16 @@ func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 			slot := common.HexToHash("0x01")
 
 			state.SetFullShardKey(1)
-			state.SetNonce(addr, 1)
-			state.SetCode(addr, []byte{0x00})
+			state.SetNonce(addr, 1, tracing.NonceChangeUnspecified)
+			state.SetCode(addr, []byte{0x00}, tracing.CodeChangeUnspecified)
 			state.SetState(addr, slot, common.HexToHash("0x2a"))
-			state.SetTokenBalance(addr, qkcCommon.DefaultTokenID, uint256.NewInt(5))
-			state.SetTokenBalance(addr, 100, uint256.NewInt(7))
-			if _, err := state.Commit(0); err != nil {
-				t.Fatalf("commit original account: %v", err)
-			}
+			state.SetBalanceByTokenID(addr, uint256.NewInt(5), qkcCommon.DefaultTokenID, tracing.BalanceChangeUnspecified)
+			state.SetBalanceByTokenID(addr, uint256.NewInt(7), 100, tracing.BalanceChangeUnspecified)
+			state, _ = commitAndReopen(t, state, 0, 1)
 
 			// SELFDESTRUCT transfers the default-token balance before marking the
 			// account. Finalise removes the old incarnation at the message boundary.
-			state.SetTokenBalance(addr, qkcCommon.DefaultTokenID, new(uint256.Int))
+			state.SetBalanceByTokenID(addr, new(uint256.Int), qkcCommon.DefaultTokenID, tracing.BalanceChangeUnspecified)
 			state.SelfDestruct(addr)
 			state.Finalise(true)
 			state.SetFullShardKey(2)
@@ -489,14 +503,12 @@ func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 			if balances := state.GetTokenBalances(addr); len(balances) != 0 {
 				t.Errorf("destroyed balances = %v, want empty", balances)
 			}
-			tc.recreate(state, addr)
+			tc.recreate(t, state, addr)
 			if got := state.GetFullShardKey(addr); got != 1 {
 				t.Errorf("shard key after recreation = %d, want 1", got)
 			}
 			state.Finalise(true)
-			if _, err := state.Commit(1); err != nil {
-				t.Fatalf("commit recreated account: %v", err)
-			}
+			state, _ = commitAndReopen(t, state, 1, 2)
 
 			if got := state.GetState(addr, slot); got != (common.Hash{}) {
 				t.Errorf("old storage = %s, want empty", got)
@@ -504,10 +516,10 @@ func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 			if got := state.GetNonce(addr); got != tc.wantNonce {
 				t.Errorf("nonce = %d, want %d", got, tc.wantNonce)
 			}
-			if got := state.GetBalance(addr, qkcCommon.DefaultTokenID).Uint64(); got != tc.wantQKC {
+			if got := state.GetBalanceByTokenID(addr, qkcCommon.DefaultTokenID).Uint64(); got != tc.wantQKC {
 				t.Errorf("QKC balance = %d, want %d", got, tc.wantQKC)
 			}
-			if got := state.GetBalance(addr, 100); !got.IsZero() {
+			if got := state.GetBalanceByTokenID(addr, 100); !got.IsZero() {
 				t.Errorf("old MNT balance = %s, want zero", got)
 			}
 		})

@@ -7,12 +7,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	corestate "github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/config"
-	"github.com/ethereum/go-ethereum/qkc/state"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 )
@@ -65,9 +66,9 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		seenRecipients[addr.Recipient] = addr
 	}
 
-	sdb := state.NewDatabase(db)
+	sdb := corestate.NewQKCDatabase(db)
 	defer sdb.TrieDB().Close()
-	statedb, err := state.New(coretypes.EmptyRootHash, sdb)
+	statedb, err := corestate.NewQKC(coretypes.EmptyRootHash, sdb)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("open genesis state trie: %w", err)
 	}
@@ -75,8 +76,8 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		statedb.SetFullShardKey(addr.FullShardKey)
 		// An allocated contract starts at nonce 1.
 		if allocation.CodePresent || allocation.Code != nil {
-			statedb.SetCode(addr.Recipient, allocation.Code)
-			statedb.SetNonce(addr.Recipient, 1)
+			statedb.SetCode(addr.Recipient, allocation.Code, tracing.CodeChangeUnspecified)
+			statedb.SetNonce(addr.Recipient, 1, tracing.NonceChangeUnspecified)
 		}
 		for key, value := range allocation.Storage {
 			statedb.SetState(addr.Recipient, key, value)
@@ -89,11 +90,13 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 				return common.Hash{}, fmt.Errorf("genesis account %s: %w", addr.ToHex(), err)
 			}
 			if value != nil {
-				statedb.DeltaTokenBalance(addr.Recipient, tokenID, value)
+				if err := statedb.DeltaTokenBalance(addr.Recipient, tokenID, value); err != nil {
+					return common.Hash{}, fmt.Errorf("apply genesis allocation: %w", err)
+				}
 			}
 		}
 	}
-	root, err := statedb.Commit(0)
+	root, err := statedb.Commit(0, true, false)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("commit genesis state: %w", err)
 	}
