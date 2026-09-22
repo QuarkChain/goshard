@@ -198,19 +198,6 @@ func (s *StateDB) qkcShardKey(addr common.Address) uint32 {
 	return s.fullShardKey
 }
 
-// GetFullShardKey is the shard key frozen into the account when it was created.
-func (s *StateDB) GetFullShardKey(addr common.Address) uint32 {
-	if obj := s.getStateObject(addr); obj != nil {
-		return obj.data.FullShardKey
-	}
-	if obj := s.stateObjectsDestruct[addr]; obj != nil {
-		return obj.data.FullShardKey
-	}
-	// An address with no account yet would be created with this key, which is
-	// what pyquarkchain's blank account reports too.
-	return s.qkcShardKey(addr)
-}
-
 // GetTokenBalances returns every balance the account holds, zero-valued entries
 // included: an entry that exists at zero is not the same as a token the account
 // never held, and callers reporting state have to be able to tell them apart.

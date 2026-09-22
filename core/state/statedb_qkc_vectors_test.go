@@ -274,11 +274,19 @@ func checkAccounts(t *testing.T, state *corestate.StateDB, want map[string]golde
 		if codeHash != common.HexToHash(expected.CodeHash) {
 			t.Errorf("%s: code hash = %s, want %s", addrHex, codeHash, expected.CodeHash)
 		}
-		if got := state.GetFullShardKey(addr); got != expected.FullShardKey {
-			t.Errorf("%s: full shard key = %d, want %d", addrHex, got, expected.FullShardKey)
-		}
 		if got := !state.Empty(addr); got != expected.Exists {
 			t.Errorf("%s: exists = %v, want %v", addrHex, got, expected.Exists)
+		}
+		if expected.Exists {
+			acct, err := state.Reader().Account(addr)
+			if err != nil {
+				t.Fatalf("%s: read account: %v", addrHex, err)
+			}
+			if acct == nil {
+				t.Errorf("%s: persisted account is missing", addrHex)
+			} else if acct.FullShardKey != expected.FullShardKey {
+				t.Errorf("%s: full shard key = %d, want %d", addrHex, acct.FullShardKey, expected.FullShardKey)
+			}
 		}
 
 		balances := state.GetTokenBalances(addr)
@@ -497,18 +505,22 @@ func TestNativeAccountLifecycleClearsDestroyedStorage(t *testing.T) {
 			state.SelfDestruct(addr)
 			state.Finalise(true)
 			state.SetFullShardKey(2)
-			if got := state.GetFullShardKey(addr); got != 1 {
-				t.Errorf("shard key before recreation = %d, want 1", got)
-			}
 			if balances := state.GetTokenBalances(addr); len(balances) != 0 {
 				t.Errorf("destroyed balances = %v, want empty", balances)
 			}
 			tc.recreate(t, state, addr)
-			if got := state.GetFullShardKey(addr); got != 1 {
-				t.Errorf("shard key after recreation = %d, want 1", got)
-			}
 			state.Finalise(true)
 			state, _ = commitAndReopen(t, state, 1, 2)
+			acct, err := state.Reader().Account(addr)
+			if err != nil {
+				t.Fatalf("read recreated account: %v", err)
+			}
+			if acct == nil {
+				t.Fatal("recreated account is missing")
+			}
+			if acct.FullShardKey != 1 {
+				t.Errorf("recreated account shard key = %d, want 1", acct.FullShardKey)
+			}
 
 			if got := state.GetState(addr, slot); got != (common.Hash{}) {
 				t.Errorf("old storage = %s, want empty", got)
