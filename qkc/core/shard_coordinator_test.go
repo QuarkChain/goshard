@@ -47,7 +47,7 @@ func (s *minorChainStub) GetBlockByNumber(number uint64) *types.MinorBlock {
 	}
 	return nil
 }
-func (s *minorChainStub) InsertBlockWithXShardInput(block *types.MinorBlock, cursor XShardDepositCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error) {
+func (s *minorChainStub) InsertBlockWithXShardInput(block *types.MinorBlock, cursor XShardCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error) {
 	s.insertions++
 	s.options = options
 	if s.insertErr != nil {
