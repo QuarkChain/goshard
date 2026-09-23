@@ -396,43 +396,6 @@
       }
     },
     {
-      "name": "del_account_removes_leaf",
-      "comment": "del_account clears balances, nonce, code and storage and unsets touched, so commit deletes the leaf (state.py:596-610)",
-      "network": "devnet",
-      "full_shard_id": 1,
-      "pre_alloc": {
-        "aaaa0000000000000000000000000000000000aa00000001": {
-          "balances": {
-            "QKC": "9"
-          },
-          "code": "0x6001",
-          "storage": {
-            "0x01": "0x2a"
-          }
-        }
-      },
-      "pre_state_root": "0xc99b166e946e1b0ecd5a831dfb2c3cb2d89b2c5394d277ed922c4e88c394530d",
-      "ops": [
-        {
-          "op": "del_account",
-          "address": "aaaa0000000000000000000000000000000000aa"
-        }
-      ],
-      "post_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-      "accounts": {
-        "aaaa0000000000000000000000000000000000aa": {
-          "nonce": 0,
-          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-          "full_shard_key": 1,
-          "exists": false,
-          "balances": {},
-          "storage": {
-            "0x01": "0x0"
-          }
-        }
-      }
-    },
-    {
       "name": "revert_undoes_mutations",
       "comment": "snapshot/revert restores balances, nonce, code and storage; the post root equals the untouched allocation's",
       "network": "devnet",
@@ -543,94 +506,6 @@
           "full_shard_key": 1,
           "exists": true,
           "balances": {}
-        }
-      }
-    },
-    {
-      "name": "revert_does_not_restore_reset_balances",
-      "comment": "reset_balances journals the restore onto a misspelled attribute (state.py:192-198), so reverting brings back the token trie but not the balances; the account stays drained. The opening credit is what makes that observable: reset_balances marks nothing touched, so without it commit would skip the account and both a faithful and a naively correct implementation would agree",
-      "network": "devnet",
-      "full_shard_id": 1,
-      "pre_alloc": {
-        "aaaa0000000000000000000000000000000000aa00000001": {
-          "balances": {
-            "QKC": "5"
-          },
-          "code": "0x6000"
-        }
-      },
-      "pre_state_root": "0x51f9e0b983d418c7cf59d0d24f17f99b552ab943f02152d0b94962206f992399",
-      "ops": [
-        {
-          "op": "delta_token_balance",
-          "address": "aaaa0000000000000000000000000000000000aa",
-          "token": "QKC",
-          "value": "1"
-        },
-        {
-          "op": "snapshot"
-        },
-        {
-          "op": "reset_balances",
-          "address": "aaaa0000000000000000000000000000000000aa"
-        },
-        {
-          "op": "revert"
-        }
-      ],
-      "post_state_root": "0xd0a7878d6a4eda4a0e685ccfc7d5aa733a0dd0d6a1d51e286d88e2d4f685daa2",
-      "accounts": {
-        "aaaa0000000000000000000000000000000000aa": {
-          "nonce": 1,
-          "code_hash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
-          "full_shard_key": 1,
-          "exists": true,
-          "balances": {}
-        }
-      }
-    },
-    {
-      "name": "revert_after_del_account",
-      "comment": "reverting del_account leaves the trie untouched: unwinding its six steps ends at the touched flag set_nonce journaled, which was False, so commit skips the account rather than rewriting the leaf it would otherwise have drained (a selfdestruct in a reverted frame)",
-      "network": "devnet",
-      "full_shard_id": 1,
-      "pre_alloc": {
-        "aaaa0000000000000000000000000000000000aa00000001": {
-          "balances": {
-            "QKC": "5"
-          },
-          "code": "0x6000",
-          "storage": {
-            "0x01": "0x2a"
-          }
-        }
-      },
-      "pre_state_root": "0xb2ce28359258d602406c5269c14731b1f2ac4b429d61ffe4ded0633d25b28dab",
-      "ops": [
-        {
-          "op": "snapshot"
-        },
-        {
-          "op": "del_account",
-          "address": "aaaa0000000000000000000000000000000000aa"
-        },
-        {
-          "op": "revert"
-        }
-      ],
-      "post_state_root": "0xb2ce28359258d602406c5269c14731b1f2ac4b429d61ffe4ded0633d25b28dab",
-      "accounts": {
-        "aaaa0000000000000000000000000000000000aa": {
-          "nonce": 1,
-          "code_hash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
-          "full_shard_key": 1,
-          "exists": true,
-          "balances": {
-            "35760": "5"
-          },
-          "storage": {
-            "0x01": "0x2a"
-          }
         }
       }
     },
@@ -772,6 +647,589 @@
           "storage": {
             "0x01": "0x2a",
             "0x02": "0x2b"
+          }
+        }
+      }
+    },
+    {
+      "name": "full_shard_key_first_read_survives_revert",
+      "comment": "revert restores the current shard key to 1 but keeps the blank account first cached under key 2; its later credit must therefore write key 2 into the leaf, while B's first credit uses the restored key 1",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "set_full_shard_key",
+          "value": 1
+        },
+        {
+          "op": "snapshot"
+        },
+        {
+          "op": "set_full_shard_key",
+          "value": 2
+        },
+        {
+          "op": "read_account",
+          "address": "aaaa0000000000000000000000000000000000aa"
+        },
+        {
+          "op": "revert"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QKC",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "bbbb0000000000000000000000000000000000bb",
+          "token": "QKC",
+          "value": "1"
+        }
+      ],
+      "post_state_root": "0x73209a349c62a291e0e4ec43ed1a0a095370568452e03c173bc69ca37c26637a",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 2,
+          "exists": true,
+          "balances": {
+            "35760": "1"
+          }
+        },
+        "bbbb0000000000000000000000000000000000bb": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "full_shard_key_first_write_survives_revert",
+      "comment": "reverting the first credit leaves the cached account and its key 2 behind; geth's journal removes newly created objects, so the frozen key must outlive that object to survive the next credit; B checks that the current key was restored to 1",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "set_full_shard_key",
+          "value": 1
+        },
+        {
+          "op": "snapshot"
+        },
+        {
+          "op": "set_full_shard_key",
+          "value": 2
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QKC",
+          "value": "1"
+        },
+        {
+          "op": "revert"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QKC",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "bbbb0000000000000000000000000000000000bb",
+          "token": "QKC",
+          "value": "1"
+        }
+      ],
+      "post_state_root": "0x73209a349c62a291e0e4ec43ed1a0a095370568452e03c173bc69ca37c26637a",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 2,
+          "exists": true,
+          "balances": {
+            "35760": "1"
+          }
+        },
+        "bbbb0000000000000000000000000000000000bb": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 1,
+          "exists": true,
+          "balances": {
+            "35760": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "full_shard_key_blank_read_expires_at_commit",
+      "comment": "commit clears the blank account cached by a read; a later first credit uses the new shard key 2, not the key 1 remembered before the commit",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "set_full_shard_key",
+          "value": 1
+        },
+        {
+          "op": "read_account",
+          "address": "aaaa0000000000000000000000000000000000aa"
+        },
+        {
+          "op": "commit"
+        },
+        {
+          "op": "set_full_shard_key",
+          "value": 2
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QKC",
+          "value": "1"
+        }
+      ],
+      "post_state_root": "0x4c70b41e79a53cc484a477b6931a2817216e8ecae9190e77e85b5852eb4c3c17",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 2,
+          "exists": true,
+          "balances": {
+            "35760": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "set_token_balance_zero_keeps_token_absent_qkc",
+      "comment": "a zero write for a token never held must not create an entry; nonce keeps the account alive so empty bytes versus the 00c0 zero-entry blob changes its leaf",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "increment_nonce",
+          "address": "aaaa0000000000000000000000000000000000aa"
+        },
+        {
+          "op": "set_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QKC",
+          "value": "0"
+        }
+      ],
+      "post_state_root": "0xe2a7d9b86a259e1447af28903e540f7fde7bd2bb1fe938b8c2480a67f8a14fb5",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 0,
+          "exists": true,
+          "balances": {}
+        }
+      }
+    },
+    {
+      "name": "delta_token_balance_zero_keeps_token_absent_qkc",
+      "comment": "a zero write for a token never held must not create an entry; nonce keeps the account alive so empty bytes versus the 00c0 zero-entry blob changes its leaf",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "increment_nonce",
+          "address": "aaaa0000000000000000000000000000000000aa"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QKC",
+          "value": "0"
+        }
+      ],
+      "post_state_root": "0xe2a7d9b86a259e1447af28903e540f7fde7bd2bb1fe938b8c2480a67f8a14fb5",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 0,
+          "exists": true,
+          "balances": {}
+        }
+      }
+    },
+    {
+      "name": "set_token_balance_zero_keeps_token_absent_qeth",
+      "comment": "a zero write for a token never held must not create an entry; nonce keeps the account alive so empty bytes versus the 00c0 zero-entry blob changes its leaf",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "increment_nonce",
+          "address": "aaaa0000000000000000000000000000000000aa"
+        },
+        {
+          "op": "set_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QETH",
+          "value": "0"
+        }
+      ],
+      "post_state_root": "0xe2a7d9b86a259e1447af28903e540f7fde7bd2bb1fe938b8c2480a67f8a14fb5",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 0,
+          "exists": true,
+          "balances": {}
+        }
+      }
+    },
+    {
+      "name": "delta_token_balance_zero_keeps_token_absent_qeth",
+      "comment": "a zero write for a token never held must not create an entry; nonce keeps the account alive so empty bytes versus the 00c0 zero-entry blob changes its leaf",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "increment_nonce",
+          "address": "aaaa0000000000000000000000000000000000aa"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "QETH",
+          "value": "0"
+        }
+      ],
+      "post_state_root": "0xe2a7d9b86a259e1447af28903e540f7fde7bd2bb1fe938b8c2480a67f8a14fb5",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 1,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 0,
+          "exists": true,
+          "balances": {}
+        }
+      }
+    },
+    {
+      "name": "sixteen_tokens_stay_list_encoded",
+      "comment": "sixteen nonzero balances remain a sorted pair list, even with a seventeenth zero cache entry; commit and read-back must preserve this representation without requiring a token trie",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T0",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T1",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T2",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T3",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T4",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T5",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T6",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T7",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T8",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T9",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T10",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T11",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T12",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T13",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T14",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T15",
+          "value": "1"
+        },
+        {
+          "op": "commit"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T0",
+          "value": "0"
+        }
+      ],
+      "post_state_root": "0xea0098b27de57caf4aabc3a4edd54d330b6ff198cff449b7ebfd7417bd9dcd88",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 0,
+          "exists": true,
+          "balances": {
+            "1080": "1",
+            "1081": "1",
+            "1082": "1",
+            "1083": "1",
+            "1084": "1",
+            "1085": "1",
+            "1086": "1",
+            "1087": "1",
+            "1088": "1",
+            "1089": "1",
+            "38952": "1",
+            "38953": "1",
+            "38954": "1",
+            "38955": "1",
+            "38956": "1",
+            "38957": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "seventeenth_zero_token_does_not_enable_trie",
+      "comment": "sixteen nonzero balances remain a sorted pair list, even with a seventeenth zero cache entry; commit and read-back must preserve this representation without requiring a token trie",
+      "network": "devnet",
+      "full_shard_id": 1,
+      "pre_alloc": {},
+      "pre_state_root": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+      "ops": [
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T0",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T1",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T2",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T3",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T4",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T5",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T6",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T7",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T8",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T9",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T10",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T11",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T12",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T13",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T14",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T15",
+          "value": "1"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T16",
+          "value": "1"
+        },
+        {
+          "op": "set_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T16",
+          "value": "0"
+        },
+        {
+          "op": "commit"
+        },
+        {
+          "op": "delta_token_balance",
+          "address": "aaaa0000000000000000000000000000000000aa",
+          "token": "T0",
+          "value": "0"
+        }
+      ],
+      "post_state_root": "0xea0098b27de57caf4aabc3a4edd54d330b6ff198cff449b7ebfd7417bd9dcd88",
+      "accounts": {
+        "aaaa0000000000000000000000000000000000aa": {
+          "nonce": 0,
+          "code_hash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+          "full_shard_key": 0,
+          "exists": true,
+          "balances": {
+            "1080": "1",
+            "1081": "1",
+            "1082": "1",
+            "1083": "1",
+            "1084": "1",
+            "1085": "1",
+            "1086": "1",
+            "1087": "1",
+            "1088": "1",
+            "1089": "1",
+            "38952": "1",
+            "38953": "1",
+            "38954": "1",
+            "38955": "1",
+            "38956": "1",
+            "38957": "1"
           }
         }
       }
