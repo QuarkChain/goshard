@@ -102,7 +102,7 @@ func TestNewMinorBlockChainInitializesGenesisHead(t *testing.T) {
 	if current := chain.CurrentBlock(); current == nil || current.Hash() != genesis.Hash() {
 		t.Fatalf("current block = %v, want genesis %s", current, genesis.Hash())
 	}
-	if rawdb.ReadHeadBlockHash(db) != genesis.Hash() || rawdb.ReadHeadHeaderHash(db) != genesis.Hash() {
+	if rawdb.ReadHeadBlockHash(db) != genesis.Hash() {
 		t.Fatal("persistent head markers do not point to genesis")
 	}
 	if block := chain.GetBlock(genesis.Hash()); block == nil || block.Hash() != genesis.Hash() {
@@ -134,7 +134,6 @@ func TestNewMinorBlockChainRestoresPersistedHead(t *testing.T) {
 	head := storageTestBlock(genesis, 1, coretypes.EmptyRootHash)
 	writeStorageTestBlock(db, genesis, true)
 	writeStorageTestBlock(db, head, true)
-	rawdb.WriteHeadHeaderHash(db, head.Hash())
 	rawdb.WriteHeadBlockHash(db, head.Hash())
 
 	chain, err := NewMinorBlockChain(db, storageTestShardConfig(), storageTestProcessor{}, NewMinorBlockValidator(), vm.Config{})
@@ -178,14 +177,13 @@ func TestNewMinorBlockChainRejectsUnavailableHead(t *testing.T) {
 				rawdb.WriteMinorBlock(db, test.head)
 				headHash = test.head.Hash()
 			}
-			rawdb.WriteHeadHeaderHash(db, headHash)
 			rawdb.WriteHeadBlockHash(db, headHash)
 
 			_, err := NewMinorBlockChain(db, storageTestShardConfig(), storageTestProcessor{}, NewMinorBlockValidator(), vm.Config{})
 			if !errors.Is(err, test.wantError) {
 				t.Fatalf("constructor error = %v, want %v", err, test.wantError)
 			}
-			if rawdb.ReadHeadBlockHash(db) != headHash || rawdb.ReadHeadHeaderHash(db) != headHash {
+			if rawdb.ReadHeadBlockHash(db) != headHash {
 				t.Fatal("failed recovery rewrote persistent head markers")
 			}
 		})
@@ -202,7 +200,7 @@ func TestNewMinorBlockChainRejectsMissingGenesisState(t *testing.T) {
 	if !errors.Is(err, ErrStateUnavailable) {
 		t.Fatalf("constructor error = %v, want %v", err, ErrStateUnavailable)
 	}
-	if rawdb.ReadHeadBlockHash(db) != (common.Hash{}) || rawdb.ReadHeadHeaderHash(db) != (common.Hash{}) {
+	if rawdb.ReadHeadBlockHash(db) != (common.Hash{}) {
 		t.Fatal("missing genesis state published head markers")
 	}
 }
@@ -221,7 +219,7 @@ func TestNewMinorBlockChainReleasesFailedGenesisBatch(t *testing.T) {
 	if db.openBatches != 0 {
 		t.Fatalf("constructor left %d batches open", db.openBatches)
 	}
-	if rawdb.ReadHeadBlockHash(db) != (common.Hash{}) || rawdb.ReadHeadHeaderHash(db) != (common.Hash{}) {
+	if rawdb.ReadHeadBlockHash(db) != (common.Hash{}) {
 		t.Fatal("failed genesis batch published head markers")
 	}
 }

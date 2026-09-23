@@ -5,6 +5,7 @@ package core
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
@@ -32,11 +33,9 @@ type MinorBlockChain struct {
 	validator BlockValidator
 
 	chainmu *syncx.ClosableMutex
-	mu      sync.RWMutex
-	// mu protects the in-memory head. Database readers don't need it.
 
 	genesisBlock *types.MinorBlock
-	current      *types.MinorBlock
+	currentBlock atomic.Pointer[types.MinorBlock]
 	stopOnce     sync.Once
 }
 
@@ -95,7 +94,6 @@ func (c *MinorBlockChain) writeHeadBlock(block *types.MinorBlock) error {
 	batch := c.db.NewBatch()
 	defer batch.Close()
 	rawdb.WriteMinorCanonicalHash(batch, block.Hash(), block.NumberU64())
-	rawdb.WriteHeadHeaderHash(batch, block.Hash())
 	rawdb.WriteHeadBlockHash(batch, block.Hash())
 	if err := batch.Write(); err != nil {
 		return fmt.Errorf("write minor genesis: %w", err)
@@ -117,7 +115,7 @@ func (c *MinorBlockChain) loadLastState() error {
 	if !c.HasState(head.Root()) {
 		return fmt.Errorf("restore minor head %s root %s: %w", headHash, head.Root(), ErrStateUnavailable)
 	}
-	c.current = head
+	c.currentBlock.Store(head)
 	return nil
 }
 
@@ -162,9 +160,7 @@ func (c *MinorBlockChain) HasBlockAndState(hash common.Hash) bool {
 }
 
 func (c *MinorBlockChain) CurrentBlock() *types.MinorBlock {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.current
+	return c.currentBlock.Load()
 }
 
 func (c *MinorBlockChain) HasState(root common.Hash) bool {
