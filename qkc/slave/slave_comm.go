@@ -12,9 +12,10 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
-	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/conn"
+	"github.com/ethereum/go-ethereum/qkc/slaveconn"
 	"github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // Backend is the slave-side business logic that serves requests received
@@ -66,10 +67,10 @@ type masterHandler struct {
 	comm *SlaveComm
 }
 
-var _ MasterHandler = (*masterHandler)(nil)
+var _ slaveconn.MasterHandler = (*masterHandler)(nil)
 
 // newMasterHandler builds the MasterHandler MasterConn is configured with.
-func (s *SlaveComm) newMasterHandler() MasterHandler {
+func (s *SlaveComm) newMasterHandler() slaveconn.MasterHandler {
 	return &masterHandler{
 		Backend: s.cfg.Backend,
 		comm:    s,
@@ -120,9 +121,9 @@ type SlaveConfig struct {
 	// Backend serves the business RPCs routed through MasterConn.
 	Backend Backend
 	// Peer builds and serves slave-to-slave PeerConns for virtual cluster peers.
-	Peer PeerHandler
+	Peer slaveconn.PeerHandler
 	// Xshard serves requests received through XshardConns.
-	Xshard XshardHandler
+	Xshard slaveconn.XshardHandler
 
 	// Logger defaults to log.Root() if nil.
 	Logger log.Logger
@@ -173,9 +174,9 @@ type SlaveComm struct {
 	// (ErrNotActive); open/closed is the delegate's own state. This records
 	// establishment, not classification — which inbound is the master is
 	// acceptLoop's loop-local control flow.
-	master atomic.Pointer[MasterConn]
+	master atomic.Pointer[slaveconn.MasterConn]
 
-	xshardPool *XshardPool
+	xshardPool *slaveconn.XshardPool
 
 	// Peer topology, guarded by peersMu. Invariant:
 	// peers[p][b] exists ⇒ p ∈ clusterPeerIDs ∧ b ∈ localBranches.
@@ -186,7 +187,7 @@ type SlaveComm struct {
 	// SlaveServer.cluster_peer_ids).
 	clusterPeerIDs map[uint64]struct{}
 	// peers is the (cluster_peer_id, branch) → PeerConn registry (py: shard.peers).
-	peers map[uint64]map[uint32]*PeerConn
+	peers map[uint64]map[uint32]*slaveconn.PeerConn
 
 	// shutdownOnce guards only the shutdown notification (py: shutdown_future.done()):
 	// close(stopped) must happen exactly once across Stop's concurrent triggers (owner,
@@ -201,7 +202,7 @@ type SlaveComm struct {
 	stopped chan struct{}
 }
 
-var _ PeerResolver = (*SlaveComm)(nil)
+var _ slaveconn.PeerResolver = (*SlaveComm)(nil)
 
 // NewSlaveComm constructs a fully-initialized but unstarted SlaveComm. An error
 // here means the object is unusable and discarded.
@@ -212,7 +213,7 @@ func NewSlaveComm(cfg SlaveConfig) (*SlaveComm, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = log.Root()
 	}
-	pool, err := NewXshardPool(cfg.ID, cfg.FullShardIDList, cfg.ClusterFullShardIDList, cfg.MaxPayloadSize, cfg.Xshard, cfg.Logger)
+	pool, err := slaveconn.NewXshardPool(cfg.ID, cfg.FullShardIDList, cfg.ClusterFullShardIDList, cfg.MaxPayloadSize, cfg.Xshard, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("new xshard pool: %w", err)
 	}
@@ -220,7 +221,7 @@ func NewSlaveComm(cfg SlaveConfig) (*SlaveComm, error) {
 		cfg:            cfg,
 		localBranches:  make(map[uint32]struct{}),
 		clusterPeerIDs: make(map[uint64]struct{}),
-		peers:          make(map[uint64]map[uint32]*PeerConn),
+		peers:          make(map[uint64]map[uint32]*slaveconn.PeerConn),
 		xshardPool:     pool,
 		stopped:        make(chan struct{}),
 		logger:         cfg.Logger,
@@ -312,14 +313,14 @@ func (s *SlaveComm) SendMinorBlockHeaderListToMaster(ctx context.Context, req *w
 // if some sends fail. The call waits for all sends to complete and returns
 // nil only if all sends succeed; otherwise, all errors are aggregated.
 // An empty connection set is a no-op, matching Python's gather([]).
-func (s *SlaveComm) broadcastToBranch(branch uint32, send func(*XshardConn) error) error {
+func (s *SlaveComm) broadcastToBranch(branch uint32, send func(*slaveconn.XshardConn) error) error {
 	conns := s.xshardPool.Lookup(branch)
 	errs := make([]error, len(conns))
 
 	var wg sync.WaitGroup
 	for i, c := range conns {
 		wg.Add(1)
-		go func(i int, c *XshardConn) {
+		go func(i int, c *slaveconn.XshardConn) {
 			defer wg.Done()
 
 			if err := send(c); err != nil {
@@ -338,7 +339,7 @@ func (s *SlaveComm) broadcastToBranch(branch uint32, send func(*XshardConn) erro
 // others — and the result is binary: nil iff every connection acknowledged. An
 // empty connection set is a no-op, matching py's gather([]).
 func (s *SlaveComm) SendXshardTxList(ctx context.Context, branch uint32, req *wire.AddXshardTxListRequest) error {
-	return s.broadcastToBranch(branch, func(c *XshardConn) error {
+	return s.broadcastToBranch(branch, func(c *slaveconn.XshardConn) error {
 		return c.SendAddXshardTxList(ctx, req)
 	})
 }
@@ -347,7 +348,7 @@ func (s *SlaveComm) SendXshardTxList(ctx context.Context, branch uint32, req *wi
 // slave connection serving branch, with the same attempt-all and binary-result
 // semantics (py: batch_broadcast_xshard_tx_list).
 func (s *SlaveComm) SendBatchXshardTxList(ctx context.Context, branch uint32, req *wire.BatchAddXshardTxListRequest) error {
-	return s.broadcastToBranch(branch, func(c *XshardConn) error {
+	return s.broadcastToBranch(branch, func(c *slaveconn.XshardConn) error {
 		return c.SendBatchAddXshardTxList(ctx, req)
 	})
 }
@@ -419,7 +420,7 @@ func (s *SlaveComm) GetPeerMinorBlockHeaderListWithSkip(ctx context.Context, clu
 
 // LookupPeer routes virtual peer frames from the master to the PeerConn serving
 // (cluster_peer_id, branch), or nil when there is none (py: NULL_CONNECTION).
-func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *PeerConn {
+func (s *SlaveComm) LookupPeer(clusterPeerID uint64, branch uint32) *slaveconn.PeerConn {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
 	if bm, ok := s.peers[clusterPeerID]; ok {
@@ -580,7 +581,7 @@ func (s *SlaveComm) acceptLoop() {
 // joined or waited on by Stop: it holds nothing Stop waits for, and Stop is
 // non-blocking.
 func (s *SlaveComm) runMasterConn(conn net.Conn) {
-	mc, err := NewMasterConn(MasterConnConfig{
+	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{
 		Conn:                 conn,
 		MaxPayloadSize:       s.cfg.MaxPayloadSize,
 		LocalID:              s.cfg.ID,
@@ -628,7 +629,7 @@ func (s *SlaveComm) runXshardConn(conn net.Conn) {
 
 // requirePeer resolves the (clusterPeerID, branch) connection or reports the
 // NULL_CONNECTION case: no sendable connection exists.
-func (s *SlaveComm) requirePeer(clusterPeerID uint64, branch uint32) (*PeerConn, error) {
+func (s *SlaveComm) requirePeer(clusterPeerID uint64, branch uint32) (*slaveconn.PeerConn, error) {
 	if pc := s.LookupPeer(clusterPeerID, branch); pc != nil {
 		return pc, nil
 	}
@@ -656,12 +657,12 @@ func (s *SlaveComm) addPeerConnection(clusterPeerID uint64, branch uint32) (crea
 	}
 	bm, ok := s.peers[clusterPeerID]
 	if !ok {
-		bm = make(map[uint32]*PeerConn)
+		bm = make(map[uint32]*slaveconn.PeerConn)
 	}
 	if _, exists := bm[branch]; exists {
 		return false, nil
 	}
-	pc, err := NewPeerConn(clusterPeerID, branch, s.master.Load(), s.cfg.Peer, s.logger)
+	pc, err := slaveconn.NewPeerConn(clusterPeerID, branch, s.master.Load(), s.cfg.Peer, s.logger)
 	if err != nil {
 		return false, err
 	}
@@ -679,13 +680,13 @@ func (s *SlaveComm) addPeerConnection(clusterPeerID uint64, branch uint32) (crea
 // Close happens outside peersMu.
 func (s *SlaveComm) closeAllPeers() {
 	s.peersMu.Lock()
-	var all []*PeerConn
+	var all []*slaveconn.PeerConn
 	for _, bm := range s.peers {
 		for _, pc := range bm {
 			all = append(all, pc)
 		}
 	}
-	s.peers = make(map[uint64]map[uint32]*PeerConn)
+	s.peers = make(map[uint64]map[uint32]*slaveconn.PeerConn)
 	s.clusterPeerIDs = make(map[uint64]struct{})
 	s.peersMu.Unlock()
 	for _, pc := range all {
