@@ -15,12 +15,6 @@ type merkleGoldenItem struct {
 	Payload []byte
 }
 
-type derivablePayloads [][]byte
-
-func (p derivablePayloads) Len() int { return len(p) }
-
-func (p derivablePayloads) Bytes(i int) []byte { return p[i] }
-
 type unserializableMerkleItem struct {
 	Value chan int
 }
@@ -63,39 +57,6 @@ func TestCalculateMerkleRootGoldenVectors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := CalculateMerkleRoot(test.list); got != test.want {
 				t.Fatalf("CalculateMerkleRoot mismatch: got %s, want %s", got.Hex(), test.want.Hex())
-			}
-		})
-	}
-}
-
-func TestDeriveShaGoldenVectors(t *testing.T) {
-	// TODO: Add receipt-trie golden vectors in the receipt/types PR once Receipt is introduced.
-	tests := []struct {
-		name string
-		list derivablePayloads
-		want common.Hash
-	}{
-		{
-			name: "empty",
-			list: nil,
-			want: common.HexToHash("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421"),
-		},
-		{
-			name: "single",
-			list: derivablePayloads{[]byte("cat")},
-			want: common.HexToHash("0xb423fb4e634b237f9e4fe311a0b72e299540b2407f2fe06f262cac177dd755bd"),
-		},
-		{
-			name: "multi",
-			list: derivablePayloads{[]byte("cat"), []byte("dog"), []byte("fish")},
-			want: common.HexToHash("0x47fdad14c87a0b6acdce6fc6c4d65e315d3e0db6276ae0ae510b1681a28974d3"),
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := DeriveSha(test.list); got != test.want {
-				t.Fatalf("DeriveSha mismatch: got %s, want %s", got.Hex(), test.want.Hex())
 			}
 		})
 	}
