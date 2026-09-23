@@ -7,10 +7,10 @@ import "errors"
 var (
 	ErrQuarkChainConfigUnavailable = errors.New("quarkchain config is unavailable")
 	ErrShardConfigUnavailable      = errors.New("shard config is unavailable")
-	ErrDatabaseUnavailable         = errors.New("shard coordinator database is unavailable")
-	ErrMinorChainUnavailable       = errors.New("minor chain is unavailable")
+	ErrDatabaseUnavailable         = errors.New("database is unavailable")
+	ErrMinorChainUnavailable       = errors.New("minor block chain is unavailable")
 	ErrConnManagerUnavailable      = errors.New("connection manager is unavailable")
-	ErrNoGenesis                   = errors.New("minor chain genesis is missing")
+	ErrNoGenesis                   = errors.New("minor block chain genesis is missing")
 	ErrUnknownBlock                = errors.New("unknown minor block")
 	ErrUnknownParent               = errors.New("unknown minor block parent")
 	ErrStateRootMismatch           = errors.New("processed state root does not match minor block")

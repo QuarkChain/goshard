@@ -50,10 +50,11 @@ type ProcessResult struct {
 	OutgoingXShard []*types.CrossShardTransactionDeposit
 }
 
-// MinorBlockValidator checks context-free block commitments and compares them
-// with the outputs returned by Processor. Root-chain policy remains in
-// ShardCoordinator.
-type MinorBlockValidator interface {
+// BlockValidator validates block data and deterministic execution results
+// without accessing local chain or root-chain state. MinorBlockChain owns local
+// parent/state checks, while ShardCoordinator owns shard, root, configuration,
+// and consensus validation.
+type BlockValidator interface {
 	ValidateBlock(block *types.MinorBlock) error
 	ValidateState(block *types.MinorBlock, statedb *state.StateDB, result *ProcessResult) error
 }

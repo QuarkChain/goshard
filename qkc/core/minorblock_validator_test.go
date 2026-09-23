@@ -19,7 +19,7 @@ import (
 )
 
 func TestBasicMinorBlockValidatorValidateBlock(t *testing.T) {
-	validator := NewBasicMinorBlockValidator()
+	validator := NewMinorBlockValidator()
 	block := newValidatorBlock(t, newValidatorState(t), nil)
 	if err := validator.ValidateBlock(block); err != nil {
 		t.Fatalf("valid block rejected: %v", err)
@@ -92,7 +92,7 @@ func TestBasicMinorBlockValidatorValidateBlock(t *testing.T) {
 }
 
 func TestBasicMinorBlockValidatorAllowsSoftXShardGasLimit(t *testing.T) {
-	validator := NewBasicMinorBlockValidator()
+	validator := NewMinorBlockValidator()
 	block := newValidatorBlock(t, newValidatorState(t), nil)
 	header, meta := block.Header(), block.Meta()
 	meta.XShardGasLimit.Value.SetUint64(1)
@@ -106,7 +106,7 @@ func TestBasicMinorBlockValidatorAllowsSoftXShardGasLimit(t *testing.T) {
 }
 
 func TestBasicMinorBlockValidatorValidateState(t *testing.T) {
-	validator := NewBasicMinorBlockValidator()
+	validator := NewMinorBlockValidator()
 	statedb := newValidatorState(t)
 	block := newValidatorBlock(t, statedb, nil)
 	result := newValidatorResult(block)
@@ -202,13 +202,13 @@ func TestBasicMinorBlockValidatorValidatesReceiptCommitments(t *testing.T) {
 	result := newValidatorResult(block)
 	result.Receipts = receipts
 
-	if err := NewBasicMinorBlockValidator().ValidateState(block, statedb, result); err != nil {
+	if err := NewMinorBlockValidator().ValidateState(block, statedb, result); err != nil {
 		t.Fatalf("matching receipt commitments rejected: %v", err)
 	}
 }
 
 func TestBasicMinorBlockValidatorDeletesEmptyAccountsForStateRoot(t *testing.T) {
-	validator := NewBasicMinorBlockValidator()
+	validator := NewMinorBlockValidator()
 	wantState := newValidatorState(t)
 	block := newValidatorBlock(t, wantState, nil)
 	actualState := newValidatorState(t)

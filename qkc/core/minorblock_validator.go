@@ -3,7 +3,6 @@
 package core
 
 import (
-	"bytes"
 	"fmt"
 	"math/big"
 
@@ -12,19 +11,22 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 )
 
-// BasicMinorBlockValidator checks commitments contained in a minor block and
+// MinorBlockValidator checks commitments contained in a minor block and
 // compares them with deterministic execution outputs. Shard and root-chain
 // policy belongs to ShardCoordinator.
-type BasicMinorBlockValidator struct{}
+type MinorBlockValidator struct{}
 
-// NewBasicMinorBlockValidator creates a context-free minor block validator.
-func NewBasicMinorBlockValidator() *BasicMinorBlockValidator {
-	return new(BasicMinorBlockValidator)
+// NewMinorBlockValidator creates a context-free minor block validator.
+func NewMinorBlockValidator() *MinorBlockValidator {
+	return new(MinorBlockValidator)
 }
 
-// ValidateBlock checks commitments and gas bounds that do not require parent,
-// shard, root-chain, or consensus-engine context.
-func (*BasicMinorBlockValidator) ValidateBlock(block *types.MinorBlock) error {
+// ValidateBlock validates context-free block commitments and intrinsic limits.
+// It intentionally does not query chain state. MinorBlockChain checks known
+// blocks, parent and state availability, and parent hash/height continuity.
+// ShardCoordinator checks shard, root-chain, configuration, and consensus rules,
+// including difficulty, PoW seal, and PoSW-adjusted difficulty and seal.
+func (*MinorBlockValidator) ValidateBlock(block *types.MinorBlock) error {
 	if block == nil {
 		return ErrUnknownBlock
 	}
@@ -58,7 +60,7 @@ func (*BasicMinorBlockValidator) ValidateBlock(block *types.MinorBlock) error {
 // ValidateState compares execution outputs with the commitments carried by a
 // minor block. Empty accounts are deleted when deriving the state root, matching
 // the state commit semantics used by minor block import.
-func (*BasicMinorBlockValidator) ValidateState(block *types.MinorBlock, statedb *state.StateDB, result *ProcessResult) error {
+func (*MinorBlockValidator) ValidateState(block *types.MinorBlock, statedb *state.StateDB, result *ProcessResult) error {
 	if block == nil || statedb == nil || result == nil {
 		return ErrInvalidExecutionResult
 	}
@@ -80,19 +82,16 @@ func (*BasicMinorBlockValidator) ValidateState(block *types.MinorBlock, statedb 
 	if new(big.Int).SetUint64(result.XShardGasUsed).Cmp(block.CrossShardGasUsed()) != 0 {
 		return fmt.Errorf("have %d want %s: %w", result.XShardGasUsed, block.CrossShardGasUsed(), ErrXShardGasUsedMismatch)
 	}
-	if result.CoinbaseAmount == nil {
-		return ErrInvalidExecutionResult
+	actualCoinbase := result.CoinbaseAmount.GetBalanceMap()
+	expectedCoinbase := block.CoinbaseAmount().GetBalanceMap()
+	if len(actualCoinbase) != len(expectedCoinbase) {
+		return ErrCoinbaseAmountMismatch
 	}
-	actualCoinbase, err := result.CoinbaseAmount.SerializeToBytes()
-	if err != nil {
-		return fmt.Errorf("serialize processed coinbase amount: %w", err)
-	}
-	expectedCoinbase, err := block.CoinbaseAmount().SerializeToBytes()
-	if err != nil {
-		return fmt.Errorf("serialize minor block coinbase amount: %w", err)
-	}
-	if !bytes.Equal(actualCoinbase, expectedCoinbase) {
-		return fmt.Errorf("have %x want %x: %w", actualCoinbase, expectedCoinbase, ErrCoinbaseAmountMismatch)
+	for tokenID, actualBalance := range actualCoinbase {
+		expectedBalance, ok := expectedCoinbase[tokenID]
+		if !ok || actualBalance.Cmp(expectedBalance) != 0 {
+			return ErrCoinbaseAmountMismatch
+		}
 	}
 	return nil
 }
