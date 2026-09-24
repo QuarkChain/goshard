@@ -295,7 +295,7 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 		return nil, GasBudget{}, ErrQKCSenderDisallowed
 	}
 	snapshot := evm.StateDB.Snapshot()
-	p, isPrecompile, specialErr := evm.qkcSpecial(addr)
+	p, isPrecompile, specialErr := evm.qkcPrecompile(addr)
 	if specialErr != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		return nil, gas, specialErr
@@ -399,7 +399,7 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	var snapshot = evm.StateDB.Snapshot()
 
 	// It is allowed to call precompiles, even via delegatecall
-	if p, isPrecompile, specialErr := evm.qkcSpecial(addr); specialErr != nil {
+	if p, isPrecompile, specialErr := evm.qkcPrecompile(addr); specialErr != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		return nil, gas, specialErr
 	} else if isPrecompile {
@@ -451,7 +451,7 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 	var snapshot = evm.StateDB.Snapshot()
 
 	// It is allowed to call precompiles, even via delegatecall
-	if p, isPrecompile, specialErr := evm.qkcSpecial(addr); specialErr != nil {
+	if p, isPrecompile, specialErr := evm.qkcPrecompile(addr); specialErr != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		return nil, gas, specialErr
 	} else if isPrecompile {
@@ -512,7 +512,7 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	// future scenarios
 	evm.StateDB.AddBalance(addr, new(uint256.Int), tracing.BalanceChangeTouchAccount)
 
-	if p, isPrecompile, specialErr := evm.qkcSpecial(addr); specialErr != nil {
+	if p, isPrecompile, specialErr := evm.qkcPrecompile(addr); specialErr != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		return nil, gas, specialErr
 	} else if isPrecompile {
@@ -560,6 +560,9 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
+	// QKC apply_transaction increments the top-level sender's nonce before
+	// entering the VM (messages.py:430). Ordinary execution and nested CREATEs
+	// still increment it here.
 	if !evm.qkcExecution || evm.TxContext.Origin != caller {
 		nonce := evm.StateDB.GetNonce(caller)
 		if nonce+1 < nonce {
@@ -692,18 +695,20 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
-	if !evm.qkcExecution {
-		contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
+	if evm.qkcExecution {
+		nonce := evm.StateDB.GetNonce(caller)
+		// QKC apply_transaction has already incremented a top-level sender's
+		// nonce, so contract address derivation uses the preceding value.
+		if evm.TxContext.Origin == caller {
+			if nonce == 0 {
+				return nil, common.Address{}, gas, ErrNonceUintOverflow
+			}
+			nonce--
+		}
+		contractAddr = QKCContractAddress(caller, evm.TxContext.ToFullShardKey, nonce)
 		return evm.create(caller, code, gas, value, contractAddr, CREATE)
 	}
-	nonce := evm.StateDB.GetNonce(caller)
-	if evm.TxContext.Origin == caller {
-		if nonce == 0 {
-			return nil, common.Address{}, gas, ErrNonceUintOverflow
-		}
-		nonce--
-	}
-	contractAddr = QKCContractAddress(caller, evm.TxContext.ToFullShardKey, nonce)
+	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
 	return evm.create(caller, code, gas, value, contractAddr, CREATE)
 }
 

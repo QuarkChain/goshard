@@ -36,7 +36,11 @@ func (evm *EVM) qkcPOSWDisallows(sender common.Address, value *uint256.Int) bool
 	return overflow || required.Gt(evm.StateDB.GetBalance(sender))
 }
 
-func (evm *EVM) qkcSpecial(addr common.Address) (PrecompiledContract, bool, error) {
+// qkcPrecompile resolves addr using QuarkChain's precompile activation rules.
+// Ethereum precompiles are inactive at timestamp zero. QKC system precompiles
+// remain inactive through their enable timestamp; once active, they trigger the
+// sticky block-abandon error because multi-native-token execution is unsupported.
+func (evm *EVM) qkcPrecompile(addr common.Address) (PrecompiledContract, bool, error) {
 	var enableTimestamp uint64
 	switch addr {
 	case qkcCurrentMNTIDAddress, qkcTransferMNTAddress, qkcDeploySystemContractAddress:
@@ -48,6 +52,8 @@ func (evm *EVM) qkcSpecial(addr common.Address) (PrecompiledContract, bool, erro
 		return precompile, ok && evm.Context.Time > 0, nil
 	}
 	if evm.Context.Time > enableTimestamp {
+		// Keep the error visible to the top-level message even when an opcode
+		// converts a nested call failure into a false result.
 		evm.qkcUnsupportedMNT = ErrQKCUnsupportedMNT
 		return nil, true, ErrQKCUnsupportedMNT
 	}
