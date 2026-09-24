@@ -55,28 +55,25 @@ in the third column.
 | op | pyquarkchain `State` | Go |
 | --- | --- | --- |
 | `set_full_shard_key` | `full_shard_key = v` | `StateDB.SetFullShardKey` |
-| `delta_token_balance` | `delta_token_balance` | `EvmState.DeltaTokenBalance` |
-| `set_token_balance` | `set_token_balance` | `EvmState.SetTokenBalance` |
-| `read_account` | `get_balance` | `EvmState.GetBalance` |
-| `set_nonce` | `set_nonce` | `EvmState.SetNonce` |
-| `increment_nonce` | `increment_nonce` | `EvmState.IncrementNonce` |
-| `set_code` | `set_code` | `EvmState.SetCode` |
+| `delta_token_balance` | `delta_token_balance` | `StateDB.DeltaTokenBalance` |
+| `set_token_balance` | `set_token_balance` | `StateDB.SetBalanceByTokenID` |
+| `read_account` | `get_balance` | `StateDB.GetBalanceByTokenID` |
+| `set_nonce` | `set_nonce` | `StateDB.SetNonce` |
+| `increment_nonce` | `increment_nonce` | `StateDB.GetNonce` + `StateDB.SetNonce` |
+| `set_code` | `set_code` | `StateDB.SetCode` |
 | `set_storage` | `set_storage_data` | `StateDB.SetState` |
 | `snapshot` | `snapshot` | `StateDB.Snapshot` |
 | `revert` | `revert` | `StateDB.RevertToSnapshot` |
-| `commit` | `commit` | `EvmState.Commit` |
+| `commit` | `commit` | `StateDB.Commit`, then reopen at the returned root |
 
-The two Go receivers are one object. `EvmState` is QuarkChain's, in `qkc/state`;
-`StateDB` is geth's, in `core/state`, which this fork has taught QuarkChain's
-account rules (`core/state/statedb_qkc.go`). `EvmState` embeds a `*state.StateDB`,
-and Go makes an embedded type's methods callable on the outer one, so a row
-naming `StateDB` is that method reached through `EvmState` unchanged — no
-forwarding code exists for it. `qkc/state` writes its own method only where
-QuarkChain's semantics differ from geth's.
+The Go consumer operates directly on geth's `core/state.StateDB`, which this
+fork has taught QuarkChain's account rules (`core/state/statedb_qkc.go`). The
+test adapts pyquarkchain's empty-account reads and explicitly reopens a committed
+root instead of giving `StateDB` a second lifecycle.
 
 ## Mutable-state policy families (S1)
 
-`qkc/state.TestStateGolden` consumes all 23 state vectors without a VM or a
+`core/state.TestStateGolden` consumes all 23 state vectors without a VM or a
 transaction executor. The following nine supplement the 14 retained S0 cases.
 Each checks the committed state root and account read-back against the pinned oracle.
 The `_qkc` and `_qeth` variants exercise the two balance dispatch paths.

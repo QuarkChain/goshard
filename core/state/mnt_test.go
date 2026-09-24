@@ -4,6 +4,7 @@ package state
 
 import (
 	"fmt"
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -128,6 +129,28 @@ func TestTokenBalanceAPIs(t *testing.T) {
 	s.SubBalanceByTokenID(addr, uint256.NewInt(2), 100, tracing.BalanceChangeUnspecified)
 	assert.Equal(t, uint256.NewInt(1002), s.GetBalanceByTokenID(addr, qkccommon.DefaultTokenID))
 	assert.Equal(t, uint256.NewInt(502), s.GetBalanceByTokenID(addr, 100))
+}
+
+func TestDeltaTokenBalanceRejectsOverflow(t *testing.T) {
+	for _, tokenID := range []uint64{qkccommon.DefaultTokenID, 100} {
+		t.Run(fmt.Sprintf("token=%d", tokenID), func(t *testing.T) {
+			s := newMntTestStateDB(t)
+			addr := common.HexToAddress("0x1235")
+			max := new(uint256.Int).SetAllOne()
+			s.SetBalanceByTokenID(addr, max, tokenID, tracing.BalanceChangeUnspecified)
+
+			err := s.DeltaTokenBalance(addr, tokenID, big.NewInt(1))
+			require.ErrorContains(t, err, "balance overflows 256 bits")
+			require.NoError(t, s.Error())
+			require.Equal(t, max, s.GetBalanceByTokenID(addr, tokenID))
+
+			root, err := s.Commit(0, false, false)
+			require.NoError(t, err)
+			reopened, err := New(root, s.Database())
+			require.NoError(t, err)
+			require.Equal(t, max, reopened.GetBalanceByTokenID(addr, tokenID))
+		})
+	}
 }
 
 func TestTokenBalanceJournalRevertWritesZero(t *testing.T) {
