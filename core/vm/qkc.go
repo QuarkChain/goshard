@@ -7,7 +7,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/params"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
@@ -27,17 +26,6 @@ var (
 	// ErrQKCUnsupportedMNT abandons a block that reaches multi-native-token execution.
 	ErrQKCUnsupportedMNT = errors.New("qkc: multi-native-token execution is unsupported")
 )
-
-func qkcPrecompiledContracts(rules params.Rules) PrecompiledContracts {
-	active := activePrecompiledContracts(rules)
-	precompiles := make(PrecompiledContracts, 8)
-	for addr, precompile := range active {
-		if addr.Big().BitLen() <= 8 && addr[common.AddressLength-1] >= 1 && addr[common.AddressLength-1] <= 8 {
-			precompiles[addr] = precompile
-		}
-	}
-	return precompiles
-}
 
 func (evm *EVM) qkcPOSWDisallows(sender common.Address, value *uint256.Int) bool {
 	locked, ok := evm.Context.SenderDisallowMap[sender]

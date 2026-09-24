@@ -168,7 +168,7 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		jumpDests:   newMapJumpDests(),
 		arena:       newArena(),
 	}
-	evm.precompiles = qkcPrecompiledContracts(evm.chainRules)
+	evm.precompiles = activePrecompiledContracts(evm.chainRules)
 
 	switch {
 	case evm.chainRules.IsAmsterdam:
