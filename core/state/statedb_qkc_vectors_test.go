@@ -82,7 +82,9 @@ func loadStateGolden(t *testing.T) []goldenStateCase {
 
 func newTestState(t *testing.T) *corestate.StateDB {
 	t.Helper()
-	state, err := corestate.NewQKC(coretypes.EmptyRootHash, corestate.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+	disk := rawdb.NewMemoryDatabase()
+	db := corestate.NewDatabase(triedb.NewDatabase(disk, triedb.HashDefaults), corestate.NewCodeDB(disk))
+	state, err := corestate.NewQKC(coretypes.EmptyRootHash, db)
 	if err != nil {
 		t.Fatalf("NewQKC: %v", err)
 	}
@@ -350,7 +352,8 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 			continue
 		}
 		t.Run(tc.Name, func(t *testing.T) {
-			db := corestate.NewQKCDatabase(rawdb.NewMemoryDatabase())
+			disk := rawdb.NewMemoryDatabase()
+			db := corestate.NewDatabase(triedb.NewDatabase(disk, triedb.HashDefaults), corestate.NewCodeDB(disk))
 			state, err := corestate.NewQKC(coretypes.EmptyRootHash, db)
 			if err != nil {
 				t.Fatalf("NewQKC: %v", err)

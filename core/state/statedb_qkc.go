@@ -9,17 +9,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/ethdb"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
-	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 )
-
-// NewQKCDatabase opens the lossless hash-keyed MPT database required by
-// QuarkChain account encoding.
-func NewQKCDatabase(db ethdb.Database) Database {
-	return NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), NewCodeDB(db))
-}
 
 // NewQKC opens the state named by root after checking that the database can
 // encode QuarkChain accounts without loss.

@@ -66,7 +66,7 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		seenRecipients[addr.Recipient] = addr
 	}
 
-	sdb := corestate.NewQKCDatabase(db)
+	sdb := corestate.NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), corestate.NewCodeDB(db))
 	defer sdb.TrieDB().Close()
 	statedb, err := corestate.NewQKC(coretypes.EmptyRootHash, sdb)
 	if err != nil {
