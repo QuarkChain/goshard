@@ -18,12 +18,12 @@ import (
 
 type importTestProcessor struct {
 	calls    int
-	cursor   XShardDepositCursor
+	cursor   XShardCursor
 	resultFn func(*types.MinorBlock, *state.StateDB) *ProcessResult
 	err      error
 }
 
-func (processor *importTestProcessor) Process(block *types.MinorBlock, statedb *state.StateDB, cursor XShardDepositCursor, _ vm.Config) (*ProcessResult, error) {
+func (processor *importTestProcessor) Process(block *types.MinorBlock, statedb *state.StateDB, cursor XShardCursor, _ vm.Config) (*ProcessResult, error) {
 	processor.calls++
 	processor.cursor = cursor
 	if processor.err != nil {
@@ -57,11 +57,11 @@ func TestMinorBlockChainInsertBlockPersistsCandidateWithoutChangingHead(t *testi
 	processor := &importTestProcessor{
 		resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 			result := validImportTestResult(block)
-			result.OutgoingXShard = outgoing
+			result.OutgoingXShardTXs = outgoing
 			return result
 		},
 	}
-	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	block := newImportTestBlock(t, genesis, 1)
 
 	got, err := chain.InsertBlockWithXShardInput(block, nil, InsertOptions{})
@@ -99,7 +99,7 @@ func TestMinorBlockChainInsertOptions(t *testing.T) {
 	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 		return validImportTestResult(block)
 	}}
-	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	block := newImportTestBlock(t, genesis, 1)
 
 	if _, err := chain.InsertBlockWithXShardInput(block, nil, InsertOptions{}); err != nil {
@@ -210,7 +210,7 @@ func TestMinorBlockChainInsertPersistsState(t *testing.T) {
 		statedb.SetBalance(address, balance, tracing.BalanceChangeUnspecified)
 		return validImportTestResult(block)
 	}}
-	chain, _, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, _, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	block := newImportTestBlockWithState(t, genesis, 1, wantState)
 
 	if _, err := chain.InsertBlockWithXShardInput(block, nil, InsertOptions{}); err != nil {
@@ -232,7 +232,7 @@ func TestMinorBlockChainInsertReleasesFailedBatch(t *testing.T) {
 	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 		return validImportTestResult(block)
 	}}
-	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	block := newImportTestBlock(t, genesis, 1)
 	db.failWrites = true
 
@@ -251,7 +251,47 @@ func TestMinorBlockChainInsertReleasesFailedBatch(t *testing.T) {
 	}
 }
 
-func newImportTestChain(t *testing.T, processor Processor, validator MinorBlockValidator) (*MinorBlockChain, *batchTrackingDatabase, *types.MinorBlock) {
+func TestMinorBlockChainInterruptInsert(t *testing.T) {
+	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
+		return validImportTestResult(block)
+	}}
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
+	block := newImportTestBlock(t, genesis, 1)
+
+	chain.InterruptInsert(true)
+	if _, err := chain.InsertBlockWithXShardInput(block, nil, InsertOptions{}); !errors.Is(err, ErrChainStopped) {
+		t.Fatalf("interrupted insert error = %v, want %v", err, ErrChainStopped)
+	}
+	if processor.calls != 0 {
+		t.Fatalf("interrupted insert reached processor %d times", processor.calls)
+	}
+	if chain.HasBlock(block.Hash()) || rawdb.HasQKCReceipts(db, block.Hash()) {
+		t.Fatal("interrupted insert persisted block results")
+	}
+
+	chain.InterruptInsert(false)
+	if _, err := chain.InsertBlockWithXShardInput(block, nil, InsertOptions{}); err != nil {
+		t.Fatalf("resumed insert failed: %v", err)
+	}
+	if processor.calls != 1 {
+		t.Fatalf("resumed insert processor calls = %d, want 1", processor.calls)
+	}
+
+	chain.Stop()
+	if !chain.procInterrupt.Load() {
+		t.Fatal("Stop did not interrupt inserts")
+	}
+	chain.InterruptInsert(false)
+	next := newImportTestBlock(t, block, 2)
+	if _, err := chain.InsertBlockWithXShardInput(next, nil, InsertOptions{}); !errors.Is(err, ErrChainStopped) {
+		t.Fatalf("insert after Stop error = %v, want %v", err, ErrChainStopped)
+	}
+	if processor.calls != 1 {
+		t.Fatalf("processor calls after Stop = %d, want 1", processor.calls)
+	}
+}
+
+func newImportTestChain(t *testing.T, processor Processor, validator BlockValidator) (*MinorBlockChain, *batchTrackingDatabase, *types.MinorBlock) {
 	t.Helper()
 	db := &batchTrackingDatabase{Database: rawdb.NewMemoryDatabase()}
 	genesis := storageTestBlock(nil, 0, coretypes.EmptyRootHash)

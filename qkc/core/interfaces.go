@@ -41,13 +41,13 @@ type Processor interface {
 
 // ProcessResult contains the values computed by Processor.Process.
 type ProcessResult struct {
-	Receipts       types.Receipts
-	Logs           []*coretypes.Log
-	GasUsed        uint64
-	XShardGasUsed  uint64
-	XShardCursor   *types.XShardTxCursorInfo
-	CoinbaseAmount *qkccommon.TokenBalances
-	OutgoingXShard []*types.CrossShardTransactionDeposit
+	Receipts          types.Receipts
+	Logs              []*coretypes.Log
+	GasUsed           uint64
+	XShardGasUsed     uint64
+	XShardCursor      *types.XShardTxCursorInfo
+	CoinbaseAmount    *qkccommon.TokenBalances
+	OutgoingXShardTXs []*types.CrossShardTransactionDeposit
 }
 
 // BlockValidator validates block data and deterministic execution results

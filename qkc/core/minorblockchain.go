@@ -34,9 +34,10 @@ type MinorBlockChain struct {
 
 	chainmu *syncx.ClosableMutex
 
-	genesisBlock *types.MinorBlock
-	currentBlock atomic.Pointer[types.MinorBlock]
-	stopOnce     sync.Once
+	genesisBlock  *types.MinorBlock
+	currentBlock  atomic.Pointer[types.MinorBlock]
+	procInterrupt atomic.Bool
+	stopOnce      sync.Once
 }
 
 // NewMinorBlockChain opens a local minor chain whose genesis block and state
@@ -172,9 +173,18 @@ func (c *MinorBlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, state.NewMPTDatabase(c.triedb, c.codedb))
 }
 
-// Stop closes the chain's state backend. The caller retains ownership of db.
+// InterruptInsert pauses or resumes block insertion at block boundaries. It
+// does not abort an insertion that is already executing or reopen a stopped
+// chain.
+func (c *MinorBlockChain) InterruptInsert(on bool) {
+	c.procInterrupt.Store(on)
+}
+
+// Stop interrupts queued insertions, waits for the active insertion to finish,
+// and closes the chain's state backend. The caller retains ownership of db.
 func (c *MinorBlockChain) Stop() {
 	c.stopOnce.Do(func() {
+		c.InterruptInsert(true)
 		c.chainmu.Close()
 		_ = c.triedb.Close()
 	})

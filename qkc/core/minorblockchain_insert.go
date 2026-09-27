@@ -13,7 +13,7 @@ import (
 
 // InsertBlockWithXShardInput imports one candidate block without changing the
 // canonical head. ShardCoordinator owns the decision to select the candidate.
-func (c *MinorBlockChain) InsertBlockWithXShardInput(block *types.MinorBlock, cursor *XShardTxCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error) {
+func (c *MinorBlockChain) InsertBlockWithXShardInput(block *types.MinorBlock, cursor XShardCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error) {
 	if block == nil {
 		return nil, ErrUnknownBlock
 	}
@@ -21,15 +21,9 @@ func (c *MinorBlockChain) InsertBlockWithXShardInput(block *types.MinorBlock, cu
 		return nil, ErrChainStopped
 	}
 	defer c.chainmu.Unlock()
-	var executionCursor XShardDepositCursor
-	if cursor != nil {
-		executionCursor = cursor
+	if c.procInterrupt.Load() {
+		return nil, ErrChainStopped
 	}
-	return c.insertBlock(block, executionCursor, options)
-}
-
-// insertBlock assumes chainmu is held.
-func (c *MinorBlockChain) insertBlock(block *types.MinorBlock, cursor XShardDepositCursor, options InsertOptions) ([]*types.CrossShardTransactionDeposit, error) {
 	forceInsert := options.ForceInsert || options.IsCheckDB
 	if c.HasBlockAndState(block.Hash()) && !forceInsert {
 		return nil, nil
@@ -52,18 +46,12 @@ func (c *MinorBlockChain) insertBlock(block *types.MinorBlock, cursor XShardDepo
 			return nil, err
 		}
 	}
-	return result.OutgoingXShard, nil
+	return result.OutgoingXShardTXs, nil
 }
 
 // processBlock opens the parent state and delegates all execution semantics to
 // the injected Processor.
-func (c *MinorBlockChain) processBlock(block *types.MinorBlock, cursor XShardDepositCursor) (*state.StateDB, *ProcessResult, error) {
-	if c.processor == nil {
-		return nil, nil, ErrExecutorUnavailable
-	}
-	if block == nil {
-		return nil, nil, ErrUnknownBlock
-	}
+func (c *MinorBlockChain) processBlock(block *types.MinorBlock, cursor XShardCursor) (*state.StateDB, *ProcessResult, error) {
 	parent := c.GetBlock(block.ParentHash())
 	if parent == nil {
 		return nil, nil, ErrUnknownParent
