@@ -69,9 +69,18 @@ func (db *MPTDatabase) StateReader(stateRoot common.Hash) (StateReader, error) {
 			readers = append(readers, newFlatReader(snap))
 		}
 	}
-	// Path database flat accounts use Ethereum's slim encoding, which drops
-	// QuarkChain token balances and FullShardKey. Read the consensus account
-	// directly from the trie until the flat encoding supports those fields.
+	// The path database flat reader is disabled because Ethereum's slim account
+	// encoding drops QKC MntBalances and FullShardKey. Restore this block once
+	// the flat account encoding is QKC-aware.
+	//
+	// if db.TrieDB().Scheme() == rawdb.PathScheme {
+	// 	reader, err := db.triedb.StateReader(stateRoot)
+	// 	if err == nil {
+	// 		readers = append(readers, newFlatReader(reader))
+	// 	}
+	// }
+	// Configure the trie reader, which is expected to be available as the
+	// gatekeeper unless the state is corrupted.
 	tr, err := newMPTTrieReader(stateRoot, db.triedb)
 	if err != nil {
 		return nil, err
