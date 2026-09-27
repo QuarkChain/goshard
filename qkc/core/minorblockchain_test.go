@@ -269,7 +269,7 @@ func TestMinorBlockChainCanonicalTransitions(t *testing.T) {
 	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 		return validImportTestResult(block)
 	}}
-	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	first := insertHeadTestBlock(t, chain, genesis, 1)
 	second := insertHeadTestBlock(t, chain, first, 2)
 	third := insertHeadTestBlock(t, chain, second, 3)
@@ -298,9 +298,6 @@ func TestMinorBlockChainCanonicalTransitions(t *testing.T) {
 			}
 			if got := rawdb.ReadHeadBlockHash(db); got != transition.target.Hash() {
 				t.Fatalf("head block marker = %s, want %s", got, transition.target.Hash())
-			}
-			if got := rawdb.ReadHeadHeaderHash(db); got != transition.target.Hash() {
-				t.Fatalf("head header marker = %s, want %s", got, transition.target.Hash())
 			}
 			for index, want := range transition.want {
 				number := uint64(index + 1)
@@ -360,7 +357,7 @@ func TestMinorBlockChainSetCanonicalHeadBatchFailureIsAtomic(t *testing.T) {
 	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 		return validImportTestResult(block)
 	}}
-	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	first := insertHeadTestBlock(t, chain, genesis, 1)
 	second := insertHeadTestBlock(t, chain, first, 2)
 	third := insertHeadTestBlock(t, chain, second, 3)
@@ -384,9 +381,6 @@ func TestMinorBlockChainSetCanonicalHeadBatchFailureIsAtomic(t *testing.T) {
 	if got := rawdb.ReadHeadBlockHash(db); got != third.Hash() {
 		t.Fatalf("head block marker = %s, want %s", got, third.Hash())
 	}
-	if got := rawdb.ReadHeadHeaderHash(db); got != third.Hash() {
-		t.Fatalf("head header marker = %s, want %s", got, third.Hash())
-	}
 	for number, want := range map[uint64]common.Hash{1: first.Hash(), 2: second.Hash(), 3: third.Hash()} {
 		if got := rawdb.ReadMinorCanonicalHash(db, number); got != want {
 			t.Errorf("canonical height %d = %s, want %s", number, got, want)
@@ -398,14 +392,14 @@ func TestMinorBlockChainCanonicalHeadSurvivesRestart(t *testing.T) {
 	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 		return validImportTestResult(block)
 	}}
-	chain, db, genesis := newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	chain, db, genesis := newImportTestChain(t, processor, NewMinorBlockValidator())
 	block := insertHeadTestBlock(t, chain, genesis, 1)
 	if err := chain.SetCanonicalHead(block.Hash()); err != nil {
 		t.Fatal(err)
 	}
 	chain.Stop()
 
-	reopened, err := NewMinorBlockChain(db, storageTestShardConfig(), processor, NewBasicMinorBlockValidator(), vm.Config{})
+	reopened, err := NewMinorBlockChain(db, storageTestShardConfig(), processor, NewMinorBlockValidator(), vm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +425,7 @@ func newHeadTestChain(t *testing.T) (*MinorBlockChain, *batchTrackingDatabase, *
 	processor := &importTestProcessor{resultFn: func(block *types.MinorBlock, _ *state.StateDB) *ProcessResult {
 		return validImportTestResult(block)
 	}}
-	return newImportTestChain(t, processor, NewBasicMinorBlockValidator())
+	return newImportTestChain(t, processor, NewMinorBlockValidator())
 }
 
 func insertHeadTestBlock(t *testing.T, chain *MinorBlockChain, parent *types.MinorBlock, nonce uint64) *types.MinorBlock {
@@ -450,9 +444,6 @@ func assertHeadTestGenesis(t *testing.T, chain *MinorBlockChain, db *batchTracki
 	}
 	if got := rawdb.ReadHeadBlockHash(db); got != genesis.Hash() {
 		t.Fatalf("head block marker = %s, want genesis %s", got, genesis.Hash())
-	}
-	if got := rawdb.ReadHeadHeaderHash(db); got != genesis.Hash() {
-		t.Fatalf("head header marker = %s, want genesis %s", got, genesis.Hash())
 	}
 	if got := rawdb.ReadMinorCanonicalHash(db, 1); got != (common.Hash{}) {
 		t.Fatalf("canonical height 1 = %s, want empty", got)

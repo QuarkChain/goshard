@@ -187,24 +187,19 @@ func (c *MinorBlockChain) SetCanonicalHead(hash common.Hash) error {
 		return ErrChainStopped
 	}
 	defer c.chainmu.Unlock()
-	target := c.GetBlock(hash)
-	if target == nil {
-		return ErrUnknownBlock
-	}
-	return c.setHead(target)
+	return c.setHead(hash)
 }
 
 // setHead assumes chainmu is held.
-func (c *MinorBlockChain) setHead(target *types.MinorBlock) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *MinorBlockChain) setHead(hash common.Hash) error {
+	target := c.GetBlock(hash)
 	if target == nil {
 		return ErrUnknownBlock
 	}
 	if !c.HasState(target.Root()) {
 		return ErrStateUnavailable
 	}
-	current := c.current
+	current := c.CurrentBlock()
 	if current == nil {
 		return ErrNoCurrentBlock
 	}
@@ -256,7 +251,7 @@ func (c *MinorBlockChain) setHead(target *types.MinorBlock) error {
 	if err := batch.Write(); err != nil {
 		return fmt.Errorf("write canonical minor head: %w", err)
 	}
-	c.current = target
+	c.currentBlock.Store(target)
 	return nil
 }
 
