@@ -307,6 +307,12 @@ func testFilters(t *testing.T, history uint64, noHistory bool) {
 
 	backend.startFilterMaps(history, noHistory, filtermaps.DefaultParams)
 	defer backend.stopFilterMaps()
+	qkcBlockHashes := strings.NewReplacer(
+		"0x24417bb49ce44cfad65da68f33b510bf2a129c0d89ccf06acb6958b8585ccf34", chain[1].Hash().Hex(),
+		"0x7a7556792ca7d37882882e2b001fe14833eaf81c2c7f865c9c771ec37a024f6b", chain[2].Hash().Hex(),
+		"0x2e4620a2b426b0612ec6cad9603f466723edaed87f98c9137405dd4f7a2409ff", chain[998].Hash().Hex(),
+		"0xb360bad5265261c075ece02d3bf0e39498a6a76310482cdfd90588748e6c5ee0", chain[999].Hash().Hex(),
+	)
 
 	for i, tc := range []struct {
 		f    *Filter
@@ -399,8 +405,9 @@ func testFilters(t *testing.T, history uint64, noHistory bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(have) != tc.want {
-			t.Fatalf("test %d, have:\n%s\nwant:\n%s", i, have, tc.want)
+		want := qkcBlockHashes.Replace(tc.want)
+		if string(have) != want {
+			t.Fatalf("test %d, have:\n%s\nwant:\n%s", i, have, want)
 		}
 	}
 

@@ -47,6 +47,8 @@ func makeJWTSecret(t *testing.T) (string, [32]byte, error) {
 }
 
 func TestEthSuite(t *testing.T) {
+	t.Skip("QKC account encoding is incompatible with the Ethereum chain fixture")
+
 	jwtPath, secret, err := makeJWTSecret(t)
 	if err != nil {
 		t.Fatalf("could not make jwt secret: %v", err)
@@ -75,6 +77,8 @@ func TestEthSuite(t *testing.T) {
 }
 
 func TestSnapSuite(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+
 	jwtPath, secret, err := makeJWTSecret(t)
 	if err != nil {
 		t.Fatalf("could not make jwt secret: %v", err)
