@@ -165,6 +165,8 @@ type QuarkChainConfig struct {
 	chainIdToShardSize                    map[uint32]uint32
 	chainIdToShardIds                     map[uint32][]uint32
 	defaultChainTokenID                   uint64
+	EnableTxTimeStamp                     uint64      `json:"ENABLE_TX_TIMESTAMP"`
+	TxWhitelistSenders                    []string    `json:"TX_WHITELIST_SENDERS"`
 	EnableEvmTimeStamp                    uint64      `json:"ENABLE_EVM_TIMESTAMP"`
 	EnableQkcHashXHeight                  uint64      `json:"ENABLE_QKCHASHX_HEIGHT"`
 	EnableNonReservedNativeTokenTimestamp uint64      `json:"ENABLE_NON_RESERVED_NATIVE_TOKEN_TIMESTAMP"`
@@ -483,6 +485,18 @@ func NewQuarkChainConfig() *QuarkChainConfig {
 func (q *QuarkChainConfig) SetShardsAndValidate(shards map[uint32]*ShardConfig) { // only used in gen config
 	q.shards = shards
 	q.initAndValidate()
+}
+
+// IsTxSenderWhitelisted reports whether sender may transact before
+// EnableTxTimeStamp. Configured senders omit the 0x prefix and may use mixed
+// case, so compare decoded addresses rather than their text form.
+func (q *QuarkChainConfig) IsTxSenderWhitelisted(sender ethcom.Address) bool {
+	for _, entry := range q.TxWhitelistSenders {
+		if ethcom.HexToAddress(entry) == sender {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *QuarkChainConfig) GetDefaultChainTokenID() uint64 {
