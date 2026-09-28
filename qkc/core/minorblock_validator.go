@@ -82,6 +82,9 @@ func (*MinorBlockValidator) ValidateState(block *types.MinorBlock, statedb *stat
 	if new(big.Int).SetUint64(result.XShardGasUsed).Cmp(block.CrossShardGasUsed()) != 0 {
 		return fmt.Errorf("have %d want %s: %w", result.XShardGasUsed, block.CrossShardGasUsed(), ErrXShardGasUsedMismatch)
 	}
+	if result.CoinbaseAmount == nil {
+		return ErrInvalidExecutionResult
+	}
 	actualCoinbase := result.CoinbaseAmount.GetBalanceMap()
 	expectedCoinbase := block.CoinbaseAmount().GetBalanceMap()
 	if len(actualCoinbase) != len(expectedCoinbase) {
