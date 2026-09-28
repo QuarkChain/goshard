@@ -58,8 +58,10 @@ func NewShardCoordinator(qkcConfig *config.QuarkChainConfig, shardConfig *config
 	return &ShardCoordinator{shardConfig: shardConfig, branch: account.NewBranch(shardConfig.GetFullShardId()), db: db, minorBlockChain: minorChain, connManager: connManager}, nil
 }
 
-// InitFromRootBlock installs the initial root or restores the persisted root tip.
-// Recovery preserves the execution layer's current minor head.
+// InitFromRootBlock installs the shard genesis root on first start or adopts
+// the root tip supplied by master on restart. Milestone 1 preserves the minor
+// head because it does not build blocks from rootTip; imported blocks carry
+// explicit parent and previous-root references and are selected directly.
 func (c *ShardCoordinator) InitFromRootBlock(root *types.RootBlock) error {
 	c.importMu.Lock()
 	defer c.importMu.Unlock()
@@ -81,11 +83,16 @@ func (c *ShardCoordinator) InitFromRootBlock(root *types.RootBlock) error {
 	}
 	storedHash := rawdb.ReadRootHeadHash(c.db)
 	if storedHash != (common.Hash{}) {
-		root = c.RootBlockByHash(storedHash)
-		if root == nil {
+		if c.RootBlockByHash(storedHash) == nil {
 			return fmt.Errorf("stored root head %s: %w", storedHash, ErrUnknownRootBlock)
 		}
+		if err := c.storeRootHead(root); err != nil {
+			return fmt.Errorf("adopt master root %s: %w", root.Hash(), err)
+		}
 	} else {
+		if root.Hash() != genesis.PrevRootBlockHash() {
+			return fmt.Errorf("initial root %s does not match minor genesis root %s: %w", root.Hash(), genesis.PrevRootBlockHash(), ErrUnknownRootBlock)
+		}
 		// Persist the input before propagation, but publish the head marker only
 		// after both genesis notifications succeed. A failed boot can then retry.
 		batch := c.db.NewBatch()
@@ -133,8 +140,10 @@ func (c *ShardCoordinator) AddRootBlock(root *types.RootBlock) (bool, error) {
 	return true, nil
 }
 
-// AddMinorBlock executes a candidate, directly selects it and publishes its output.
-// A propagation failure leaves the block persisted and canonical, as in the reference.
+// AddMinorBlock implements the minimal Milestone 1 import flow: execute a
+// candidate, select it directly as canonical, and publish its output. A
+// propagation failure is returned without retrying or rolling back the
+// persisted canonical block.
 func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	if block == nil {
 		return ErrUnknownBlock
@@ -152,6 +161,9 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	}
 	previousHead := c.minorBlockChain.CurrentBlock()
 	if previousHead != nil && previousHead.Hash() == block.Hash() {
+		return nil
+	}
+	if c.minorBlockChain.GetBlock(block.Hash()) != nil {
 		return nil
 	}
 	parent := c.minorBlockChain.GetBlock(block.ParentHash())
@@ -174,9 +186,6 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	}
 	if err := c.connManager.SendMinorBlockHeaderToMaster(block, uint32(len(outputs))); err != nil {
 		return fmt.Errorf("send minor header to master: %w", err)
-	}
-	if err := c.connManager.BroadcastNewTip([]*types.MinorBlockHeader{block.Header()}, c.GetRootTip().Header(), c.branch.Value); err != nil {
-		return fmt.Errorf("broadcast new minor tip: %w", err)
 	}
 	return nil
 }
