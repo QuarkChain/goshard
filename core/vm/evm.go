@@ -560,6 +560,9 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
+	if evm.qkcPOSWDisallows(caller, value) {
+		return nil, common.Address{}, GasBudget{}, ErrQKCSenderDisallowed
+	}
 	// QKC apply_transaction increments the top-level sender's nonce before
 	// entering the VM (messages.py:430). Ordinary execution and nested CREATEs
 	// still increment it here.

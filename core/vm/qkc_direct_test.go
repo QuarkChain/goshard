@@ -66,6 +66,64 @@ func TestQKCCreateAddressUsesFullShardKey(t *testing.T) {
 	require.Equal(t, uint64(1), statedb.GetNonce(address))
 }
 
+func TestQKCCreateRespectsPOSWLock(t *testing.T) {
+	caller := common.HexToAddress("0x1901")
+	evm, statedb := newQKCDirectEVM(t, BlockContext{
+		BlockNumber:       big.NewInt(1),
+		SenderDisallowMap: map[common.Address]*uint256.Int{caller: uint256.NewInt(8)},
+	}, caller, 1)
+	statedb.SetBalance(caller, uint256.NewInt(10), tracing.BalanceChangeUnspecified)
+	statedb.SetNonce(caller, 1, tracing.NonceChangeUnspecified) // admission increments before CREATE
+
+	_, address, gas, err := evm.QKCCreateContract(caller, nil, NewGasBudget(100_000), uint256.NewInt(3), qkccommon.DefaultTokenID, 1, nil)
+	require.ErrorIs(t, err, ErrQKCSenderDisallowed)
+	require.Equal(t, common.Address{}, address)
+	require.Zero(t, gas.RegularGas)
+	require.Equal(t, uint64(10), statedb.GetBalance(caller).Uint64())
+	require.Equal(t, uint64(1), statedb.GetNonce(caller))
+	require.False(t, statedb.Exist(QKCContractAddress(caller, 1, 0)))
+
+	_, address, gas, err = evm.QKCCreateContract(caller, nil, NewGasBudget(100_000), uint256.NewInt(2), qkccommon.DefaultTokenID, 1, nil)
+	require.NoError(t, err)
+	require.Equal(t, QKCContractAddress(caller, 1, 0), address)
+	require.Positive(t, gas.RegularGas)
+	require.Equal(t, uint64(8), statedb.GetBalance(caller).Uint64())
+	require.Equal(t, uint64(2), statedb.GetBalance(address).Uint64())
+}
+
+func TestQKCNestedCreateRespectsPOSWLock(t *testing.T) {
+	caller := common.HexToAddress("0x1911")
+	creator := common.HexToAddress("0x1912")
+	for _, opcode := range []OpCode{CREATE, CREATE2} {
+		t.Run(opcode.String(), func(t *testing.T) {
+			evm, statedb := newQKCDirectEVM(t, BlockContext{
+				BlockNumber:       big.NewInt(1),
+				SenderDisallowMap: map[common.Address]*uint256.Int{creator: uint256.NewInt(8)},
+			}, caller, 1)
+			code := []byte{}
+			if opcode == CREATE2 {
+				code = append(code, byte(PUSH1), 0) // salt
+			}
+			code = append(code, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 3, byte(opcode))
+			code = append(code, byte(PUSH1), 0, byte(MSTORE), byte(PUSH1), 32, byte(PUSH1), 0, byte(RETURN))
+			statedb.SetCode(creator, code, tracing.CodeChangeUnspecified)
+			statedb.SetBalance(creator, uint256.NewInt(10), tracing.BalanceChangeUnspecified)
+
+			output, gas, err := evm.QKCApplyMessage(caller, creator, nil, NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, 1)
+			require.NoError(t, err)
+			require.Equal(t, make([]byte, 32), output)      // failed CREATE pushes zero
+			require.Less(t, gas.RegularGas, uint64(10_000)) // failed child consumes its gas
+			require.Equal(t, uint64(10), statedb.GetBalance(creator).Uint64())
+			require.Zero(t, statedb.GetNonce(creator))
+			if opcode == CREATE {
+				require.False(t, statedb.Exist(QKCContractAddress(creator, 1, 0)))
+			} else {
+				require.False(t, statedb.Exist(crypto.CreateAddress2(creator, [32]byte{}, crypto.Keccak256(nil))))
+			}
+		})
+	}
+}
+
 func TestNonQKCCreateRetainsGethNonceLifecycle(t *testing.T) {
 	caller := common.HexToAddress("0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a")
 	evm, statedb := newQKCDirectEVM(t, BlockContext{BlockNumber: big.NewInt(1)}, caller, 1)
