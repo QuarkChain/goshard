@@ -21,6 +21,12 @@ failed=()
 skipped=()
 goimports_cmd=()
 current_check=""
+current_check_started=0
+current_check_started_at=""
+run_started=0
+run_started_at=""
+run_finished_at=""
+interrupted_signal=""
 report_ready=0
 run_complete=0
 final_reported=0
@@ -53,15 +59,16 @@ elapsed() {
 run_check() {
 	local name="$1"
 	shift
-	local started=$SECONDS
 
 	current_check="$name"
-	printf '\n==> %s\n' "$name" >>"$LOG_FILE"
+	current_check_started=$SECONDS
+	current_check_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	printf '\n==> %s\nstage started: %s\n' "$name" "$current_check_started_at" >>"$LOG_FILE"
 	save_summary
 	"$@" >>"$LOG_FILE" 2>&1
 	local status=$?
 	local duration
-	duration="$(elapsed "$((SECONDS - started))")"
+	duration="$(elapsed "$((SECONDS - current_check_started))")"
 	if ((status == 0)); then
 		passed+=("$name ($duration)")
 		printf '<== PASS: %s (%s)\n' "$name" "$duration" >>"$LOG_FILE"
@@ -172,6 +179,7 @@ check_formatting() {
 
 save_summary() {
 	local item
+	local package_timings
 	{
 		printf 'commit: %s\n' "$(git rev-parse HEAD 2>/dev/null || printf unavailable)"
 		go version 2>/dev/null || printf 'go version: unavailable\n'
@@ -179,7 +187,16 @@ save_summary() {
 		printf 'package jobs: %s\n' "$TEST_JOBS"
 		printf 'in-package parallelism: %s\n' "$TEST_PARALLEL"
 		printf 'Go memory target: %s\n' "$GO_MEMORY_LIMIT"
-		if [[ -n "$current_check" ]]; then
+		printf 'started: %s\n' "$run_started_at"
+		printf 'updated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		printf 'elapsed: %s\n' "$(elapsed "$((SECONDS - run_started))")"
+		if [[ -n "$run_finished_at" ]]; then
+			printf 'finished: %s\n' "$run_finished_at"
+		fi
+		if [[ -n "$interrupted_signal" ]]; then
+			printf 'status: interrupted by %s (pid %s, parent pid %s)\n' \
+				"$interrupted_signal" "$BASHPID" "$PPID"
+		elif [[ -n "$current_check" ]]; then
 			printf 'status: running %s\n' "$current_check"
 		elif ((run_complete == 1)); then
 			printf 'status: complete\n'
@@ -200,7 +217,21 @@ save_summary() {
 			"${#passed[@]}" "${#skipped[@]}" "${#failed[@]}"
 
 		if [[ -n "$current_check" ]]; then
-			printf 'RUN   %s\n' "$current_check"
+			printf 'RUN   %s (started %s, elapsed %s)\n' \
+				"$current_check" "$current_check_started_at" \
+				"$(elapsed "$((SECONDS - current_check_started))")"
+		fi
+		package_timings="$(awk '
+			/^==> full tests$/ { stage = "full"; next }
+			/^==> 386 short tests$/ { stage = "386 short"; next }
+			/^<== (PASS|FAIL): (full tests|386 short tests)/ { stage = ""; next }
+			stage != "" && ($1 == "ok" || $1 == "FAIL") && $3 ~ /^[0-9]+([.][0-9]+)?s$/ {
+				printf "%.3fs  %s  %s  %s\n", $3 + 0, stage, $1, $2
+			}
+		' "$LOG_FILE")"
+		if [[ -n "$package_timings" ]]; then
+			printf '\n===== slowest completed test packages (max 20) =====\n'
+			printf '%s\n' "$package_timings" | sort -nr | sed -n '1,20p'
 		fi
 		if ((${#failed[@]} != 0)); then
 			printf '\n===== failure signatures (max 100) =====\n'
@@ -216,6 +247,7 @@ save_summary() {
 
 finish_report() {
 	final_reported=1
+	run_finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	save_summary
 	cat "$SUMMARY_FILE"
 }
@@ -223,13 +255,20 @@ finish_report() {
 handle_signal() {
 	local signal="$1"
 	local status="$2"
+	local duration
 	trap - HUP INT TERM
+	interrupted_signal="$signal"
 	if [[ -n "$current_check" ]]; then
-		failed+=("$current_check: interrupted by $signal")
-		printf '<== FAIL: %s (interrupted by %s)\n' "$current_check" "$signal" >>"$LOG_FILE"
+		duration="$(elapsed "$((SECONDS - current_check_started))")"
+		failed+=("$current_check: interrupted by $signal ($duration)")
+		printf '<== FAIL: %s (interrupted by %s after %s)\n' \
+			"$current_check" "$signal" "$duration" >>"$LOG_FILE"
 	else
 		failed+=("script: interrupted by $signal")
 	fi
+	printf 'signal context: %s at %s; pid=%s; parent pid=%s; run elapsed=%s\n' \
+		"$signal" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BASHPID" "$PPID" \
+		"$(elapsed "$((SECONDS - run_started))")" >>"$LOG_FILE"
 	current_check=""
 	finish_report
 	exit "$status"
@@ -240,7 +279,7 @@ handle_exit() {
 	trap - EXIT HUP INT TERM
 	if ((report_ready == 1 && final_reported == 0)); then
 		if [[ -n "$current_check" ]]; then
-			failed+=("$current_check: script exited before completion")
+			failed+=("$current_check: script exited before completion ($(elapsed "$((SECONDS - current_check_started))"))")
 			current_check=""
 		elif ((status != 0)); then
 			failed+=("script: exit $status before completion")
@@ -270,6 +309,8 @@ main() {
 		return 1
 	fi
 	report_ready=1
+	run_started=$SECONDS
+	run_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	trap 'handle_signal HUP 129' HUP
 	trap 'handle_signal INT 130' INT
 	trap 'handle_signal TERM 143' TERM
@@ -287,8 +328,6 @@ main() {
 	run_check "generated files and go.mod tidy" go run ./build/ci.go check_generate
 	run_check "forbidden dependencies" go run ./build/ci.go check_baddeps
 	run_check "all command builds" make all
-	run_check "full tests" env GOMAXPROCS="$TEST_PARALLEL" GOMEMLIMIT="$GO_MEMORY_LIMIT" \
-		./build/travis_keepalive.sh go run ./build/ci.go test -p "$TEST_JOBS"
 	run_check "keeper target builds" go run ./build/ci.go keeper
 
 	if [[ "$(go env GOOS)" != "linux" ]]; then
@@ -300,6 +339,8 @@ main() {
 			./build/travis_keepalive.sh \
 			go run ./build/ci.go test -arch 386 -short -p "$TEST_JOBS"
 	fi
+	run_check "full tests" env GOMAXPROCS="$TEST_PARALLEL" GOMEMLIMIT="$GO_MEMORY_LIMIT" \
+		./build/travis_keepalive.sh go run ./build/ci.go test -p "$TEST_JOBS"
 
 	run_complete=1
 	finish_report
