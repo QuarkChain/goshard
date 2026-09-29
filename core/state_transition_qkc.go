@@ -17,6 +17,8 @@ import (
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/config"
+	qkcparams "github.com/ethereum/go-ethereum/qkc/params"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 )
@@ -72,8 +74,11 @@ func validateTransaction(ctx *QKCExecutionContext, statedb *state.StateDB, gp *G
 		return fmt.Errorf("%w: %v", ErrQKCInvalidTransaction, err)
 	}
 	branch := ctx.branch()
-	if !branch.IsInBranch(tx.FromFullShardKey()) || !branch.IsInBranch(tx.ToFullShardKey()) {
+	if !branch.IsInBranch(tx.FromFullShardKey()) {
 		return fmt.Errorf("%w: transaction outside shard %#x", ErrQKCInvalidTransaction, branch.GetFullShardID())
+	}
+	if _, err := ctx.QKCConfig.GetFullShardIdByFullShardKey(tx.ToFullShardKey()); err != nil {
+		return fmt.Errorf("%w: destination shard: %v", ErrQKCInvalidTransaction, err)
 	}
 	if tx.Version() == 2 {
 		if err := validateV2(ctx, tx, blockTime); err != nil {
@@ -98,6 +103,12 @@ func validateTransaction(ctx *QKCExecutionContext, statedb *state.StateDB, gp *G
 	cost, err := IntrinsicGas(tx.Data(), nil, nil, tx.To() == nil, true, false, false, false)
 	if err != nil {
 		return err
+	}
+	if tx.IsCrossShard() {
+		if cost.RegularGas > math.MaxUint64-qkcparams.GtxxShardCost.Uint64() {
+			return ErrGasUintOverflow
+		}
+		cost.RegularGas += qkcparams.GtxxShardCost.Uint64()
 	}
 	if tx.Gas() < cost.RegularGas {
 		return fmt.Errorf("%w: have %d, need %d", ErrQKCInsufficientStartGas, tx.Gas(), cost.RegularGas)
@@ -218,23 +229,33 @@ func applyQKCMessage(evm *vm.EVM, msg *Message, gp *GasPool, fromFullShardKey, t
 	}, nil
 }
 
-// ApplyQKCTransaction applies an intra-shard QKC transaction. Admission errors
-// reject the transaction; VM errors produce a failed receipt. MNT errors require
-// the block caller to abandon the entire block.
+// ApplyQKCTransaction applies an intra-shard transaction. Cross-shard callers
+// must use ApplyQKCTransactionWithDeposit so the outgoing deposit is retained.
 func ApplyQKCTransaction(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, tx *qkctypes.Transaction, txIndex int) (*qkctypes.Receipt, []byte, error) {
+	if tx != nil && tx.IsCrossShard() {
+		return nil, nil, fmt.Errorf("%w: cross-shard transaction requires deposit output", ErrQKCInvalidTransaction)
+	}
+	receipt, _, output, err := ApplyQKCTransactionWithDeposit(ctx, evm, gp, statedb, tx, txIndex)
+	return receipt, output, err
+}
+
+// ApplyQKCTransactionWithDeposit returns a deposit for a successful cross-shard
+// source transaction. Admission errors reject the transaction; PoSW failures
+// produce a failed receipt. MNT errors require abandoning the whole block.
+func ApplyQKCTransactionWithDeposit(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, tx *qkctypes.Transaction, txIndex int) (*qkctypes.Receipt, *qkctypes.CrossShardTransactionDeposit, []byte, error) {
 	if evm == nil || gp == nil || statedb == nil {
-		return nil, nil, fmt.Errorf("%w: missing execution state", ErrQKCInvalidTransaction)
+		return nil, nil, nil, fmt.Errorf("%w: missing execution state", ErrQKCInvalidTransaction)
 	}
 	sender, err := txSender(ctx, tx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	stateSnapshot := statedb.Snapshot()
 	poolSnapshot := gp.Snapshot()
-	revert := func(err error) (*qkctypes.Receipt, []byte, error) {
+	revert := func(err error) (*qkctypes.Receipt, *qkctypes.CrossShardTransactionDeposit, []byte, error) {
 		statedb.RevertToSnapshot(stateSnapshot)
 		gp.Set(poolSnapshot)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := validateTransaction(ctx, statedb, gp, tx, sender, evm.Context.Time); err != nil {
 		return revert(err)
@@ -258,6 +279,13 @@ func ApplyQKCTransaction(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, sta
 	statedb.SetTxContext(txHash, txIndex)
 	evm.Context.EVMEnableTimestamp = ctx.QKCConfig.EnableEvmTimeStamp
 	evm.Context.MNTEnableTimestamp = ctx.QKCConfig.EnableNonReservedNativeTokenTimestamp
+	if tx.IsCrossShard() {
+		receipt, deposit, output, err := applyQKCCrossShardSource(ctx, evm, gp, statedb, tx, sender, price, value)
+		if err != nil {
+			return revert(err)
+		}
+		return receipt, deposit, output, nil
+	}
 	result, err := applyQKCMessage(evm, &Message{
 		From: sender, To: to, Nonce: tx.Nonce(), Value: value,
 		GasLimit: tx.Gas(), GasPrice: price, Data: tx.Data(),
@@ -278,7 +306,94 @@ func ApplyQKCTransaction(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, sta
 	receipt.Logs = statedb.GetLogs(txHash, blockNumber, common.Hash{}, evm.Context.Time)
 	receipt.Bloom = qkctypes.CreateBloom(qkctypes.Receipts{receipt})
 	if tx.To() == nil && !result.Failed() {
-		return receipt, result.ContractAddress.Bytes(), nil
+		return receipt, nil, result.ContractAddress.Bytes(), nil
 	}
-	return receipt, result.Return(), nil
+	return receipt, nil, result.Return(), nil
+}
+
+func applyQKCCrossShardSource(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, tx *qkctypes.Transaction, sender common.Address, price, value *uint256.Int) (*qkctypes.Receipt, *qkctypes.CrossShardTransactionDeposit, []byte, error) {
+	msg := &Message{From: sender, Nonce: tx.Nonce(), Value: value, GasLimit: tx.Gas(), GasPrice: price}
+	st := newStateTransition(evm, msg, gp)
+	statedb.SetNonce(sender, tx.Nonce()+1, tracing.NonceChangeEoACall)
+	if err := st.buyGas(); err != nil {
+		return nil, nil, nil, err
+	}
+	cost, err := IntrinsicGas(tx.Data(), nil, nil, tx.To() == nil, true, false, false, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cost.RegularGas += qkcparams.GtxxShardCost.Uint64() // checked during admission
+	localGasUsed := cost.RegularGas
+	var deposit *qkctypes.CrossShardTransactionDeposit
+	locked := evm.Context.SenderDisallowMap[sender]
+	blocked := false
+	if locked != nil {
+		required, overflow := new(uint256.Int).AddOverflow(value, locked)
+		blocked = overflow || required.Gt(statedb.GetBalance(sender))
+	}
+	if blocked {
+		localGasUsed = tx.Gas()
+	} else {
+		statedb.SubBalance(sender, value, tracing.BalanceChangeTransfer)
+		remoteGas := uint64(0)
+		if evm.Context.Time >= ctx.QKCConfig.EnableEvmTimeStamp {
+			remoteGas = tx.Gas() - cost.RegularGas
+		}
+		to := tx.To()
+		if to == nil {
+			created := vm.QKCContractAddress(sender, tx.FromFullShardKey(), tx.Nonce()+1)
+			to = &created
+		}
+		deposit = &qkctypes.CrossShardTransactionDeposit{
+			TxHash:          tx.Hash(),
+			From:            account.NewAddress(sender, tx.FromFullShardKey()),
+			To:              account.NewAddress(*to, tx.ToFullShardKey()),
+			Value:           &serialize.Uint256{Value: tx.Value()},
+			GasPrice:        &serialize.Uint256{Value: tx.GasPrice()},
+			GasTokenID:      qkccommon.DefaultTokenID,
+			TransferTokenID: tx.TransferTokenID(),
+			GasRemained:     &serialize.Uint256{Value: new(big.Int).SetUint64(remoteGas)},
+			MessageData:     tx.Data(),
+			CreateContract:  tx.To() == nil,
+			RefundRate:      100,
+		}
+	}
+	feeGas := localGasUsed
+	if !blocked {
+		feeGas -= qkcparams.GtxxShardCost.Uint64()
+		if evm.Context.Time >= ctx.QKCConfig.EnableEvmTimeStamp {
+			localGasUsed = feeGas
+		}
+	}
+	if err := gp.ReturnGas(tx.Gas()-localGasUsed, localGasUsed); err != nil {
+		return nil, nil, nil, err
+	}
+	if !blocked && evm.Context.Time < ctx.QKCConfig.EnableEvmTimeStamp {
+		refund := new(big.Int).Mul(tx.GasPrice(), new(big.Int).SetUint64(tx.Gas()-cost.RegularGas))
+		refunded, overflow := uint256.FromBig(refund)
+		if overflow {
+			return nil, nil, nil, fmt.Errorf("QKC gas refund exceeds uint256")
+		}
+		statedb.AddBalance(sender, refunded, tracing.BalanceIncreaseGasReturn)
+	}
+	fee := new(big.Int).Mul(tx.GasPrice(), new(big.Int).SetUint64(feeGas))
+	fee.Mul(fee, ctx.QKCConfig.LocalFeeRate.Num())
+	fee.Quo(fee, ctx.QKCConfig.LocalFeeRate.Denom())
+	localFee, overflow := uint256.FromBig(fee)
+	if overflow {
+		return nil, nil, nil, fmt.Errorf("QKC local fee exceeds uint256")
+	}
+	statedb.AddBalance(evm.Context.Coinbase, localFee, tracing.BalanceIncreaseRewardTransactionFee)
+	statedb.Finalise(true)
+	receipt := qkctypes.NewReceipt(blocked, gp.CumulativeUsed())
+	receipt.GasUsed = localGasUsed
+	receipt.TxHash = tx.Hash()
+	receipt.ContractFullShardKey = tx.ToFullShardKey()
+	var blockNumber uint64
+	if evm.Context.BlockNumber != nil {
+		blockNumber = evm.Context.BlockNumber.Uint64()
+	}
+	receipt.Logs = statedb.GetLogs(tx.Hash(), blockNumber, common.Hash{}, evm.Context.Time)
+	receipt.Bloom = qkctypes.CreateBloom(qkctypes.Receipts{receipt})
+	return receipt, deposit, nil, nil
 }
