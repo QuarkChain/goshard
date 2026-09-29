@@ -41,10 +41,21 @@ func runSlave(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	// Start opens the intra-cluster listener. On failure the backend has already
+	// stopped itself (Stop is idempotent), so plain abort cannot leak.
+	if err := backend.Start(); err != nil {
+		return err
+	}
+	log.Info("slave running", "node_id", backend.ID)
 
-	if sigCtx.Err() == nil {
-		log.Info("slave running", "node_id", backend.ID, "shards", len(backend.Shards()))
-		<-sigCtx.Done()
+	// Run until the operator signals or the master is lost. Losing the master
+	// ends the slave's life exactly as in pyquarkchain (py: MasterConnection.close
+	// → SlaveServer.shutdown, slave.py:155-162): the backend has already torn the
+	// network down internally, and the same clean stop below finishes the shards.
+	select {
+	case <-sigCtx.Done():
+	case <-backend.Done():
+		log.Info("lost connection with master; shutting down slave")
 	}
 	log.Info("slave shutting down", "node_id", backend.ID)
 	return backend.Stop()
