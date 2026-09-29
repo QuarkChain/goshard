@@ -29,38 +29,37 @@ import (
 // pyquarkchain's SlaveServer, and its communication resources (listener, master
 // connection, xshard pool, virtual cluster-peer topology).
 type SlaveBackend struct {
+	// ── Identity & shard registry ──────────────────────────────────────────
+	// ID is this slave's identity, used as the wire-protocol identity.
 	ID     string
 	shards map[account.Branch]*shard.Shard
 	order  []account.Branch // boot (config) order, for deterministic iteration and shutdown
 
-	// Identity and network config, derived from the SlaveContext at construction.
-	selfID               []byte
+	// ── Network config, derived from the SlaveContext at construction ─────
 	localFullShardIDList []uint32
 	clusterShardIDs      []uint32
 	port                 int
 	maxPayloadSize       uint32 // 0 disables the payload limit.
-	logger               log.Logger
 
+	// ── Communication resources ───────────────────────────────────────────
 	listener net.Listener
-	// master is the established MasterConn (py: slave_server.master), published
-	// atomically by runMasterConn for the first inbound and never replaced. A nil
-	// load means not established (ErrNotActive).
+	// master is the established master connection; nil until published, never replaced.
 	master     atomic.Pointer[slaveconn.MasterConn]
 	xshardPool *slaveconn.XshardPool
 
-	// clusterPeerIDs is the announced virtual cluster-peer set (py:
-	// SlaveServer.cluster_peer_ids, slave.py:909), guarded by clusterPeersMu. A
-	// peer is recorded the moment the master announces it, before any shard may
-	// hold a PeerConn for it, so a shard created later can still be wired to
-	// peers announced earlier. It has no reader yet: CreateShards (below) is the
-	// designated consumer once it lands (py: create_shards reads this set,
-	// slave.py:939-941).
+	// ── Virtual cluster-peer topology ─────────────────────────────────────
+	// clusterPeerIDs is the announced cluster-peer set, guarded by clusterPeersMu;
+	// CreateShards is its designated reader once implemented.
 	clusterPeersMu sync.Mutex
 	clusterPeerIDs map[uint64]struct{}
 
+	// ── Shutdown ──────────────────────────────────────────────────────────
 	stopped  chan struct{}
 	stopOnce sync.Once
 	stopErr  error
+
+	// ── Logger ────────────────────────────────────────────────────────────
+	logger log.Logger
 }
 
 // Compile-time interface conformance.
@@ -83,7 +82,6 @@ func New(ctx *config.SlaveContext, rootGenesis *types.RootBlockHeader, opts shar
 	b := &SlaveBackend{
 		ID:                   ctx.ID,
 		shards:               make(map[account.Branch]*shard.Shard, len(ctx.FullShardIDs())),
-		selfID:               []byte(ctx.ID),
 		localFullShardIDList: append([]uint32(nil), ctx.FullShardIDs()...),
 		port:                 int(ctx.Slave.Port),
 		clusterShardIDs:      ctx.Quarkchain.GetGenesisShardIds(),
@@ -92,7 +90,7 @@ func New(ctx *config.SlaveContext, rootGenesis *types.RootBlockHeader, opts shar
 		logger:               log.Root(),
 	}
 
-	pool, err := slaveconn.NewXshardPool(b.selfID, b.localFullShardIDList, b.clusterShardIDs, b.maxPayloadSize, b, b.logger)
+	pool, err := slaveconn.NewXshardPool([]byte(b.ID), b.localFullShardIDList, b.clusterShardIDs, b.maxPayloadSize, b, b.logger)
 	if err != nil {
 		return nil, fmt.Errorf("slave %s: new xshard pool: %w", b.ID, err)
 	}
@@ -188,10 +186,7 @@ func (b *SlaveBackend) Done() <-chan struct{} {
 
 // ── Accept loop & connection dispatch ────────────────────────────────────────
 
-// acceptLoop accepts inbound connections and is the single owner of
-// classification: the first accepted connection is always the master, every later
-// one is xshard. The claim is loop-local, so no lock or atomic is needed. Stop
-// closes the listener, which makes Accept return and this loop exit.
+// acceptLoop classifies inbound connections: the first is the master, later ones are xshard.
 func (b *SlaveBackend) acceptLoop() {
 	masterClaimed := false
 	for {
@@ -213,14 +208,12 @@ func (b *SlaveBackend) acceptLoop() {
 	}
 }
 
-// runMasterConn runs the first inbound connection as the MasterConn and blocks
-// until that connection is gone. The pointer is stored before Start so any frame
-// the readLoop processes sees an established master. Master loss triggers Stop.
+// runMasterConn runs the first inbound connection as the master; master loss triggers Stop.
 func (b *SlaveBackend) runMasterConn(conn net.Conn) {
 	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{
 		Conn:                 conn,
 		MaxPayloadSize:       b.maxPayloadSize,
-		LocalID:              b.selfID,
+		LocalID:              []byte(b.ID),
 		LocalFullShardIDList: b.localFullShardIDList,
 		ClusterShardIDs:      b.clusterShardIDs,
 		Handler:              b,
@@ -253,8 +246,7 @@ func (b *SlaveBackend) runMasterConn(conn net.Conn) {
 	b.Stop()
 }
 
-// runXshardConn hands a subsequent inbound connection to the pool, which owns the
-// full inbound lifecycle.
+// runXshardConn hands a subsequent inbound connection to the xshard pool.
 func (b *SlaveBackend) runXshardConn(conn net.Conn) {
 	b.logger.Info("accepted xshard connection", "remote", conn.RemoteAddr())
 	b.xshardPool.HandleInbound(conn)
@@ -262,8 +254,7 @@ func (b *SlaveBackend) runXshardConn(conn net.Conn) {
 
 // ── PeerResolver ─────────────────────────────────────────────────────────────
 
-// LookupPeer routes virtual peer frames from the master to the PeerConn serving
-// (cluster_peer_id, branch), or nil when there is none (py: NULL_CONNECTION).
+// LookupPeer returns the PeerConn serving (clusterPeerID, branch), or nil when none exists.
 func (b *SlaveBackend) LookupPeer(clusterPeerID uint64, branch uint32) *slaveconn.PeerConn {
 	if s := b.shards[account.NewBranch(branch)]; s != nil {
 		return s.Peer(clusterPeerID)
@@ -273,38 +264,18 @@ func (b *SlaveBackend) LookupPeer(clusterPeerID uint64, branch uint32) *slavecon
 
 // ── MasterHandler: topology & shard activation ───────────────────────────────
 
-// CreateShards creates the shards made eligible by the given root tip, then
-// wires each new shard's peer connections to the cluster's current peers (py:
-// SlaveServer.create_shards, slave.py:933-960). The master triggers it through
-// handlePing(PING(root_tip)); it is intentionally unimplemented — shards are
-// currently booted eagerly by New, and landing this requires the deferred work
-// recorded below.
+// CreateShards creates the shards made eligible by the root tip and wires them
+// to the announced cluster peers. Unimplemented: it returns nil because an
+// error here would close the master connection (PING path). Shards are
+// immutable after New until it is implemented.
+//
+// TODO(create-shards): guard shards/order/clusterPeerIDs with a topology mutex,
+// and wire new shards to the announced peers before registering them.
 func (b *SlaveBackend) CreateShards(*types.RootBlock) error {
-	// TODO(create-shards): implement py slave.py:933-960 as a pure lifecycle
-	// pass over the shard set — no genesis/db/chain logic here, that belongs to
-	// the shard layer. Deferred prerequisites from the 2026-09-29 audit:
-	//   - make shards/order dynamic under a single topology mutex guarding
-	//     shards + order + clusterPeerIDs as ONE state unit: py gets the total
-	//     order on PING/CREATE_PEER/DESTROY_PEER for free from its event loop
-	//     serializing every master request; Go's per-request dispatch goroutines
-	//     must rebuild it explicitly (interleavings N1-N6, see the work log);
-	//   - wire each new shard to b.clusterPeerIDs via wireClusterPeer, then
-	//     register it last (wire-then-register, py: slave.py:946), so
-	//     routeFrame/LookupPeer never observe a half-wired shard;
-	//   - gate on b.stopped at entry and surface the error through handlePing,
-	//     so a shutting-down backend refuses creation (py closes the connection,
-	//     slave.py:177-180);
-	//   - eligibility vs the genesis root height, db recovery, genesis header
-	//     report and miner start belong to the shard layer (py:
-	//     init_from_root_block, shard.py:619-639), not here;
-	//   - b.shards is immutable after New until this lands — that is what makes
-	//     the lock-free Shard/Shards/LookupPeer and topology handlers safe.
 	return nil
 }
 
-// CreateClusterPeerConnection registers a new cluster peer and creates a PeerConn
-// for it on every local shard. It always succeeds from the master's point of view
-// (error_code 0); duplicates are logged and skipped.
+// CreateClusterPeerConnection registers the cluster peer and wires a PeerConn on every local shard.
 func (b *SlaveBackend) CreateClusterPeerConnection(req *wire.CreateClusterPeerConnectionRequest) (*wire.CreateClusterPeerConnectionResponse, error) {
 	id := req.ClusterPeerID
 
@@ -321,13 +292,8 @@ func (b *SlaveBackend) CreateClusterPeerConnection(req *wire.CreateClusterPeerCo
 	return &wire.CreateClusterPeerConnectionResponse{}, nil
 }
 
-// wireClusterPeer creates and registers the PeerConn of clusterPeerID on s. It
-// reports false only when the shard refused because it is shutting down
-// (shard.ErrStopped), so the caller can stop wiring the remaining shards; every
-// other failure — duplicates, construction errors, a master connection that is
-// not established — is logged and swallowed, matching py's per-connection skip
-// (slave.py:334-368, shard.py:596-617). This is the single wiring seam the
-// future CreateShards reuses to wire new shards to the announced peers.
+// wireClusterPeer wires clusterPeerID onto s, returning false only when the
+// shard is stopped; mc must be the established master connection.
 func (b *SlaveBackend) wireClusterPeer(s *shard.Shard, clusterPeerID uint64, mc *slaveconn.MasterConn) bool {
 	if mc == nil {
 		b.logger.Error("cannot wire cluster peer without an established master connection",
@@ -346,8 +312,7 @@ func (b *SlaveBackend) wireClusterPeer(s *shard.Shard, clusterPeerID uint64, mc 
 	return true
 }
 
-// DestroyClusterPeerConnection removes the cluster peer and closes every PeerConn
-// of it. Fire-and-forget; destroying an unknown id is a no-op.
+// DestroyClusterPeerConnection removes the cluster peer and closes its PeerConns; unknown ids are a no-op.
 func (b *SlaveBackend) DestroyClusterPeerConnection(req *wire.DestroyClusterPeerConnectionCommand) error {
 	id := req.ClusterPeerID
 
@@ -361,26 +326,32 @@ func (b *SlaveBackend) DestroyClusterPeerConnection(req *wire.DestroyClusterPeer
 	return nil
 }
 
-// ConnectToSlaves dials every advertised slave into the xshard pool, reporting
-// per-entry failures in the response result list so the master connection stays
-// up.
+// ConnectToSlaves dials every advertised slave concurrently (each dial
+// timeout-bounded) and reports per-entry failures in the result list,
+// preserving the request order.
 func (b *SlaveBackend) ConnectToSlaves(req *wire.ConnectToSlavesRequest) (*wire.ConnectToSlavesResponse, error) {
 	resultList := make([]wire.PrependedSizeBytes4, len(req.SlaveInfoList))
+
+	var wg sync.WaitGroup
 	for i := range req.SlaveInfoList {
-		info := req.SlaveInfoList[i]
-		if err := b.xshardPool.DialToSlave(context.Background(), info); err != nil {
-			b.logger.Warn("connect to slave failed", "remote_id", string(info.ID), "err", err)
-			resultList[i] = wire.PrependedSizeBytes4([]byte(err.Error()))
-		}
+		wg.Add(1)
+		go func(i int, info wire.SlaveInfo) {
+			defer wg.Done()
+
+			if err := b.xshardPool.DialToSlave(context.Background(), info); err != nil {
+				b.logger.Warn("connect to slave failed", "remote_id", string(info.ID), "err", err)
+				resultList[i] = wire.PrependedSizeBytes4([]byte(err.Error()))
+			}
+		}(i, req.SlaveInfoList[i])
 	}
+	wg.Wait()
 	return &wire.ConnectToSlavesResponse{ResultList: resultList}, nil
 }
 
 // ── Outbound: master sends (shard.Sender) ────────────────────────────────────
 
-// SendMinorBlockHeaderToMaster reports a new minor block header (py:
-// send_minor_block_header_to_master). Returns ErrNotActive before the master
-// connection exists and ErrConnectionClosed after it closes.
+// SendMinorBlockHeaderToMaster reports a new minor block header to the master;
+// ErrNotActive before the master connection exists, ErrConnectionClosed after it closes.
 func (b *SlaveBackend) SendMinorBlockHeaderToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderRequest) (*wire.AddMinorBlockHeaderResponse, error) {
 	mc := b.master.Load()
 	if mc == nil {
@@ -389,8 +360,7 @@ func (b *SlaveBackend) SendMinorBlockHeaderToMaster(ctx context.Context, req *wi
 	return mc.SendAddMinorBlockHeader(ctx, req)
 }
 
-// SendMinorBlockHeaderListToMaster reports a list of new minor block headers to
-// the master (py: SlaveServer.send_minor_block_header_list_to_master).
+// SendMinorBlockHeaderListToMaster reports a list of new minor block headers to the master.
 func (b *SlaveBackend) SendMinorBlockHeaderListToMaster(ctx context.Context, req *wire.AddMinorBlockHeaderListRequest) (*wire.AddMinorBlockHeaderListResponse, error) {
 	mc := b.master.Load()
 	if mc == nil {
@@ -401,12 +371,8 @@ func (b *SlaveBackend) SendMinorBlockHeaderListToMaster(ctx context.Context, req
 
 // ── Outbound: xshard broadcasts (shard.Sender) ───────────────────────────────
 
-// broadcastToBranch concurrently sends to every xshard connection serving branch
-// (py: broadcast_xshard_tx_list / batch_broadcast_xshard_tx_list). The delivery
-// set is the full snapshot: all connections are attempted even if some sends
-// fail. The call waits for all sends and returns nil only if every send
-// succeeds; otherwise all errors are aggregated. An empty connection set is a
-// no-op, matching Python's gather([]).
+// broadcastToBranch sends concurrently to every xshard connection serving
+// branch and aggregates every send failure; an empty connection set is a no-op.
 func (b *SlaveBackend) broadcastToBranch(branch uint32, send func(*slaveconn.XshardConn) error) error {
 	conns := b.xshardPool.Lookup(branch)
 	errs := make([]error, len(conns))
@@ -427,29 +393,23 @@ func (b *SlaveBackend) broadcastToBranch(branch uint32, send func(*slaveconn.Xsh
 	return errors.Join(errs...)
 }
 
-// SendXshardTxList broadcasts an AddXshardTxListRequest to every slave connection
-// serving branch (py: broadcast_xshard_tx_list, remote leg); local delivery is the
-// caller's. Delivery is attempt-all and the result is binary: nil iff every
-// connection acknowledged. An empty connection set is a no-op.
+// SendXshardTxList broadcasts req to every connection serving branch; branch
+// is the routing key and must match req.Branch.
 func (b *SlaveBackend) SendXshardTxList(ctx context.Context, branch uint32, req *wire.AddXshardTxListRequest) error {
 	return b.broadcastToBranch(branch, func(c *slaveconn.XshardConn) error {
 		return c.SendAddXshardTxList(ctx, req)
 	})
 }
 
-// SendBatchXshardTxList broadcasts a BatchAddXshardTxListRequest to every slave
-// connection serving branch, with the same attempt-all and binary-result
-// semantics (py: batch_broadcast_xshard_tx_list).
+// SendBatchXshardTxList broadcasts req to every connection serving branch;
+// branch is the routing key (the batch request carries no branch of its own).
 func (b *SlaveBackend) SendBatchXshardTxList(ctx context.Context, branch uint32, req *wire.BatchAddXshardTxListRequest) error {
 	return b.broadcastToBranch(branch, func(c *slaveconn.XshardConn) error {
 		return c.SendBatchAddXshardTxList(ctx, req)
 	})
 }
 
-// ── MasterHandler: business RPCs ─────────────────────────────────────────────
-//
-// These remain stubs until the shard chain implementation lands. They return
-// ErrHandlerNotImplemented rather than faking success.
+// ── MasterHandler: business RPCs (stubs returning ErrHandlerNotImplemented) ──
 
 func (b *SlaveBackend) Mine(*wire.MineRequest) (*wire.MineResponse, error) {
 	return nil, fmt.Errorf("Mine: %w", conn.ErrHandlerNotImplemented)
@@ -461,7 +421,6 @@ func (b *SlaveBackend) GenTx(*wire.GenTxRequest) (*wire.GenTxResponse, error) {
 
 func (b *SlaveBackend) AddRootBlock(*wire.AddRootBlockRequest) (*wire.AddRootBlockResponse, error) {
 	return nil, fmt.Errorf("AddRootBlock: %w", conn.ErrHandlerNotImplemented)
-
 }
 
 func (b *SlaveBackend) GetEcoInfoList(*wire.GetEcoInfoListRequest) (*wire.GetEcoInfoListResponse, error) {
