@@ -27,10 +27,67 @@ import (
 type QKCExecutionContext struct {
 	QKCConfig   *config.QuarkChainConfig
 	ShardConfig *config.ShardConfig
+	// RootHeight is the current root tip height; XShardGasLimit is the
+	// current minor block's per-transaction cross-shard gas limit.
+	RootHeight     uint32
+	XShardGasLimit uint64
 }
 
 func (ctx *QKCExecutionContext) branch() account.Branch {
 	return account.NewBranch(ctx.ShardConfig.GetFullShardId())
+}
+
+func (ctx *QKCExecutionContext) destinationShard(tx *qkctypes.Transaction) (uint32, bool, error) {
+	if ctx == nil || ctx.QKCConfig == nil || ctx.ShardConfig == nil {
+		return 0, false, fmt.Errorf("%w: incomplete transaction context", ErrQKCInvalidTransaction)
+	}
+	id, err := ctx.QKCConfig.GetFullShardIdByFullShardKey(tx.ToFullShardKey())
+	if err != nil {
+		return 0, false, fmt.Errorf("%w: destination shard: %v", ErrQKCInvalidTransaction, err)
+	}
+	return id, id != ctx.ShardConfig.GetFullShardId(), nil
+}
+
+func (ctx *QKCExecutionContext) validateCrossShardDestination(id uint32) error {
+	initialized := ctx.QKCConfig.GetInitializedShardIdsBeforeRootHeight(ctx.RootHeight)
+	found := false
+	for _, shardID := range initialized {
+		if shardID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("%w: destination shard %#x not initialized before root height %d", ErrQKCInvalidTransaction, id, ctx.RootHeight)
+	}
+	if len(initialized) <= 32 {
+		return nil
+	}
+	from, to := ctx.branch(), account.NewBranch(id)
+	var distance uint32
+	if from.GetChainID() == to.GetChainID() {
+		distance = shardDistance(from.GetShardID(), to.GetShardID())
+	} else if from.GetShardID() == to.GetShardID() {
+		distance = shardDistance(from.GetChainID(), to.GetChainID())
+	}
+	if distance == 0 || !qkccommon.IsP2(distance) {
+		return fmt.Errorf("%w: destination shard %#x is not a neighbor", ErrQKCInvalidTransaction, id)
+	}
+	return nil
+}
+
+func shardDistance(a, b uint32) uint32 {
+	if a < b {
+		return b - a
+	}
+	return a - b
+}
+
+func validateQKCFeeRate(rate *big.Rat) error {
+	if rate == nil || rate.Sign() < 0 || rate.Cmp(big.NewRat(1, 1)) > 0 {
+		return fmt.Errorf("invalid QKC local fee rate")
+	}
+	return nil
 }
 
 var (
@@ -77,8 +134,17 @@ func validateTransaction(ctx *QKCExecutionContext, statedb *state.StateDB, gp *G
 	if !branch.IsInBranch(tx.FromFullShardKey()) {
 		return fmt.Errorf("%w: transaction outside shard %#x", ErrQKCInvalidTransaction, branch.GetFullShardID())
 	}
-	if _, err := ctx.QKCConfig.GetFullShardIdByFullShardKey(tx.ToFullShardKey()); err != nil {
-		return fmt.Errorf("%w: destination shard: %v", ErrQKCInvalidTransaction, err)
+	destination, crossShard, err := ctx.destinationShard(tx)
+	if err != nil {
+		return err
+	}
+	if crossShard {
+		if err := ctx.validateCrossShardDestination(destination); err != nil {
+			return err
+		}
+		if tx.Gas() > ctx.XShardGasLimit {
+			return fmt.Errorf("%w: cross-shard gas %d exceeds limit %d", ErrQKCInvalidTransaction, tx.Gas(), ctx.XShardGasLimit)
+		}
 	}
 	if tx.Version() == 2 {
 		if err := validateV2(ctx, tx, blockTime); err != nil {
@@ -104,7 +170,7 @@ func validateTransaction(ctx *QKCExecutionContext, statedb *state.StateDB, gp *G
 	if err != nil {
 		return err
 	}
-	if tx.IsCrossShard() {
+	if crossShard {
 		if cost.RegularGas > math.MaxUint64-qkcparams.GtxxShardCost.Uint64() {
 			return ErrGasUintOverflow
 		}
@@ -166,11 +232,11 @@ type qkcExecutionResult struct {
 // applyQKCMessage shares geth's gas accounting with QKC's nonce, VM entry and
 // fee rules. Its caller restores state and gas pool on an error.
 func applyQKCMessage(evm *vm.EVM, msg *Message, gp *GasPool, fromFullShardKey, toFullShardKey uint32, transferTokenID uint64, feeRate *big.Rat) (*qkcExecutionResult, error) {
-	if evm == nil || msg == nil || gp == nil || feeRate == nil {
+	if evm == nil || msg == nil || gp == nil {
 		return nil, fmt.Errorf("incomplete QKC message")
 	}
-	if feeRate.Sign() < 0 || feeRate.Cmp(big.NewRat(1, 1)) > 0 {
-		return nil, fmt.Errorf("invalid QKC local fee rate")
+	if err := validateQKCFeeRate(feeRate); err != nil {
+		return nil, err
 	}
 	st := newStateTransition(evm, msg, gp)
 	evm.SetTxContext(vm.TxContext{
@@ -232,7 +298,14 @@ func applyQKCMessage(evm *vm.EVM, msg *Message, gp *GasPool, fromFullShardKey, t
 // ApplyQKCTransaction applies an intra-shard transaction. Cross-shard callers
 // must use ApplyQKCTransactionWithDeposit so the outgoing deposit is retained.
 func ApplyQKCTransaction(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, tx *qkctypes.Transaction, txIndex int) (*qkctypes.Receipt, []byte, error) {
-	if tx != nil && tx.IsCrossShard() {
+	if err := tx.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrQKCInvalidTransaction, err)
+	}
+	_, crossShard, err := ctx.destinationShard(tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if crossShard {
 		return nil, nil, fmt.Errorf("%w: cross-shard transaction requires deposit output", ErrQKCInvalidTransaction)
 	}
 	receipt, _, output, err := ApplyQKCTransactionWithDeposit(ctx, evm, gp, statedb, tx, txIndex)
@@ -248,6 +321,9 @@ func ApplyQKCTransactionWithDeposit(ctx *QKCExecutionContext, evm *vm.EVM, gp *G
 	}
 	sender, err := txSender(ctx, tx)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := validateQKCFeeRate(ctx.QKCConfig.LocalFeeRate); err != nil {
 		return nil, nil, nil, err
 	}
 	stateSnapshot := statedb.Snapshot()
@@ -279,7 +355,11 @@ func ApplyQKCTransactionWithDeposit(ctx *QKCExecutionContext, evm *vm.EVM, gp *G
 	statedb.SetTxContext(txHash, txIndex)
 	evm.Context.EVMEnableTimestamp = ctx.QKCConfig.EnableEvmTimeStamp
 	evm.Context.MNTEnableTimestamp = ctx.QKCConfig.EnableNonReservedNativeTokenTimestamp
-	if tx.IsCrossShard() {
+	_, crossShard, err := ctx.destinationShard(tx)
+	if err != nil {
+		return revert(err)
+	}
+	if crossShard {
 		receipt, deposit, output, err := applyQKCCrossShardSource(ctx, evm, gp, statedb, tx, sender, price, value)
 		if err != nil {
 			return revert(err)
