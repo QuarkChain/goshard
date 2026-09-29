@@ -71,12 +71,21 @@ type goldenCase struct {
 	PostStateRoot string            `json:"post_state_root"`
 	GasUsed       uint64            `json:"gas_used"`
 	BlockFees     map[string]string `json:"block_fee_tokens"`
-	Receipts      []struct {
+	Result        struct {
+		Success bool   `json:"success"`
+		Output  string `json:"output"`
+	} `json:"result"`
+	Receipts []struct {
 		Success              bool   `json:"success"`
 		CumulativeGasUsed    uint64 `json:"cumulative_gas_used"`
 		Bloom                string `json:"bloom"`
 		ContractAddress      string `json:"contract_address"`
 		ContractFullShardKey uint32 `json:"contract_full_shard_key"`
+		Logs                 []struct {
+			Address string   `json:"address"`
+			Topics  []string `json:"topics"`
+			Data    string   `json:"data"`
+		} `json:"logs"`
 	} `json:"receipts"`
 }
 
@@ -131,18 +140,30 @@ func applyGoldenAlloc(t *testing.T, s *state.StateDB, alloc map[string]goldenAll
 	}
 }
 
-func TestS3GoldenTransfers(t *testing.T) {
+func TestQKCIntraShardGoldenMessages(t *testing.T) {
 	raw, err := os.ReadFile("../qkc/testdata/exec_golden/message_level.json")
 	require.NoError(t, err)
 	var file struct {
 		Cases []goldenCase `json:"cases"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &file))
+	// Cross-shard inputs and active MNT precompiles are covered by later stages.
 	wanted := map[string]bool{
 		"in_shard_transfer": true, "in_shard_transfer_nonce_too_high": true,
 		"in_shard_transfer_insufficient_balance": true, "eip155_transfer": true,
 		"eip155_before_enable_timestamp": true, "eip155_non_default_token": true,
 		"eip155_non_zero_shard_key": true, "native_token_transfer_with_default_gas": true,
+		"create_under_a_shard_key": true, "contract_creation": true,
+		"contract_call_returns_value": true, "contract_revert": true,
+		"contract_out_of_gas": true, "contract_selfdestruct": true,
+		"contract_selfdestruct_reverted_with_parent": true, "contract_logs_and_bloom": true,
+		"contract_create2": true, "create2_word_gas_oog_without_growing": true,
+		"create2_word_gas_covered": true, "create2_word_gas_oog_while_growing": true,
+		"log_byte_gas_oog_without_growing": true, "log_byte_gas_covered": true,
+		"log_byte_gas_oog_while_growing": true, "nested_call": true,
+		"sstore_legacy_pricing": true, "returndatacopy_within_the_answer": true,
+		"returndatacopy_past_the_answer": true, "create_init_code_reverts": true,
+		"create_code_store_out_of_gas": true, "create_code_too_large": true,
 	}
 	for _, tc := range file.Cases {
 		if !wanted[tc.Name] {
@@ -174,11 +195,13 @@ func TestS3GoldenTransfers(t *testing.T) {
 			gp := NewGasPool(tc.Context.GasLimit)
 			require.Len(t, tc.Inputs, 1)
 			input := tc.Inputs[0].Transaction
+			require.Equal(t, "transaction", tc.Inputs[0].Kind)
 			tx := goldenTX(t, input)
-			receipt, _, err := ApplyQKCTransaction(&QKCExecutionContext{cfg.Quarkchain, shard}, evm, gp, statedb, tx, 0)
+			receipt, output, err := ApplyQKCTransaction(&QKCExecutionContext{cfg.Quarkchain, shard}, evm, gp, statedb, tx, 0)
 			if tc.Name == "native_token_transfer_with_default_gas" {
 				require.ErrorIs(t, err, vm.ErrQKCUnsupportedMNT)
 				require.Nil(t, receipt)
+				require.Nil(t, output)
 				require.Equal(t, tc.Context.GasLimit, gp.Gas())
 				after, err := statedb.Commit(tc.Context.BlockNumber, true, false)
 				require.NoError(t, err)
@@ -188,14 +211,27 @@ func TestS3GoldenTransfers(t *testing.T) {
 			if tc.Expect == "rejected" {
 				require.Error(t, err)
 				require.Nil(t, receipt)
+				require.Nil(t, output)
 			} else {
 				require.NoError(t, err)
+				require.Equal(t, tc.Result.Success, receipt.Status == qkctypes.ReceiptStatusSuccessful)
+				require.Equal(t, tc.Result.Output, "0x"+common.Bytes2Hex(output))
 				require.Len(t, tc.Receipts, 1)
 				want := tc.Receipts[0]
 				require.Equal(t, want.Success, receipt.Status == qkctypes.ReceiptStatusSuccessful)
 				require.Equal(t, want.CumulativeGasUsed, receipt.CumulativeGasUsed)
 				require.Equal(t, want.ContractFullShardKey, receipt.ContractFullShardKey)
+				require.Equal(t, common.HexToAddress(want.ContractAddress), common.Address(receipt.ContractAddress))
 				require.Equal(t, common.FromHex(want.Bloom), receipt.Bloom.Bytes())
+				require.Len(t, receipt.Logs, len(want.Logs))
+				for i, log := range receipt.Logs {
+					require.Equal(t, common.HexToAddress(want.Logs[i].Address), log.Address)
+					require.Equal(t, common.FromHex(want.Logs[i].Data), log.Data)
+					require.Len(t, log.Topics, len(want.Logs[i].Topics))
+					for j, topic := range log.Topics {
+						require.Equal(t, common.HexToHash(want.Logs[i].Topics[j]), topic)
+					}
+				}
 			}
 			require.Equal(t, tc.GasUsed, gp.CumulativeUsed())
 			root, err = statedb.Commit(tc.Context.BlockNumber, true, false)
