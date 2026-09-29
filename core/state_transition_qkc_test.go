@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	coretypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/config"
@@ -206,6 +207,91 @@ func TestS3GoldenTransfers(t *testing.T) {
 		})
 	}
 	require.Empty(t, wanted)
+}
+
+func TestQKCValidationKeepsNewSenderShardKey(t *testing.T) {
+	cfg, err := config.LoadClusterConfig("../qkc/config/singularity/devnet.json")
+	require.NoError(t, err)
+	ctx := &QKCExecutionContext{cfg.Quarkchain, cfg.Quarkchain.GetShardConfigByFullShardID(1)}
+	key, err := crypto.HexToECDSA("45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8")
+	require.NoError(t, err)
+	sender := crypto.PubkeyToAddress(key.PublicKey)
+	tx, err := qkctypes.SignTx(qkctypes.NewEvmTransaction(0, common.HexToAddress("0x1234"), big.NewInt(0), 21000, big.NewInt(0), 0, 1, cfg.Quarkchain.NetworkID, 0, nil, qkccommon.DefaultTokenID, qkccommon.DefaultTokenID), qkctypes.MakeSigner(cfg.Quarkchain.NetworkID, ctx.ShardConfig.EthChainID), key)
+	require.NoError(t, err)
+
+	expected, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+	require.NoError(t, err)
+	expected.SetFullShardKey(0)
+	expected.SetNonce(sender, 1, tracing.NonceChangeUnspecified)
+	wantRoot, err := expected.Commit(1, true, false)
+	require.NoError(t, err)
+
+	for _, prevalidate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "prevalidated"}[prevalidate], func(t *testing.T) {
+			statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			require.NoError(t, err)
+			statedb.SetFullShardKey(0)
+			gp := NewGasPool(50000)
+			vmctx := vm.BlockContext{CanTransfer: CanTransfer, Transfer: Transfer, BlockNumber: big.NewInt(1), Time: 1, GasLimit: 50000}
+			evm := vm.NewEVM(vmctx, statedb, &qkcparams.DefaultConstantinople, vm.Config{})
+			t.Cleanup(evm.Release)
+			if prevalidate {
+				got, err := ValidateQKCTransaction(ctx, statedb, gp, tx, vmctx.Time)
+				require.NoError(t, err)
+				require.Equal(t, sender, got)
+			}
+			receipt, _, err := ApplyQKCTransaction(ctx, evm, gp, statedb, tx, 0)
+			require.NoError(t, err)
+			require.Equal(t, qkctypes.ReceiptStatusSuccessful, receipt.Status)
+			require.Equal(t, uint64(1), statedb.GetNonce(sender))
+			root, err := statedb.Commit(1, true, false)
+			require.NoError(t, err)
+			require.Equal(t, wantRoot, root)
+		})
+	}
+}
+
+func TestQKCActiveMNTPrecompileRollsBackTransaction(t *testing.T) {
+	cfg, err := config.LoadClusterConfig("../qkc/config/singularity/devnet.json")
+	require.NoError(t, err)
+	ctx := &QKCExecutionContext{cfg.Quarkchain, cfg.Quarkchain.GetShardConfigByFullShardID(1)}
+	key, err := crypto.HexToECDSA("45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8")
+	require.NoError(t, err)
+	sender := crypto.PubkeyToAddress(key.PublicKey)
+	to := common.HexToAddress("0x000000000000000000000000000000514b430005")
+	tx, err := qkctypes.SignTx(qkctypes.NewEvmTransaction(0, to, big.NewInt(7), 30000, big.NewInt(1), 1, 1, cfg.Quarkchain.NetworkID, 0, nil, qkccommon.DefaultTokenID, qkccommon.DefaultTokenID), qkctypes.MakeSigner(cfg.Quarkchain.NetworkID, ctx.ShardConfig.EthChainID), key)
+	require.NoError(t, err)
+
+	db := state.NewQKCDatabase(rawdb.NewMemoryDatabase())
+	statedb, err := state.NewQKC(coretypes.EmptyRootHash, db)
+	require.NoError(t, err)
+	statedb.SetFullShardKey(1)
+	statedb.SetBalance(sender, uint256.NewInt(100000), tracing.BalanceChangeUnspecified)
+	before, err := statedb.Commit(1, true, false)
+	require.NoError(t, err)
+	statedb, err = state.NewQKC(before, db)
+	require.NoError(t, err)
+	gp := NewGasPool(80000)
+	require.NoError(t, gp.SubGas(1000))
+	require.NoError(t, gp.ReturnGas(0, 1000))
+	gasBefore, usedBefore := gp.Gas(), gp.CumulativeUsed()
+	vmctx := vm.BlockContext{CanTransfer: CanTransfer, Transfer: Transfer, BlockNumber: big.NewInt(1), Time: 1, GasLimit: 80000}
+	evm := vm.NewEVM(vmctx, statedb, &qkcparams.DefaultConstantinople, vm.Config{})
+	t.Cleanup(evm.Release)
+	_, err = ValidateQKCTransaction(ctx, statedb, gp, tx, vmctx.Time)
+	require.NoError(t, err)
+
+	receipt, output, err := ApplyQKCTransaction(ctx, evm, gp, statedb, tx, 0)
+	require.ErrorIs(t, err, vm.ErrQKCUnsupportedMNT)
+	require.Nil(t, receipt)
+	require.Nil(t, output)
+	require.Equal(t, uint64(0), statedb.GetNonce(sender))
+	require.Equal(t, uint64(100000), statedb.GetBalance(sender).Uint64())
+	require.Equal(t, gasBefore, gp.Gas())
+	require.Equal(t, usedBefore, gp.CumulativeUsed())
+	after, err := statedb.Commit(1, true, false)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 func TestQKCIntrinsicGasMatchesLegacySchedule(t *testing.T) {

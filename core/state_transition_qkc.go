@@ -236,12 +236,12 @@ func ApplyQKCTransaction(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, sta
 		gp.Set(poolSnapshot)
 		return nil, nil, err
 	}
-	// The shard key must be set before state lookups so newly observed QKC
-	// accounts inherit the same key as in pyquarkchain's transaction context.
-	statedb.SetFullShardKey(tx.ToFullShardKey())
 	if err := validateTransaction(ctx, statedb, gp, tx, sender, evm.Context.Time); err != nil {
 		return revert(err)
 	}
+	// pyquarkchain validates before setting the destination shard key, so a
+	// sender first observed during validation retains the previous key.
+	statedb.SetFullShardKey(tx.ToFullShardKey())
 	price, overflow := uint256.FromBig(tx.GasPrice())
 	if overflow {
 		return revert(fmt.Errorf("%w: gas price exceeds uint256", ErrQKCInvalidTransaction))
