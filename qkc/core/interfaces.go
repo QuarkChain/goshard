@@ -12,7 +12,6 @@ import (
 type ConnManager interface {
 	SendMinorBlockHeaderToMaster(block *types.MinorBlock, xShardTxCount uint32) error
 	BroadcastXShardTxList(payload XShardBroadcast) error
-	BroadcastNewTip(minorHeaders []*types.MinorBlockHeader, rootHeader *types.RootBlockHeader, branch uint32) error
 }
 
 // InsertOptions matches the execution layer's candidate import controls.

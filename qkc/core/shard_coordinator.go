@@ -63,6 +63,9 @@ func NewShardCoordinator(qkcConfig *config.QuarkChainConfig, shardConfig *config
 // head because it does not build blocks from rootTip; imported blocks carry
 // explicit parent and previous-root references and are selected directly.
 func (c *ShardCoordinator) InitFromRootBlock(root *types.RootBlock) error {
+	// TODO(qkc): Add full root validation and recovery, including state
+	// availability, confirmed-minor restoration, canonical root indexes, and
+	// rewinding the minor head to the recovered confirmation.
 	c.importMu.Lock()
 	defer c.importMu.Unlock()
 	c.mu.RLock()
@@ -90,8 +93,12 @@ func (c *ShardCoordinator) InitFromRootBlock(root *types.RootBlock) error {
 			return fmt.Errorf("adopt master root %s: %w", root.Hash(), err)
 		}
 	} else {
+		// Milestone 1 assumes every shard has genesis root height 0, so master's
+		// first root is the one referenced by the minor genesis block.
+		// TODO(qkc): Support later shard activation by waiting for master to send
+		// the root at the shard's configured genesis root height.
 		if root.Hash() != genesis.PrevRootBlockHash() {
-			return fmt.Errorf("initial root %s does not match minor genesis root %s: %w", root.Hash(), genesis.PrevRootBlockHash(), ErrUnknownRootBlock)
+			return fmt.Errorf("initial root %s does not match minor genesis root %s: %w", root.Hash(), genesis.PrevRootBlockHash(), ErrGenesisRootMismatch)
 		}
 		// Persist the input before propagation, but publish the head marker only
 		// after both genesis notifications succeed. A failed boot can then retry.
@@ -120,6 +127,9 @@ func (c *ShardCoordinator) InitFromRootBlock(root *types.RootBlock) error {
 
 // AddRootBlock stores the root and directly selects its head. It never changes minor head.
 func (c *ShardCoordinator) AddRootBlock(root *types.RootBlock) (bool, error) {
+	// TODO(qkc): Validate root contents, ancestry, and remote x-shard lists;
+	// derive the confirmed minor tip; select the root by total difficulty; and
+	// update canonical root indexes and the minor head across root reorgs.
 	if root == nil {
 		return false, ErrUnknownRootBlock
 	}
@@ -159,10 +169,11 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 	if err := c.running(); err != nil {
 		return err
 	}
-	previousHead := c.minorBlockChain.CurrentBlock()
-	if previousHead != nil && previousHead.Hash() == block.Hash() {
-		return nil
-	}
+	// TODO(qkc): Add timestamp and previous-root validation, confirmed-minor
+	// fork choice, and new-tip broadcast.
+	// TODO(qkc): Recover partial imports through AddBlockListForSync. A persisted
+	// block may still need canonical-head selection, x-shard broadcast, or
+	// master header delivery after any post-insertion failure.
 	if c.minorBlockChain.GetBlock(block.Hash()) != nil {
 		return nil
 	}
@@ -191,6 +202,9 @@ func (c *ShardCoordinator) AddMinorBlock(block *types.MinorBlock) error {
 }
 
 // AddBlockListForSync is outside the Milestone 1 coordinator scope.
+// TODO(qkc): Validate and replay ordered block batches, defer canonical-head
+// selection until persistence completes, and batch-publish x-shard outputs
+// and minor headers. This path also recovers partial AddMinorBlock imports.
 func (c *ShardCoordinator) AddBlockListForSync([]*types.MinorBlock) error {
 	panic("AddBlockListForSync is not implemented")
 }

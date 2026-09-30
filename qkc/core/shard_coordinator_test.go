@@ -82,8 +82,6 @@ type connManagerStub struct {
 	payloads     []XShardBroadcast
 	headers      []*types.MinorBlock
 	counts       []uint32
-	tips         []*types.MinorBlockHeader
-	rootTips     []*types.RootBlockHeader
 	broadcastErr error
 }
 
@@ -102,8 +100,6 @@ func (s *connManagerStub) BroadcastNewTip(headers []*types.MinorBlockHeader, roo
 	if len(headers) != 1 || headers[0].Branch.Value != branch {
 		return errors.New("wrong tip routing")
 	}
-	s.tips = append(s.tips, headers...)
-	s.rootTips = append(s.rootTips, root)
 	s.stages = append(s.stages, "tip")
 	return nil
 }
@@ -145,19 +141,19 @@ func TestAddMinorBlockExecutesSetsCanonicalAndPublishes(t *testing.T) {
 	if len(chain.incoming) != 1 || !chain.incoming[0].IsFromRootChain || chain.incoming[0].TxHash != root.Hash() {
 		t.Fatal("execution did not receive the genesis-root cursor input")
 	}
-	if !reflect.DeepEqual(network.stages, []string{"xshard", "header", "tip"}) {
+	if !reflect.DeepEqual(network.stages, []string{"xshard", "header"}) {
 		t.Fatalf("propagation order: %v", network.stages)
 	}
 	if payload := network.payloads[1]; payload.Block.Hash() != block.Hash() || len(payload.Deposits) != 1 {
 		t.Fatal("outgoing deposits were not propagated with their source block")
 	}
-	if network.counts[1] != 1 || network.headers[1].Hash() != block.Hash() || network.tips[0].Hash() != block.Hash() || network.rootTips[0].Hash() != root.Hash() {
-		t.Fatal("master header or peer tip is incorrect")
+	if network.counts[1] != 1 || network.headers[1].Hash() != block.Hash() {
+		t.Fatal("master header is incorrect")
 	}
 	if err := c.AddMinorBlock(block); err != nil {
 		t.Fatal(err)
 	}
-	if chain.insertions != 1 || len(network.stages) != 3 {
+	if chain.insertions != 1 || len(network.stages) != 2 {
 		t.Fatal("known canonical block was executed or republished")
 	}
 }
