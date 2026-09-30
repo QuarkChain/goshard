@@ -8,7 +8,7 @@ consensus-visible side effect. Three granularities are emitted:
   state    direct EvmState mutations (balances, nonce, code, storage, snapshots)
            -> post state root. Covers the account and storage encoding rules.
   message  a signed transaction or a cross-shard deposit run through
-           apply_transaction / apply_xshard_deposit -> post state root,
+           apply_transaction / apply_xshard_deposit / __run_one_xshard_tx -> post state root,
            receipts, gas counters, produced deposits, coinbase fees.
   block    whole minor blocks run through ShardState.run_block, on a shard
            built from its genesis with a root chain alongside it -> the seven
@@ -867,6 +867,10 @@ def build_message_case(networks, case):
     )
     apply_alloc(state, case["pre_alloc"])
     state.commit()
+    if case.get("run_one_xshard"):
+        # A block reopens its parent state, whose context key starts at zero.
+        # Allocation above only constructs that parent root.
+        state.full_shard_key = 0
 
     recipients = {a[:40] for a in case["pre_alloc"]}
     observed_storage = case.get("observe_storage", {})
@@ -899,6 +903,16 @@ def build_message_case(networks, case):
         recipients.add(deposit.to_address.recipient.hex())
 
         def execute():
+            if case.get("run_one_xshard"):
+                shard = ShardState.__new__(ShardState)
+                shard.env = type("OracleEnv", (), {"quark_chain_config": qkc_config})()
+                shard.local_fee_rate = 1 - qkc_config.reward_tax_rate
+                shard._ShardState__run_one_xshard_tx(
+                    state, deposit, case.get("check_is_from_root_chain", True)
+                )
+                if state.xshard_deposit_receipts:
+                    return state.xshard_deposit_receipts[-1].state_root == b"\x01", b""
+                return True, b""
             return apply_xshard_deposit(state, deposit, case.get("gas_used_start", 0))
 
     if expect == "success":
@@ -940,6 +954,11 @@ def build_message_case(networks, case):
         # apply_xshard_deposit. It has to be dumped or the consumer cannot
         # reproduce the run: it is an input, not a result.
         "gas_used_start": case.get("gas_used_start", 0),
+        **(
+            {"run_one_xshard": True, "check_is_from_root_chain": case.get("check_is_from_root_chain", True)}
+            if case.get("run_one_xshard")
+            else {}
+        ),
         "result": result,
         "post_state_root": _hex(state.trie.root_hash),
         "gas_used": state.gas_used,
@@ -1467,6 +1486,107 @@ def message_cases():
                 "value": 1000,
                 "gas_price": 1000000000,
                 "gas_remained": 0,
+            },
+        },
+        {
+            "name": "xshard_pre_evm_credits_code_account",
+            "expect": "success",
+            "comment": "one second before EVM activation, __run_one_xshard_tx credits a "
+            "contract account directly; its REVERT code does not execute and "
+            "no deposit receipt is produced",
+            "network": "mainnet",
+            "timestamp": 1569567599,
+            "pre_alloc": {A + "00000001": {"balances": {}, "code": REVERT_RUNTIME}},
+            "run_one_xshard": True,
+            "gas_used_start": 9000,
+            "deposit": {
+                "tx_hash": "0x" + "33" * 32,
+                "from": B,
+                "to": A,
+                "value": 1000,
+                "gas_price": 1,
+                "gas_remained": 100000,
+            },
+        },
+        {
+            "name": "xshard_evm_boundary_at_enable",
+            "expect": "success",
+            "comment": "at the EVM enable timestamp the same deposit executes "
+            "the recipient's REVERT code and leaves the funds with the sender",
+            "network": "mainnet",
+            "timestamp": 1569567600,
+            "pre_alloc": {A + "00000001": {"balances": {}, "code": REVERT_RUNTIME}},
+            "run_one_xshard": True,
+            "gas_used_start": 9000,
+            "deposit": {
+                "tx_hash": "0x" + "34" * 32,
+                "from": B,
+                "to": A,
+                "value": 1000,
+                "gas_price": 1,
+                "gas_remained": 100000,
+            },
+        },
+        {
+            "name": "xshard_evm_boundary_after_enable",
+            "expect": "success",
+            "comment": "one second after EVM activation the receipt and "
+            "failed-message balance remain on the post-EVM path",
+            "network": "mainnet",
+            "timestamp": 1569567601,
+            "pre_alloc": {A + "00000001": {"balances": {}, "code": REVERT_RUNTIME}},
+            "run_one_xshard": True,
+            "gas_used_start": 9000,
+            "deposit": {
+                "tx_hash": "0x" + "35" * 32,
+                "from": B,
+                "to": A,
+                "value": 1000,
+                "gas_price": 1,
+                "gas_remained": 100000,
+            },
+        },
+        {
+            "name": "xshard_deposit_contract_creation",
+            "expect": "success",
+            "comment": "the destination runs a cross-shard deployment at the "
+            "address chosen by the source and records it in the receipt",
+            "network": "devnet",
+            "timestamp": 1,
+            "pre_alloc": {},
+            "run_one_xshard": True,
+            "gas_used_start": 9000,
+            "deposit": {
+                "tx_hash": "0x" + "36" * 32,
+                "from": A,
+                "to": B,
+                "value": 500,
+                "gas_price": 2,
+                "gas_remained": 100000,
+                "message_data": ANSWER_INIT,
+                "create_contract": True,
+            },
+        },
+        {
+            "name": "xshard_root_coinbase_for_other_shard",
+            "expect": "success",
+            "comment": "the root cursor emits a zero-value coinbase deposit even when "
+            "the coinbase belongs to another shard; post-EVM execution "
+            "still produces a deposit receipt",
+            "network": "devnet",
+            "timestamp": 1,
+            "pre_alloc": {},
+            "run_one_xshard": True,
+            "deposit": {
+                "tx_hash": "0x" + "37" * 32,
+                "from": A,
+                "from_full_shard_key": 0x00010001,
+                "to": A,
+                "to_full_shard_key": 0x00010001,
+                "value": 0,
+                "gas_price": 0,
+                "gas_remained": 0,
+                "is_from_root_chain": True,
             },
         },
         {
@@ -3305,7 +3425,7 @@ def main():
         "message_level.json",
         [
             "Single transactions and cross-shard deposits driven through",
-            "apply_transaction / apply_xshard_deposit, generated by",
+            "apply_transaction / apply_xshard_deposit / __run_one_xshard_tx, generated by",
             "qkc/testdata/gen_exec_golden.py against pyquarkchain. Each case",
             "declares whether it pins a successful execution or a rejection.",
         ],

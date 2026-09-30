@@ -477,3 +477,164 @@ func applyQKCCrossShardSource(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool
 	receipt.Bloom = qkctypes.CreateBloom(qkctypes.Receipts{receipt})
 	return receipt, deposit, nil, nil
 }
+
+func validateXShardDeposit(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, deposit *qkctypes.CrossShardTransactionDeposit) (*uint256.Int, *uint256.Int, error) {
+	if ctx == nil || ctx.QKCConfig == nil || ctx.ShardConfig == nil || evm == nil || gp == nil || statedb == nil || deposit == nil || deposit.Value == nil || deposit.Value.Value == nil || deposit.GasPrice == nil || deposit.GasPrice.Value == nil || deposit.GasRemained == nil || deposit.GasRemained.Value == nil {
+		return nil, nil, fmt.Errorf("%w: incomplete cross-shard deposit", ErrQKCInvalidTransaction)
+	}
+	if deposit.GasTokenID != qkccommon.DefaultTokenID || deposit.TransferTokenID != qkccommon.DefaultTokenID || deposit.RefundRate < 100 {
+		return nil, nil, vm.ErrQKCUnsupportedMNT
+	}
+	branch := ctx.branch()
+	// The root cursor also delivers zero-value coinbase deposits to other shards.
+	if (!branch.IsInBranch(deposit.To.FullShardKey) && !(deposit.IsFromRootChain && deposit.Value.Value.Sign() == 0)) || deposit.Value.Value.Sign() < 0 || deposit.GasPrice.Value.Sign() < 0 || !deposit.GasRemained.Value.IsUint64() || deposit.RefundRate > 100 {
+		return nil, nil, fmt.Errorf("%w: invalid cross-shard deposit", ErrQKCInvalidTransaction)
+	}
+	if err := validateQKCFeeRate(ctx.QKCConfig.LocalFeeRate); err != nil {
+		return nil, nil, err
+	}
+	value, overflow := uint256.FromBig(deposit.Value.Value)
+	if overflow {
+		return nil, nil, fmt.Errorf("%w: deposit value exceeds uint256", ErrQKCInvalidTransaction)
+	}
+	price, overflow := uint256.FromBig(deposit.GasPrice.Value)
+	if overflow {
+		return nil, nil, fmt.Errorf("%w: deposit gas price exceeds uint256", ErrQKCInvalidTransaction)
+	}
+	return value, price, nil
+}
+
+// RunOneXShardTx applies one incoming deposit. The root block containing it
+// decides whether the DDOS fix uses IsFromRootChain or the legacy gas-price rule.
+// A pre-EVM deposit credits the recipient without executing code or a receipt.
+func RunOneXShardTx(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, deposit *qkctypes.CrossShardTransactionDeposit, checkIsFromRootChain bool, txIndex int) (*qkctypes.Receipt, []byte, error) {
+	value, price, err := validateXShardDeposit(ctx, evm, gp, statedb, deposit)
+	if err != nil {
+		return nil, nil, err
+	}
+	gasUsedStart := uint64(0)
+	if checkIsFromRootChain {
+		if !deposit.IsFromRootChain {
+			gasUsedStart = qkcparams.GtxxShardCost.Uint64()
+		}
+	} else if !price.IsZero() {
+		gasUsedStart = qkcparams.GtxxShardCost.Uint64()
+	}
+	if evm.Context.Time >= ctx.QKCConfig.EnableEvmTimeStamp {
+		return ApplyXShardDeposit(ctx, evm, gp, statedb, deposit, gasUsedStart, txIndex)
+	}
+	stateSnapshot, poolSnapshot := statedb.Snapshot(), gp.Snapshot()
+	revert := func(err error) (*qkctypes.Receipt, []byte, error) {
+		statedb.RevertToSnapshot(stateSnapshot)
+		gp.Set(poolSnapshot)
+		return nil, nil, err
+	}
+	// pyquarkchain's pre-EVM path does not set the message shard key.
+	statedb.AddBalance(deposit.To.Recipient, value, tracing.BalanceChangeTransfer)
+	if err := gp.SubGas(gasUsedStart); err != nil {
+		return revert(err)
+	}
+	if err := gp.ReturnGas(0, gasUsedStart); err != nil {
+		return revert(err)
+	}
+	fee := new(big.Int).Mul(deposit.GasPrice.Value, qkcparams.GtxxShardCost)
+	fee.Mul(fee, ctx.QKCConfig.LocalFeeRate.Num())
+	fee.Quo(fee, ctx.QKCConfig.LocalFeeRate.Denom())
+	localFee, overflow := uint256.FromBig(fee)
+	if overflow {
+		return revert(fmt.Errorf("%w: deposit fee exceeds uint256", ErrQKCInvalidTransaction))
+	}
+	statedb.AddBalance(evm.Context.Coinbase, localFee, tracing.BalanceIncreaseRewardTransactionFee)
+	statedb.Finalise(true)
+	return nil, nil, nil
+}
+
+// ApplyXShardDeposit executes a post-EVM deposit with the starting gas chosen
+// by the root-chain cursor. It returns a receipt even when the EVM call fails.
+func ApplyXShardDeposit(ctx *QKCExecutionContext, evm *vm.EVM, gp *GasPool, statedb *state.StateDB, deposit *qkctypes.CrossShardTransactionDeposit, gasUsedStart uint64, txIndex int) (*qkctypes.Receipt, []byte, error) {
+	value, price, err := validateXShardDeposit(ctx, evm, gp, statedb, deposit)
+	if err != nil {
+		return nil, nil, err
+	}
+	stateSnapshot, poolSnapshot := statedb.Snapshot(), gp.Snapshot()
+	revert := func(err error) (*qkctypes.Receipt, []byte, error) {
+		statedb.RevertToSnapshot(stateSnapshot)
+		gp.Set(poolSnapshot)
+		return nil, nil, err
+	}
+	statedb.SetTxContext(deposit.TxHash, txIndex)
+	evm.Context.EVMEnableTimestamp = ctx.QKCConfig.EnableEvmTimeStamp
+	evm.Context.MNTEnableTimestamp = ctx.QKCConfig.EnableNonReservedNativeTokenTimestamp
+	evm.SetTxContext(vm.TxContext{
+		Origin: deposit.From.Recipient, GasPrice: price,
+		FromFullShardKey: deposit.From.FullShardKey, ToFullShardKey: deposit.To.FullShardKey,
+	})
+	statedb.AddBalance(deposit.From.Recipient, value, tracing.BalanceChangeTransfer)
+	rules := evm.ChainConfig().Rules(evm.Context.BlockNumber, false, evm.Context.Time)
+	to := deposit.To.Recipient
+	statedb.Prepare(rules, deposit.From.Recipient, evm.Context.Coinbase, &to, vm.ActivePrecompiles(rules), nil)
+	initialGas := deposit.GasRemained.Value.Uint64()
+	gas := vm.NewGasBudget(initialGas)
+	var output []byte
+	var created common.Address
+	var vmerr error
+	if deposit.CreateContract {
+		output, created, gas, vmerr = evm.QKCCreateContract(deposit.From.Recipient, deposit.MessageData, gas, value, deposit.TransferTokenID, deposit.To.FullShardKey, &to)
+	} else {
+		output, gas, vmerr = evm.QKCApplyMessage(deposit.From.Recipient, to, deposit.MessageData, gas, value, deposit.TransferTokenID, deposit.To.FullShardKey)
+	}
+	if errors.Is(vmerr, vm.ErrQKCUnsupportedMNT) {
+		return revert(vm.ErrQKCUnsupportedMNT)
+	}
+	if initialGas-gas.RegularGas > math.MaxUint64-gasUsedStart {
+		return revert(ErrGasUintOverflow)
+	}
+	gasUsed := gasUsedStart + initialGas - gas.RegularGas
+	if vmerr == nil {
+		refund := statedb.GetRefund()
+		if refund > gasUsed/2 {
+			refund = gasUsed / 2
+		}
+		gas.RegularGas += refund
+		gasUsed -= refund
+	} else {
+		output = nil
+		created = common.Address{}
+	}
+	if err := gp.SubGas(gasUsed); err != nil {
+		return revert(err)
+	}
+	if err := gp.ReturnGas(0, gasUsed); err != nil {
+		return revert(err)
+	}
+	refunded := new(big.Int).Mul(deposit.GasPrice.Value, new(big.Int).SetUint64(gas.RegularGas))
+	gasRefund, overflow := uint256.FromBig(refunded)
+	if overflow {
+		return revert(fmt.Errorf("%w: deposit refund exceeds uint256", ErrQKCInvalidTransaction))
+	}
+	statedb.AddBalance(deposit.From.Recipient, gasRefund, tracing.BalanceIncreaseGasReturn)
+	fee := new(big.Int).Mul(deposit.GasPrice.Value, new(big.Int).SetUint64(gasUsed))
+	fee.Mul(fee, ctx.QKCConfig.LocalFeeRate.Num())
+	fee.Quo(fee, ctx.QKCConfig.LocalFeeRate.Denom())
+	localFee, overflow := uint256.FromBig(fee)
+	if overflow {
+		return revert(fmt.Errorf("%w: deposit fee exceeds uint256", ErrQKCInvalidTransaction))
+	}
+	statedb.AddBalance(evm.Context.Coinbase, localFee, tracing.BalanceIncreaseRewardTransactionFee)
+	statedb.Finalise(true)
+	receipt := qkctypes.NewReceipt(vmerr != nil, gp.CumulativeUsed())
+	receipt.GasUsed = gasUsed
+	receipt.TxHash = deposit.TxHash
+	receipt.ContractAddress = created
+	receipt.ContractFullShardKey = deposit.To.FullShardKey
+	var blockNumber uint64
+	if evm.Context.BlockNumber != nil {
+		blockNumber = evm.Context.BlockNumber.Uint64()
+	}
+	receipt.Logs = statedb.GetLogs(deposit.TxHash, blockNumber, common.Hash{}, evm.Context.Time)
+	receipt.Bloom = qkctypes.CreateBloom(qkctypes.Receipts{receipt})
+	if deposit.CreateContract && vmerr == nil {
+		return receipt, created.Bytes(), nil
+	}
+	return receipt, output, nil
+}

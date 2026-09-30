@@ -21,6 +21,7 @@ import (
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/config"
 	qkcparams "github.com/ethereum/go-ethereum/qkc/params"
+	"github.com/ethereum/go-ethereum/qkc/serialize"
 	qkctypes "github.com/ethereum/go-ethereum/qkc/types"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
@@ -52,6 +53,36 @@ type goldenTransaction struct {
 	Hash             string `json:"hash"`
 }
 
+type goldenDeposit struct {
+	TxHash           string `json:"tx_hash"`
+	From             string `json:"from"`
+	FromFullShardKey uint32 `json:"from_full_shard_key"`
+	To               string `json:"to"`
+	ToFullShardKey   uint32 `json:"to_full_shard_key"`
+	Value            string `json:"value"`
+	GasPrice         string `json:"gas_price"`
+	GasTokenID       uint64 `json:"gas_token_id"`
+	TransferTokenID  uint64 `json:"transfer_token_id"`
+	GasRemained      string `json:"gas_remained"`
+	MessageData      string `json:"message_data"`
+	CreateContract   bool   `json:"create_contract"`
+	IsFromRootChain  bool   `json:"is_from_root_chain"`
+	RefundRate       uint8  `json:"refund_rate"`
+}
+
+type goldenReceipt struct {
+	Success              bool   `json:"success"`
+	CumulativeGasUsed    uint64 `json:"cumulative_gas_used"`
+	Bloom                string `json:"bloom"`
+	ContractAddress      string `json:"contract_address"`
+	ContractFullShardKey uint32 `json:"contract_full_shard_key"`
+	Logs                 []struct {
+		Address string   `json:"address"`
+		Topics  []string `json:"topics"`
+		Data    string   `json:"data"`
+	} `json:"logs"`
+}
+
 type goldenCase struct {
 	Name        string `json:"name"`
 	Network     string `json:"network"`
@@ -67,6 +98,7 @@ type goldenCase struct {
 	Inputs   []struct {
 		Kind        string            `json:"kind"`
 		Transaction goldenTransaction `json:"transaction"`
+		Deposit     goldenDeposit     `json:"deposit"`
 	} `json:"inputs"`
 	PostStateRoot string            `json:"post_state_root"`
 	GasUsed       uint64            `json:"gas_used"`
@@ -75,19 +107,9 @@ type goldenCase struct {
 		Success bool   `json:"success"`
 		Output  string `json:"output"`
 	} `json:"result"`
-	Receipts []struct {
-		Success              bool   `json:"success"`
-		CumulativeGasUsed    uint64 `json:"cumulative_gas_used"`
-		Bloom                string `json:"bloom"`
-		ContractAddress      string `json:"contract_address"`
-		ContractFullShardKey uint32 `json:"contract_full_shard_key"`
-		Logs                 []struct {
-			Address string   `json:"address"`
-			Topics  []string `json:"topics"`
-			Data    string   `json:"data"`
-		} `json:"logs"`
-	} `json:"receipts"`
-	XShardList []struct {
+	Receipts              []goldenReceipt `json:"receipts"`
+	XShardDepositReceipts []goldenReceipt `json:"xshard_deposit_receipts"`
+	XShardList            []struct {
 		From             string `json:"from"`
 		FromFullShardKey uint32 `json:"from_full_shard_key"`
 		To               string `json:"to"`
@@ -126,6 +148,24 @@ func goldenTX(t *testing.T, input goldenTransaction) *qkctypes.Transaction {
 		GasTokenID: input.GasTokenID, TransferTokenID: input.TransferTokenID, Version: input.Version,
 		V: goldenBig(t, input.V), R: goldenBig(t, input.R), S: goldenBig(t, input.S),
 	})
+}
+
+func goldenXShardDeposit(t *testing.T, input goldenDeposit) *qkctypes.CrossShardTransactionDeposit {
+	t.Helper()
+	return &qkctypes.CrossShardTransactionDeposit{
+		TxHash:          common.HexToHash(input.TxHash),
+		From:            account.NewAddress(common.HexToAddress(input.From), input.FromFullShardKey),
+		To:              account.NewAddress(common.HexToAddress(input.To), input.ToFullShardKey),
+		Value:           &serialize.Uint256{Value: goldenBig(t, input.Value)},
+		GasPrice:        &serialize.Uint256{Value: goldenBig(t, input.GasPrice)},
+		GasTokenID:      input.GasTokenID,
+		TransferTokenID: input.TransferTokenID,
+		GasRemained:     &serialize.Uint256{Value: goldenBig(t, input.GasRemained)},
+		MessageData:     common.FromHex(input.MessageData),
+		CreateContract:  input.CreateContract,
+		IsFromRootChain: input.IsFromRootChain,
+		RefundRate:      input.RefundRate,
+	}
 }
 
 func applyGoldenAlloc(t *testing.T, s *state.StateDB, alloc map[string]goldenAllocation) {
@@ -192,12 +232,12 @@ func TestQKCTransactionGoldenMessages(t *testing.T) {
 			shard := cfg.Quarkchain.GetShardConfigByFullShardID(tc.FullShardID)
 			require.NotNil(t, shard)
 			db := state.NewQKCDatabase(rawdb.NewMemoryDatabase())
-			statedb, err := state.NewQKC(coretypes.EmptyRootHash, db)
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, db)
 			require.NoError(t, err)
 			applyGoldenAlloc(t, statedb, tc.PreAlloc)
 			root, err := statedb.Commit(0, true, false)
 			require.NoError(t, err)
-			statedb, err = state.NewQKC(root, db)
+			statedb, err = state.NewQKCStateDB(root, db)
 			require.NoError(t, err)
 			vmctx := vm.BlockContext{
 				CanTransfer: CanTransfer, Transfer: Transfer,
@@ -285,6 +325,193 @@ func TestQKCTransactionGoldenMessages(t *testing.T) {
 	require.Empty(t, wanted)
 }
 
+func TestQKCXShardDepositGoldenMessages(t *testing.T) {
+	raw, err := os.ReadFile("../qkc/testdata/exec_golden/message_level.json")
+	require.NoError(t, err)
+	var file struct {
+		Cases []goldenCase `json:"cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &file))
+	wanted := map[string]bool{
+		"xshard_deposit_to_empty_account":                        true,
+		"xshard_deposit_failed_message_leaves_funds_with_sender": true,
+		"xshard_pre_evm_credits_code_account":                    true,
+		"xshard_evm_boundary_at_enable":                          true,
+		"xshard_evm_boundary_after_enable":                       true,
+		"xshard_deposit_contract_creation":                       true,
+		"xshard_root_coinbase_for_other_shard":                   true,
+	}
+	for _, tc := range file.Cases {
+		if !wanted[tc.Name] {
+			continue
+		}
+		delete(wanted, tc.Name)
+		t.Run(tc.Name, func(t *testing.T) {
+			cfg, err := config.LoadClusterConfig("../qkc/config/singularity/" + tc.Network + ".json")
+			require.NoError(t, err)
+			shard := cfg.Quarkchain.GetShardConfigByFullShardID(tc.FullShardID)
+			require.NotNil(t, shard)
+			db := state.NewQKCDatabase(rawdb.NewMemoryDatabase())
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, db)
+			require.NoError(t, err)
+			applyGoldenAlloc(t, statedb, tc.PreAlloc)
+			root, err := statedb.Commit(0, true, false)
+			require.NoError(t, err)
+			statedb, err = state.NewQKCStateDB(root, db)
+			require.NoError(t, err)
+			vmctx := vm.BlockContext{
+				CanTransfer: CanTransfer, Transfer: Transfer,
+				GetHash:     func(uint64) common.Hash { return common.Hash{} },
+				Coinbase:    common.HexToAddress(tc.Context.BlockCoinbase),
+				BlockNumber: new(big.Int).SetUint64(tc.Context.BlockNumber),
+				Time:        tc.Context.Timestamp, GasLimit: tc.Context.GasLimit,
+			}
+			evm := vm.NewEVM(vmctx, statedb, &qkcparams.DefaultConstantinople, vm.Config{})
+			t.Cleanup(evm.Release)
+			gp := NewGasPool(tc.Context.GasLimit)
+			require.Len(t, tc.Inputs, 1)
+			require.Equal(t, "deposit", tc.Inputs[0].Kind)
+			deposit := goldenXShardDeposit(t, tc.Inputs[0].Deposit)
+			receipt, output, err := RunOneXShardTx(&QKCExecutionContext{
+				QKCConfig: cfg.Quarkchain, ShardConfig: shard,
+			}, evm, gp, statedb, deposit, true, 0)
+			require.NoError(t, err)
+			if !deposit.CreateContract {
+				require.Equal(t, tc.Result.Output, "0x"+common.Bytes2Hex(output))
+			}
+			require.Empty(t, tc.Receipts)
+			require.Equal(t, tc.GasUsed, gp.CumulativeUsed())
+			if len(tc.XShardDepositReceipts) == 0 {
+				require.Nil(t, receipt)
+			} else {
+				require.Len(t, tc.XShardDepositReceipts, 1)
+				require.NotNil(t, receipt)
+				want := tc.XShardDepositReceipts[0]
+				require.Equal(t, tc.Result.Success, receipt.Status == qkctypes.ReceiptStatusSuccessful)
+				require.Equal(t, want.Success, receipt.Status == qkctypes.ReceiptStatusSuccessful)
+				require.Equal(t, want.CumulativeGasUsed, receipt.CumulativeGasUsed)
+				require.Equal(t, want.ContractFullShardKey, receipt.ContractFullShardKey)
+				require.Equal(t, common.HexToAddress(want.ContractAddress), common.Address(receipt.ContractAddress))
+				if deposit.CreateContract {
+					require.Equal(t, common.HexToAddress(want.ContractAddress).Bytes(), output)
+				}
+				require.Equal(t, common.FromHex(want.Bloom), receipt.Bloom.Bytes())
+				require.Len(t, receipt.Logs, len(want.Logs))
+				for i, log := range receipt.Logs {
+					require.Equal(t, common.HexToAddress(want.Logs[i].Address), log.Address)
+					require.Equal(t, common.FromHex(want.Logs[i].Data), log.Data)
+					require.Len(t, log.Topics, len(want.Logs[i].Topics))
+					for j, topic := range log.Topics {
+						require.Equal(t, common.HexToHash(want.Logs[i].Topics[j]), topic)
+					}
+				}
+			}
+			root, err = statedb.Commit(tc.Context.BlockNumber, true, false)
+			require.NoError(t, err)
+			require.Equal(t, common.HexToHash(tc.PostStateRoot), root)
+			if fee := tc.BlockFees["35760"]; fee != "" {
+				require.Zero(t, goldenBig(t, fee).Cmp(statedb.GetBalance(vmctx.Coinbase).ToBig()))
+			}
+		})
+	}
+	require.Empty(t, wanted)
+}
+
+func TestQKCXShardDepositStartingGas(t *testing.T) {
+	cfg, err := config.LoadClusterConfig("../qkc/config/singularity/devnet.json")
+	require.NoError(t, err)
+	ctx := &QKCExecutionContext{QKCConfig: cfg.Quarkchain, ShardConfig: cfg.Quarkchain.GetShardConfigByFullShardID(1)}
+	for _, tc := range []struct {
+		name          string
+		checkFromRoot bool
+		fromRoot      bool
+		price         int64
+		wantGas       uint64
+	}{
+		{"legacy root deposit with price", false, true, 1, 9000},
+		{"fixed root deposit", true, true, 1, 0},
+		{"legacy free shard deposit", false, false, 0, 0},
+		{"fixed free shard deposit", true, false, 0, 9000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			require.NoError(t, err)
+			gp := NewGasPool(100000)
+			evm := vm.NewEVM(vm.BlockContext{
+				CanTransfer: CanTransfer, Transfer: Transfer,
+				BlockNumber: big.NewInt(1), Time: 1, GasLimit: 100000,
+			}, statedb, &qkcparams.DefaultConstantinople, vm.Config{})
+			t.Cleanup(evm.Release)
+			deposit := &qkctypes.CrossShardTransactionDeposit{
+				From:       account.NewAddress(common.HexToAddress("0xaaaa"), 1),
+				To:         account.NewAddress(common.HexToAddress("0xbbbb"), 1),
+				Value:      &serialize.Uint256{Value: big.NewInt(100)},
+				GasPrice:   &serialize.Uint256{Value: big.NewInt(tc.price)},
+				GasTokenID: qkccommon.DefaultTokenID, TransferTokenID: qkccommon.DefaultTokenID,
+				GasRemained:     &serialize.Uint256{Value: big.NewInt(0)},
+				IsFromRootChain: tc.fromRoot, RefundRate: 100,
+			}
+			receipt, _, err := RunOneXShardTx(ctx, evm, gp, statedb, deposit, tc.checkFromRoot, 0)
+			require.NoError(t, err)
+			require.NotNil(t, receipt)
+			require.Equal(t, tc.wantGas, receipt.GasUsed)
+			require.Equal(t, tc.wantGas, gp.CumulativeUsed())
+			require.Equal(t, uint64(100), statedb.GetBalance(deposit.To.Recipient).Uint64())
+		})
+	}
+}
+
+func TestQKCXShardDepositAbandonsWithoutMutation(t *testing.T) {
+	cfg, err := config.LoadClusterConfig("../qkc/config/singularity/devnet.json")
+	require.NoError(t, err)
+	ctx := &QKCExecutionContext{QKCConfig: cfg.Quarkchain, ShardConfig: cfg.Quarkchain.GetShardConfigByFullShardID(1)}
+	for _, tc := range []struct {
+		name       string
+		pool       uint64
+		token      uint64
+		refundRate uint8
+		toShardKey uint32
+		fromRoot   bool
+		value      int64
+		want       error
+	}{
+		{"gas limit", 8999, qkccommon.DefaultTokenID, 100, 1, false, 100, ErrGasLimitReached},
+		{"nondefault token", 100000, qkccommon.DefaultTokenID + 1, 100, 1, false, 100, vm.ErrQKCUnsupportedMNT},
+		{"partial refund with default tokens", 100000, qkccommon.DefaultTokenID, 10, 1, false, 100, vm.ErrQKCUnsupportedMNT},
+		{"foreign shard deposit", 100000, qkccommon.DefaultTokenID, 100, 0x00010001, false, 0, ErrQKCInvalidTransaction},
+		{"foreign shard nonzero root deposit", 100000, qkccommon.DefaultTokenID, 100, 0x00010001, true, 100, ErrQKCInvalidTransaction},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := state.NewQKCDatabase(rawdb.NewMemoryDatabase())
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, db)
+			require.NoError(t, err)
+			gp := NewGasPool(tc.pool)
+			evm := vm.NewEVM(vm.BlockContext{
+				CanTransfer: CanTransfer, Transfer: Transfer,
+				BlockNumber: big.NewInt(1), Time: 1, GasLimit: tc.pool,
+			}, statedb, &qkcparams.DefaultConstantinople, vm.Config{})
+			t.Cleanup(evm.Release)
+			deposit := &qkctypes.CrossShardTransactionDeposit{
+				From:       account.NewAddress(common.HexToAddress("0xaaaa"), 1),
+				To:         account.NewAddress(common.HexToAddress("0xbbbb"), tc.toShardKey),
+				Value:      &serialize.Uint256{Value: big.NewInt(tc.value)},
+				GasPrice:   &serialize.Uint256{Value: big.NewInt(1)},
+				GasTokenID: qkccommon.DefaultTokenID, TransferTokenID: tc.token,
+				GasRemained: &serialize.Uint256{Value: big.NewInt(0)}, IsFromRootChain: tc.fromRoot, RefundRate: tc.refundRate,
+			}
+			receipt, output, err := RunOneXShardTx(ctx, evm, gp, statedb, deposit, true, 0)
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, receipt)
+			require.Nil(t, output)
+			require.Equal(t, tc.pool, gp.Gas())
+			require.Zero(t, gp.CumulativeUsed())
+			root, err := statedb.Commit(1, true, false)
+			require.NoError(t, err)
+			require.Equal(t, coretypes.EmptyRootHash, root)
+		})
+	}
+}
+
 func TestQKCValidationKeepsNewSenderShardKey(t *testing.T) {
 	cfg, err := config.LoadClusterConfig("../qkc/config/singularity/devnet.json")
 	require.NoError(t, err)
@@ -295,7 +522,7 @@ func TestQKCValidationKeepsNewSenderShardKey(t *testing.T) {
 	tx, err := qkctypes.SignTx(qkctypes.NewEvmTransaction(0, common.HexToAddress("0x1234"), big.NewInt(0), 21000, big.NewInt(0), 0, 1, cfg.Quarkchain.NetworkID, 0, nil, qkccommon.DefaultTokenID, qkccommon.DefaultTokenID), qkctypes.MakeSigner(cfg.Quarkchain.NetworkID, ctx.ShardConfig.EthChainID), key)
 	require.NoError(t, err)
 
-	expected, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+	expected, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 	require.NoError(t, err)
 	expected.SetFullShardKey(0)
 	expected.SetNonce(sender, 1, tracing.NonceChangeUnspecified)
@@ -304,7 +531,7 @@ func TestQKCValidationKeepsNewSenderShardKey(t *testing.T) {
 
 	for _, prevalidate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "direct", true: "prevalidated"}[prevalidate], func(t *testing.T) {
-			statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 			require.NoError(t, err)
 			statedb.SetFullShardKey(0)
 			gp := NewGasPool(50000)
@@ -339,13 +566,13 @@ func TestQKCActiveMNTPrecompileRollsBackTransaction(t *testing.T) {
 	require.NoError(t, err)
 
 	db := state.NewQKCDatabase(rawdb.NewMemoryDatabase())
-	statedb, err := state.NewQKC(coretypes.EmptyRootHash, db)
+	statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, db)
 	require.NoError(t, err)
 	statedb.SetFullShardKey(1)
 	statedb.SetBalance(sender, uint256.NewInt(100000), tracing.BalanceChangeUnspecified)
 	before, err := statedb.Commit(1, true, false)
 	require.NoError(t, err)
-	statedb, err = state.NewQKC(before, db)
+	statedb, err = state.NewQKCStateDB(before, db)
 	require.NoError(t, err)
 	gp := NewGasPool(80000)
 	require.NoError(t, gp.SubGas(1000))
@@ -411,7 +638,7 @@ func TestS3AdmissionBoundaries(t *testing.T) {
 		{"token", 30000, 100, 1, qkccommon.DefaultTokenID + 1, 50000, 0, vm.ErrQKCUnsupportedMNT},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 			require.NoError(t, err)
 			statedb.SetFullShardKey(1)
 			statedb.SetBalance(sender, uint256.NewInt(50000), tracing.BalanceChangeUnspecified)
@@ -448,7 +675,7 @@ func TestQKCCrossShardSourceBeforeEVMAndPoSW(t *testing.T) {
 				QKCConfig: cfg.Quarkchain, ShardConfig: cfg.Quarkchain.GetShardConfigByFullShardID(1),
 				RootHeight: 1, XShardGasLimit: 100000,
 			}
-			statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 			require.NoError(t, err)
 			statedb.SetFullShardKey(1)
 			statedb.SetBalance(sender, uint256.NewInt(200000), tracing.BalanceChangeUnspecified)
@@ -524,7 +751,7 @@ func TestQKCCrossShardAdmissionUsesConfiguredShards(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx.QKCConfig.GetShardConfigByFullShardID(17).Genesis.RootHeight = tc.height
-			statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 			require.NoError(t, err)
 			statedb.SetFullShardKey(0)
 			statedb.SetBalance(sender, uint256.NewInt(20_000_000), tracing.BalanceChangeUnspecified)
@@ -542,7 +769,7 @@ func TestQKCCrossShardAdmissionUsesConfiguredShards(t *testing.T) {
 	sender = crypto.PubkeyToAddress(key.PublicKey)
 	tx, err := qkctypes.SignTx(qkctypes.NewEvmTransaction(0, to, big.NewInt(100), 60000, big.NewInt(1), 0, 1, cfg.Quarkchain.NetworkID, 0, nil, qkccommon.DefaultTokenID, qkccommon.DefaultTokenID), qkctypes.MakeSigner(cfg.Quarkchain.NetworkID, ctx.ShardConfig.EthChainID), key)
 	require.NoError(t, err)
-	statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+	statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 	require.NoError(t, err)
 	statedb.SetFullShardKey(0)
 	statedb.SetBalance(sender, uint256.NewInt(20_000_000), tracing.BalanceChangeUnspecified)
@@ -580,7 +807,7 @@ func TestQKCCrossShardRejectsInvalidFeeRateBeforeMutation(t *testing.T) {
 				QKCConfig: cfg.Quarkchain, ShardConfig: cfg.Quarkchain.GetShardConfigByFullShardID(1),
 				RootHeight: 1, XShardGasLimit: 100000,
 			}
-			statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+			statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 			require.NoError(t, err)
 			statedb.SetFullShardKey(1)
 			statedb.SetBalance(sender, uint256.NewInt(200000), tracing.BalanceChangeUnspecified)
@@ -606,7 +833,7 @@ func TestS3ActivationGates(t *testing.T) {
 	shard := cfg.Quarkchain.GetShardConfigByFullShardID(1)
 	sender := common.HexToAddress("0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a")
 	to := common.HexToAddress("0x1563915e194d8cfba1943570603f7606a3115508")
-	statedb, err := state.NewQKC(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+	statedb, err := state.NewQKCStateDB(coretypes.EmptyRootHash, state.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 	require.NoError(t, err)
 	statedb.SetFullShardKey(1)
 	statedb.SetBalance(sender, uint256.NewInt(50000), tracing.BalanceChangeUnspecified)
