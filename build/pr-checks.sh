@@ -42,7 +42,6 @@ Environment:
   PR_CHECK_GOMEMLIMIT=N Go runtime memory target for tests (default: 8GiB).
   PR_CHECK_BASE_REF=REF Base ref used to find changed files (default: origin/goshard/base).
   PR_CHECK_REPORT_DIR=D Directory for the full log and summary (default: build/cache).
-  PR_CHECK_SKIP_386=1   Skip the Linux 386 short-test job.
 
 Prerequisites:
   - Go 1.24 or 1.25 (CI tests both versions)
@@ -330,15 +329,7 @@ main() {
 	run_check "all command builds" make all
 	run_check "keeper target builds" go run ./build/ci.go keeper
 
-	if [[ "$(go env GOOS)" != "linux" ]]; then
-		skipped+=("386 short tests (Linux only)")
-	elif [[ "${PR_CHECK_SKIP_386:-0}" == "1" ]]; then
-		skipped+=("386 short tests (PR_CHECK_SKIP_386=1)")
-	else
-		run_check "386 short tests" env GOMAXPROCS="$TEST_PARALLEL" GOMEMLIMIT="$GO_MEMORY_LIMIT" \
-			./build/travis_keepalive.sh \
-			go run ./build/ci.go test -arch 386 -short -p "$TEST_JOBS"
-	fi
+	skipped+=("386 short tests (32-bit unsupported)")
 	run_check "full tests" env GOMAXPROCS="$TEST_PARALLEL" GOMEMLIMIT="$GO_MEMORY_LIMIT" \
 		./build/travis_keepalive.sh go run ./build/ci.go test -p "$TEST_JOBS"
 
