@@ -70,6 +70,19 @@ var (
 	_ shard.Sender            = (*SlaveBackend)(nil)
 )
 
+// Options is the slave backend's injection surface — process-level dependencies
+// the backend and its connections use but the cluster config does not carry.
+type Options struct {
+	// Logger is the process logger the slave and its connections log through.
+	// nil means log.Root().
+	Logger log.Logger
+
+	// MaxPayloadSize bounds a single frame's payload on the master and xshard
+	// connections; 0 disables the limit. A Go-side guard with no pyquarkchain
+	// counterpart, so it has no config-derived default.
+	MaxPayloadSize uint32
+}
+
 // New boots every shard the context's slave owns, eagerly and in config order,
 // and assembles the communication resources (xshard pool; the listener is bound
 // later by Start). Eager shard construction is interim scaffolding: with no
@@ -78,16 +91,28 @@ var (
 //
 // On any failure the shards already started are stopped and their databases
 // closed before the error returns, so the datadir stays reopenable.
-func New(ctx *config.SlaveContext, rootGenesis *types.RootBlockHeader, opts shard.Options) (*SlaveBackend, error) {
+func New(ctx *config.SlaveContext, rootGenesis *types.RootBlockHeader, opts Options, shardOpts shard.Options) (*SlaveBackend, error) {
+	// Port is config data (ctx.Slave.Port), not an injection seam — but a zero
+	// port is never a valid listen address, and SlaveContext can be hand-built
+	// (tests, callers that skip ClusterConfig.Validate), so reject it here before
+	// any shard or socket is opened.
+	if ctx.Slave.Port == 0 {
+		return nil, fmt.Errorf("slave %s: invalid port 0", ctx.ID)
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = log.Root()
+	}
 	b := &SlaveBackend{
 		ID:                   ctx.ID,
 		shards:               make(map[account.Branch]*shard.Shard, len(ctx.FullShardIDs())),
 		localFullShardIDList: append([]uint32(nil), ctx.FullShardIDs()...),
 		port:                 int(ctx.Slave.Port),
+		maxPayloadSize:       opts.MaxPayloadSize,
 		clusterShardIDs:      ctx.Quarkchain.GetGenesisShardIds(),
 		clusterPeerIDs:       make(map[uint64]struct{}),
 		stopped:              make(chan struct{}),
-		logger:               log.Root(),
+		logger:               logger,
 	}
 
 	pool, err := slaveconn.NewXshardPool([]byte(b.ID), b.localFullShardIDList, b.clusterShardIDs, b.maxPayloadSize, b, b.logger)
@@ -98,7 +123,7 @@ func New(ctx *config.SlaveContext, rootGenesis *types.RootBlockHeader, opts shar
 
 	for _, id := range ctx.FullShardIDs() {
 		branch := account.NewBranch(id)
-		s, err := shard.New(ctx, branch, rootGenesis, ctx.DBPathRoot, opts, b)
+		s, err := shard.New(ctx, branch, rootGenesis, ctx.DBPathRoot, shardOpts, b)
 		if err != nil {
 			return nil, errors.Join(fmt.Errorf("slave %s: %w", b.ID, err), b.Stop())
 		}
@@ -106,7 +131,7 @@ func New(ctx *config.SlaveContext, rootGenesis *types.RootBlockHeader, opts shar
 		b.order = append(b.order, branch)
 
 		height, _ := s.Chain().Head()
-		log.Info("shard started", "shard", fmt.Sprintf("0x%08x", id), "genesis", s.Chain().GenesisHash(), "head", height)
+		b.logger.Info("shard started", "shard", fmt.Sprintf("0x%08x", id), "genesis", s.Chain().GenesisHash(), "head", height)
 	}
 	return b, nil
 }

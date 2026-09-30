@@ -77,5 +77,5 @@ func bootSlave(cfg *config.ClusterConfig, nodeID string) (*slave.SlaveBackend, e
 	}
 	// TODO: inject the real chain service (the geth-core shard chain) here once it
 	// exists; Options{} uses the stub.
-	return slave.New(slaveCtx, root, shard.Options{})
+	return slave.New(slaveCtx, root, slave.Options{}, shard.Options{})
 }

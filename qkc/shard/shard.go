@@ -311,7 +311,7 @@ func (s *Shard) AddPeer(clusterPeerID uint64, mc *slaveconn.MasterConn) (created
 		return false, nil
 	}
 
-	pc, err := slaveconn.NewPeerConn(clusterPeerID, s.Branch.GetFullShardID(), mc, s, log.Root())
+	pc, err := slaveconn.NewPeerConn(clusterPeerID, s.Branch.GetFullShardID(), mc, s, mc.Logger())
 	if err != nil {
 		return false, err
 	}

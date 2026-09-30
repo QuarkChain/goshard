@@ -60,7 +60,7 @@ func TestSlaveBootAndReopen(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			ctx, root := bootEnv(t, path)
 
-			b, err := New(ctx, root, shard.Options{})
+			b, err := New(ctx, root, Options{}, shard.Options{})
 			if err != nil {
 				t.Fatalf("slave.New: %v", err)
 			}
@@ -90,7 +90,7 @@ func TestSlaveBootAndReopen(t *testing.T) {
 				t.Fatalf("Stop: %v", err)
 			}
 
-			b, err = New(ctx, root, shard.Options{})
+			b, err = New(ctx, root, Options{}, shard.Options{})
 			if err != nil {
 				t.Fatalf("slave.New(reopen): %v", err)
 			}
@@ -126,13 +126,13 @@ func TestSlaveBootRollback(t *testing.T) {
 		t.Fatal("fixture must assign S0 at least two shards to exercise rollback")
 	}
 
-	_, err := New(ctx, root, shard.Options{Chain: &failingChainService{failAfter: 1}})
+	_, err := New(ctx, root, Options{}, shard.Options{Chain: &failingChainService{failAfter: 1}})
 	if err == nil || !strings.Contains(err.Error(), "injected chain failure") ||
 		!strings.Contains(err.Error(), "slave S0") {
 		t.Fatalf("slave.New err = %v, want injected chain failure attributed to slave S0", err)
 	}
 
-	b, err := New(ctx, root, shard.Options{})
+	b, err := New(ctx, root, Options{}, shard.Options{})
 	if err != nil {
 		t.Fatalf("slave.New after rollback: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestSlaveBootRollback(t *testing.T) {
 
 func TestSlaveStopIdempotent(t *testing.T) {
 	ctx, root := bootEnv(t, fixtureMainnet)
-	b, err := New(ctx, root, shard.Options{})
+	b, err := New(ctx, root, Options{}, shard.Options{})
 	if err != nil {
 		t.Fatalf("slave.New: %v", err)
 	}
@@ -152,6 +152,17 @@ func TestSlaveStopIdempotent(t *testing.T) {
 	}
 	if err := b.Stop(); err != nil {
 		t.Fatalf("Stop(again): %v", err)
+	}
+}
+
+// TestSlaveNewRejectsZeroPort: a zero port is never a valid listen address, and
+// SlaveContext can be hand-built past ClusterConfig.Validate, so New refuses it
+// before opening any shard or socket.
+func TestSlaveNewRejectsZeroPort(t *testing.T) {
+	ctx, root := bootEnv(t, fixtureMainnet)
+	ctx.Slave.Port = 0
+	if _, err := New(ctx, root, Options{}, shard.Options{}); err == nil {
+		t.Fatal("New with port 0 err = nil, want error")
 	}
 }
 
@@ -176,7 +187,7 @@ func newTestBackend(t *testing.T) *SlaveBackend {
 	t.Helper()
 	ctx, root := bootEnv(t, fixtureMainnet)
 	ctx.Slave.Port = uint16(freeTestPort(t))
-	b, err := New(ctx, root, shard.Options{})
+	b, err := New(ctx, root, Options{}, shard.Options{})
 	if err != nil {
 		t.Fatalf("slave.New: %v", err)
 	}
@@ -195,7 +206,7 @@ func pipeMasterConn(t *testing.T, b *SlaveBackend) *slaveconn.MasterConn {
 	t.Cleanup(func() { clientEnd.Close(); serverEnd.Close() })
 	mc, err := slaveconn.NewMasterConn(slaveconn.MasterConnConfig{
 		Conn:                 serverEnd,
-		LocalID:              b.selfID,
+		LocalID:              []byte(b.ID),
 		LocalFullShardIDList: b.localFullShardIDList,
 		ClusterShardIDs:      b.clusterShardIDs,
 		Handler:              b,
@@ -363,7 +374,7 @@ func TestSlaveStartBindFailureStopsBackend(t *testing.T) {
 
 	ctx, root := bootEnv(t, fixtureMainnet)
 	ctx.Slave.Port = uint16(holder.port)
-	b, err := New(ctx, root, shard.Options{})
+	b, err := New(ctx, root, Options{}, shard.Options{})
 	if err != nil {
 		t.Fatalf("slave.New: %v", err)
 	}
@@ -379,7 +390,7 @@ func TestSlaveStartBindFailureStopsBackend(t *testing.T) {
 	}
 
 	// The failed boot left the datadir reopenable.
-	b2, err := New(ctx, root, shard.Options{})
+	b2, err := New(ctx, root, Options{}, shard.Options{})
 	if err != nil {
 		t.Fatalf("slave.New(reopen after failed Start): %v", err)
 	}
