@@ -1,24 +1,60 @@
 # exec_golden
 
 Execution golden vectors generated from pyquarkchain by
-[`gen_exec_golden.py`](../gen_exec_golden.py). What the three files hold, how
-they are regenerated, and how the result is guarded is documented in
-[`qkc/config/singularity/README.md`](../../config/singularity/README.md), under
-"Execution golden vectors".
+[`gen_exec_golden.py`](../gen_exec_golden.py), which drives pyquarkchain's
+`quarkchain.evm.state.State` and `ShardState`. The generator imports that state
+class as `EvmState` only to keep it distinct from shard-level execution. It reads
+the two configs in
+[`qkc/config/singularity`](../../config/singularity), so the vectors are bound to
+the configs goshard ships rather than to whatever a pyquarkchain checkout happens
+to carry.
 
-This file records the one thing a consumer cannot read off the vectors: which
-call each `state_level.json` op stands for.
+Three granularities are emitted, each with its own file and its own consumer. The first two are for unit tests, the last is for integration tests.
+
+| file | input | pinned output |
+| --- | --- | --- |
+| `state_level.json` | direct pyquarkchain `State` mutations | post state root, per-account reads |
+| `message_level.json` | one signed transaction or one cross-shard deposit | post state root, receipts, gas counters, produced deposits, coinbase fees |
+| `block_level.json` | whole minor blocks against a shard built from its genesis, with a root chain alongside | the seven values a block commits to, plus the deposits it consumed |
+
+A block-level case carries the shard's genesis allocation, the serialized root
+blocks it saw, the deposit lists its neighbours sent, and each block in order.
+The allocation is the shard's `GENESIS.ALLOC`, so a consumer reaches the genesis
+state root by applying it and nothing else — which is the same self-check the
+genesis cases make, one level up.
+
+## Regenerating
+
+```
+# from the root of a pyquarkchain checkout, inside a virtualenv with its
+# requirements installed:
+python <path-to-goshard>/qkc/testdata/gen_exec_golden.py
+```
+
+The checkout is taken from `$PYQUARKCHAIN`, defaulting to the current directory.
+
+Two things guard the result. The script's first two cases are the genesis
+allocations themselves, and it fails unless their state roots match the pinned
+[minor-genesis values](../../config/singularity/README.md#pinned-minor-genesis-values)
+— a mismatch elsewhere is then a real disagreement, not a case description that
+never reached pyquarkchain `State`. And because that self-check says nothing about
+execution — changing `messages.py` leaves the genesis root untouched — every
+vector file records the oracle it came from: the pyquarkchain commit and a digest
+of each module that decides execution. The script refuses to run when one of
+those modules has uncommitted changes; `--allow-dirty` proceeds and names the
+edited modules in the output instead.
 
 ## State-level ops
 
 A case is an allocation, a list of ops, and the state root the ops commit to.
-Every op names a method the generator calls on pyquarkchain's `EvmState`. To
+Every op names a method the generator calls on pyquarkchain's
+`quarkchain.evm.state.State`. To
 test the Go implementation against the same case, an op has to reach the call
 in the third column.
 
-| op | pyquarkchain `EvmState` | Go |
+| op | pyquarkchain `State` | Go |
 | --- | --- | --- |
-| `set_full_shard_key` | `full_shard_key = v` | `EvmState.SetFullShardKey` |
+| `set_full_shard_key` | `full_shard_key = v` | `StateDB.SetFullShardKey` |
 | `delta_token_balance` | `delta_token_balance` | `EvmState.DeltaTokenBalance` |
 | `set_token_balance` | `set_token_balance` | `EvmState.SetTokenBalance` |
 | `read_account` | `get_balance` | `EvmState.GetBalance` |
@@ -26,11 +62,8 @@ in the third column.
 | `increment_nonce` | `increment_nonce` | `EvmState.IncrementNonce` |
 | `set_code` | `set_code` | `EvmState.SetCode` |
 | `set_storage` | `set_storage_data` | `StateDB.SetState` |
-| `reset_balances` | `reset_balances` | `StateDB.ResetBalances` |
-| `reset_storage` | `reset_storage` | `StateDB.ResetStorage` |
-| `del_account` | `del_account` | `StateDB.DelAccount` |
-| `snapshot` | `snapshot` | `EvmState.Snapshot` |
-| `revert` | `revert` | `EvmState.RevertToSnapshot` |
+| `snapshot` | `snapshot` | `StateDB.Snapshot` |
+| `revert` | `revert` | `StateDB.RevertToSnapshot` |
 | `commit` | `commit` | `EvmState.Commit` |
 
 The two Go receivers are one object. `EvmState` is QuarkChain's, in `qkc/state`;
@@ -41,11 +74,46 @@ naming `StateDB` is that method reached through `EvmState` unchanged — no
 forwarding code exists for it. `qkc/state` writes its own method only where
 QuarkChain's semantics differ from geth's.
 
+## Mutable-state policy families (S1)
+
+`qkc/state.TestStateGolden` consumes all 23 state vectors without a VM or a
+transaction executor. The following nine supplement the 14 retained S0 cases.
+Each checks the committed state root and account read-back against the pinned oracle.
+The `_qkc` and `_qeth` variants exercise the two balance dispatch paths.
+
+| case | policy pinned in the committed state |
+| --- | --- |
+| `full_shard_key_first_read_survives_revert` | The first-read key survives revert; a different account uses the restored context key. |
+| `full_shard_key_first_write_survives_revert` | The frozen key survives removal of a newly created Go state object. |
+| `full_shard_key_blank_read_expires_at_commit` | Commit ends the blank account's cached shard-key lifetime. |
+| `set_token_balance_zero_keeps_token_absent_qkc` / `_qeth` | Setting zero does not create a token entry in a surviving account. |
+| `delta_token_balance_zero_keeps_token_absent_qkc` / `_qeth` | Adding zero does not create a token entry either. |
+| `sixteen_tokens_stay_list_encoded` | Sixteen nonzero balances use list encoding across commit. |
+| `seventeenth_zero_token_does_not_enable_trie` | The threshold counts nonzero balances, not cached token entries. |
+
+Seventeen **nonzero** tokens require the unsupported token-trie representation;
+they are outside this S1 success corpus. Execution gates, PoSW transfer checks,
+precompile activation and transaction rejection belong to the message/block
+layers, where their effects can reach receipts or transaction acceptance.
+
+Storage reset and account deletion are deliberately absent from the state-op
+vocabulary. They are internal steps of CREATE and SELFDESTRUCT in pyquarkchain,
+not standalone execution-layer operations. The reachable lifecycle cases pin
+their consensus-visible effects instead:
+
+| case | lifecycle behavior pinned |
+| --- | --- |
+| `contract_creation` | CREATE preserves balances already sent to the destination. |
+| `contract_selfdestruct` | SELFDESTRUCT removes code, balances, and old storage. |
+| `contract_selfdestruct_reverted_with_parent` | Reverting a parent frame also reverts a child's SELFDESTRUCT. |
+| `devnet_selfdestruct_then_paid_again` | A later transaction in the same block can revive the account without reviving its old storage. |
+| `devnet_selfdestruct_then_create2` | CREATE2 can recreate the destroyed address with a fresh storage trie. |
+
 ## The other two files
 
 `message_level.json` and `block_level.json` are not op lists. Each case is a
 whole input — one transaction or deposit, or a sequence of minor blocks — and
-the pinned values are listed in the table in the singularity README.
+the pinned values are listed in the table at the top of this file.
 
 
 ## What earns a vector
