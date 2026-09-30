@@ -13,9 +13,9 @@ import (
 	"github.com/holiman/uint256"
 )
 
-// NewQKC opens the state named by root after checking that the database can
+// NewQKCStateDB opens the state named by root after checking that the database can
 // encode QuarkChain accounts without loss.
-func NewQKC(root common.Hash, db Database) (*StateDB, error) {
+func NewQKCStateDB(root common.Hash, db Database) (*StateDB, error) {
 	if db.Type() != TypeMPT || db.TrieDB().Scheme() != rawdb.HashScheme {
 		return nil, fmt.Errorf("unsupported state database: QuarkChain state requires a hash-based MPT")
 	}
