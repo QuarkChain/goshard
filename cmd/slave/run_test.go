@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,16 +112,74 @@ func TestBootSlaveRejectsBadNodeID(t *testing.T) {
 	}
 }
 
+// writeRunFixture copies a fixture with its DB_PATH_ROOT redirected into a
+// fresh temp dir and every slave's PORT redirected to free ephemeral ports, so
+// the run action's listener never collides with another slave or a stale
+// process. It returns the rewritten config's path.
+func writeRunFixture(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	doc["DB_PATH_ROOT"], _ = json.Marshal(t.TempDir())
+
+	var slaves []map[string]json.RawMessage
+	if err := json.Unmarshal(doc["SLAVE_LIST"], &slaves); err != nil {
+		t.Fatalf("unmarshal SLAVE_LIST: %v", err)
+	}
+	ports := freePorts(t, len(slaves))
+	for i := range slaves {
+		slaves[i]["PORT"], _ = json.Marshal(ports[i])
+	}
+	doc["SLAVE_LIST"], err = json.Marshal(slaves)
+	if err != nil {
+		t.Fatalf("marshal SLAVE_LIST: %v", err)
+	}
+
+	rewritten, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	tmpPath := filepath.Join(t.TempDir(), "cluster_config.json")
+	if err := os.WriteFile(tmpPath, rewritten, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return tmpPath
+}
+
+// freePorts returns n distinct free ephemeral ports (reserved one by one, then
+// released; the tiny race window is acceptable for tests).
+func freePorts(t *testing.T, n int) []int {
+	t.Helper()
+	ports := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve free port: %v", err)
+		}
+		ports = append(ports, ln.Addr().(*net.TCPAddr).Port)
+		ln.Close()
+	}
+	return ports
+}
+
 // TestRunHonorsSignalDuringStartup sends SIGTERM as soon as the run action
-// reports its signal handler installed ("slave booting"), while shard boot is
+// reports its signal handler installed ("slave booting"), while node boot is
 // typically still in flight. Whichever window the signal actually lands in,
 // the process must exit 0 through the clean shutdown path and leave a datadir
-// that reopens without complaint.
+// that reopens without complaint. The fixture's slave ports are redirected to
+// free ephemeral ports so the comm's listener never collides with a stale
+// process or another test.
 func TestRunHonorsSignalDuringStartup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX signals are not available on windows")
 	}
-	cfgPath := writeFixtureWithTempDBRoot(t, fixtures[0].path)
+	cfgPath := writeRunFixture(t, fixtures[0].path)
 
 	cmd := exec.Command(reexec.Self(), "--cluster_config", cfgPath, "--node_id", "S0")
 	cmd.Args[0] = "slave-test"

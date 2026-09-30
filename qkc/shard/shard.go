@@ -1,8 +1,9 @@
 // Copyright 2026-2027, QuarkChain.
 
 // Package shard hosts one QuarkChain shard inside the slave process: an isolated
-// per-shard chaindb, the stored genesis block, and the chain behind the
-// ShardChain seam. It performs no network I/O.
+// per-shard chaindb, the stored genesis block, the chain behind the ShardChain
+// seam, and its virtual cluster-peer connections (PeerConns). Peer frames tunnel
+// through the master connection rather than a real socket.
 //
 // The genesis block itself is derived in qkc (qkc.CreateMinorBlock), next to the
 // root genesis, as pyquarkchain's GenesisManager does. This package only decides
@@ -10,11 +11,13 @@
 package shard
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -24,7 +27,10 @@ import (
 	"github.com/ethereum/go-ethereum/qkc"
 	"github.com/ethereum/go-ethereum/qkc/account"
 	"github.com/ethereum/go-ethereum/qkc/config"
+	"github.com/ethereum/go-ethereum/qkc/conn"
+	"github.com/ethereum/go-ethereum/qkc/slaveconn"
 	"github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // Modest fixed sizing for the skeleton's per-shard pebble instance.
@@ -76,6 +82,17 @@ type Shard struct {
 	db     ethdb.Database
 	chain  ShardChain
 
+	// peers maps cluster_peer_id to the shard's virtual peer connection (py:
+	// shard.peers). It is owned here so a shard's peers die with the shard.
+	peersMu sync.Mutex
+	peers   map[uint64]*slaveconn.PeerConn
+
+	// sender is the outbound hook the business layer uses to reach the cluster
+	// (master, x-shard). It is injected at construction; the concrete
+	// communicator may not exist until after the comm is built.
+	sender Sender
+
+	stopped  atomic.Bool
 	stopOnce sync.Once
 	stopErr  error
 }
@@ -86,7 +103,7 @@ type Shard struct {
 // — commits or reconciles the shard's genesis, and constructs the chain through
 // the ShardChain seam. On any failure the database is closed before returning,
 // so the datadir stays reopenable.
-func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.RootBlockHeader, datadir string, opts Options) (*Shard, error) {
+func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.RootBlockHeader, datadir string, opts Options, sender Sender) (*Shard, error) {
 	fullShardID := branch.GetFullShardID()
 	// A shard configured somewhere in the cluster can still belong to another
 	// slave. Refuse it here, before any database is opened, so a wrong or hostile
@@ -146,7 +163,14 @@ func New(ctx *config.SlaveContext, branch account.Branch, rootGenesis *types.Roo
 		log.Info("genesis committed", "shard", fmt.Sprintf("0x%08x", fullShardID), "genesis", genesis.Hash())
 	}
 
-	return &Shard{Branch: branch, cfg: shardCfg, db: db, chain: chain}, nil
+	return &Shard{
+		Branch: branch,
+		cfg:    shardCfg,
+		db:     db,
+		chain:  chain,
+		peers:  make(map[uint64]*slaveconn.PeerConn),
+		sender: sender,
+	}, nil
 }
 
 func openChainDB(fullShardID uint32, datadir string) (ethdb.Database, string, error) {
@@ -249,8 +273,109 @@ func (s *Shard) DB() ethdb.Database { return s.db }
 // and blocks until both are stopped and closed.
 func (s *Shard) Stop() error {
 	s.stopOnce.Do(func() {
+		s.stopped.Store(true)
+		s.ClosePeers()
 		s.chain.Stop()
 		s.stopErr = s.db.Close()
 	})
 	return s.stopErr
+}
+
+// ── Virtual cluster peers ─────────────────────────────────────────────────────
+
+// ErrStopped is returned by AddPeer when the shard has already been stopped: the
+// peer registry is (about to be) drained, so no new PeerConn may be created.
+var ErrStopped = errors.New("shard stopped")
+
+var _ slaveconn.PeerHandler = (*Shard)(nil)
+
+// Peer returns the shard's virtual peer connection for clusterPeerID, or nil.
+func (s *Shard) Peer(clusterPeerID uint64) *slaveconn.PeerConn {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	return s.peers[clusterPeerID]
+}
+
+// AddPeer builds, starts, and registers a virtual peer connection for
+// clusterPeerID against master connection mc, reporting created=false on a
+// duplicate. The stopped check inside peersMu totally orders registration against
+// ClosePeers's drain: a PeerConn is either registered before the drain and closed
+// by it, or refused after it.
+func (s *Shard) AddPeer(clusterPeerID uint64, mc *slaveconn.MasterConn) (created bool, err error) {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	if s.stopped.Load() {
+		return false, ErrStopped
+	}
+	if _, exists := s.peers[clusterPeerID]; exists {
+		return false, nil
+	}
+
+	pc, err := slaveconn.NewPeerConn(clusterPeerID, s.Branch.GetFullShardID(), mc, s, mc.Logger())
+	if err != nil {
+		return false, err
+	}
+	pc.Start()
+	s.peers[clusterPeerID] = pc
+	return true, nil
+}
+
+// RemovePeer deregisters and closes the virtual peer connection, or is a no-op
+// for an unknown id. Close happens outside peersMu.
+func (s *Shard) RemovePeer(clusterPeerID uint64) {
+	s.peersMu.Lock()
+	pc, ok := s.peers[clusterPeerID]
+	if ok {
+		delete(s.peers, clusterPeerID)
+	}
+	s.peersMu.Unlock()
+	if ok {
+		pc.Close()
+	}
+}
+
+// ClosePeers removes and closes every registered virtual peer connection. The
+// snapshot-and-drain happens under peersMu, which AddPeer's stopped gate also
+// takes, so registration and shutdown are totally ordered. Close happens outside
+// peersMu.
+func (s *Shard) ClosePeers() {
+	s.peersMu.Lock()
+	all := make([]*slaveconn.PeerConn, 0, len(s.peers))
+	for _, pc := range s.peers {
+		all = append(all, pc)
+	}
+	s.peers = make(map[uint64]*slaveconn.PeerConn)
+	s.peersMu.Unlock()
+	for _, pc := range all {
+		pc.Close()
+	}
+}
+
+// ── PeerHandler: inbound peer traffic ────────────────────────────────────────
+//
+// These remain stubs until the shard chain implementation lands. They return
+// ErrHandlerNotImplemented rather than faking success.
+
+func (s *Shard) NewMinorBlockHeaderList(*wire.NewMinorBlockHeaderListCommand) error {
+	return fmt.Errorf("NewMinorBlockHeaderList: %w", conn.ErrHandlerNotImplemented)
+}
+
+func (s *Shard) NewTransactionList(*wire.NewTransactionListCommand) error {
+	return fmt.Errorf("NewTransactionList: %w", conn.ErrHandlerNotImplemented)
+}
+
+func (s *Shard) NewBlockMinor(*wire.NewBlockMinorCommand) error {
+	return fmt.Errorf("NewBlockMinor: %w", conn.ErrHandlerNotImplemented)
+}
+
+func (s *Shard) GetMinorBlockHeaderList(*wire.GetMinorBlockHeaderListRequest) (*wire.GetMinorBlockHeaderListResponse, error) {
+	return nil, fmt.Errorf("GetMinorBlockHeaderList: %w", conn.ErrHandlerNotImplemented)
+}
+
+func (s *Shard) GetMinorBlockList(*wire.GetMinorBlockListRequest) (*wire.GetMinorBlockListResponse, error) {
+	return nil, fmt.Errorf("GetMinorBlockList: %w", conn.ErrHandlerNotImplemented)
+}
+
+func (s *Shard) GetMinorBlockHeaderListWithSkip(*wire.GetMinorBlockHeaderListWithSkipRequest) (*wire.GetMinorBlockHeaderListResponse, error) {
+	return nil, fmt.Errorf("GetMinorBlockHeaderListWithSkip: %w", conn.ErrHandlerNotImplemented)
 }
