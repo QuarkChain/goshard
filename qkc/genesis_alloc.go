@@ -66,9 +66,9 @@ func commitGenesisAlloc(db ethdb.Database, alloc map[account.Address]config.Allo
 		seenRecipients[addr.Recipient] = addr
 	}
 
-	sdb := corestate.NewQKCDatabase(db)
+	sdb := corestate.NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), corestate.NewCodeDB(db))
 	defer sdb.TrieDB().Close()
-	statedb, err := corestate.NewQKC(coretypes.EmptyRootHash, sdb)
+	statedb, err := corestate.NewQKCStateDB(coretypes.EmptyRootHash, sdb)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("open genesis state trie: %w", err)
 	}

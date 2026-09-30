@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package slave
+package slaveconn
 
 import (
 	"context"
@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
-	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/conn"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // fakeSlaveService is a test double for the future SlaveService: it embeds

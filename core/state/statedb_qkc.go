@@ -9,21 +9,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/ethdb"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
-	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
 )
 
-// NewQKCDatabase opens the lossless hash-keyed MPT database required by
-// QuarkChain account encoding.
-func NewQKCDatabase(db ethdb.Database) Database {
-	return NewDatabase(triedb.NewDatabase(db, triedb.HashDefaults), NewCodeDB(db))
-}
-
-// NewQKC opens the state named by root after checking that the database can
+// NewQKCStateDB opens the state named by root after checking that the database can
 // encode QuarkChain accounts without loss.
-func NewQKC(root common.Hash, db Database) (*StateDB, error) {
+func NewQKCStateDB(root common.Hash, db Database) (*StateDB, error) {
 	if db.Type() != TypeMPT || db.TrieDB().Scheme() != rawdb.HashScheme {
 		return nil, fmt.Errorf("unsupported state database: QuarkChain state requires a hash-based MPT")
 	}
@@ -154,7 +146,8 @@ func (s *StateDB) GetBalanceByTokenID(addr common.Address, tokenID uint64) *uint
 
 // DeltaTokenBalance adds a signed amount, as delta_token_balance (state.py:461).
 // A zero delta reaches the credit path, which marks the account without creating
-// an entry. A negative result is returned rather than wrapped around.
+// an entry. A debit that would make the balance negative returns an underflow
+// error instead of wrapping around.
 func (s *StateDB) DeltaTokenBalance(addr common.Address, tokenID uint64, delta *big.Int) error {
 	if delta.Sign() >= 0 {
 		amount, overflow := uint256.FromBig(delta)

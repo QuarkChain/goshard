@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package slave
+package slaveconn
 
 import (
 	"bufio"
@@ -14,10 +14,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/qkc/account"
-	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
 	qkcCommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
 	"github.com/ethereum/go-ethereum/qkc/types"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // ── test helpers ─────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package slave
+package slaveconn
 
 import (
 	"context"
@@ -9,9 +9,9 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/cluster/conn"
-	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/conn"
 	"github.com/ethereum/go-ethereum/qkc/serialize"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // PeerHandler processes PeerConn's inbound commands and RPC requests. It is

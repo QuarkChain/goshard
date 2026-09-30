@@ -1,6 +1,6 @@
 // Copyright 2026-2027, QuarkChain.
 
-package slave
+package slaveconn
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/qkc/cluster/wire"
+	"github.com/ethereum/go-ethereum/qkc/wire"
 )
 
 // XshardPool manages slave-to-slave xshard connections, indexed by full shard
