@@ -22,12 +22,18 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 )
 
 // Config are the configuration options for the Interpreter
 type Config struct {
 	Tracer *tracing.Hooks
+
+	// QKCConfig enables QuarkChain execution rules and supplies their activation
+	// timestamps. Nil selects Ethereum rules. The config must remain unchanged
+	// for the lifetime of the EVM.
+	QKCConfig *qkcconfig.QuarkChainConfig
 
 	NoBaseFee               bool  // Forces the EIP-1559 baseFee to 0 (needed for 0 price calls)
 	EnablePreimageRecording bool  // Enables recording of SHA3/keccak preimages

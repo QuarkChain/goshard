@@ -116,7 +116,8 @@ try:
     )
     from quarkchain.db import InMemoryDb
     from quarkchain.env import Env
-    from quarkchain.evm.messages import apply_transaction, apply_xshard_deposit
+    from quarkchain.evm import vm
+    from quarkchain.evm.messages import VMExt, apply_msg, apply_transaction, apply_xshard_deposit
     from quarkchain.evm.state import State as EvmState
     from quarkchain.evm.transactions import Transaction as EvmTransaction
     from quarkchain.evm.utils import privtoaddr, sha3
@@ -949,6 +950,165 @@ def build_message_case(networks, case):
         "receipts": [dump_receipt(r) for r in state.receipts],
         "xshard_deposit_receipts": [dump_receipt(r) for r in state.xshard_deposit_receipts],
         "xshard_list": [dump_deposit(d) for d in state.xshard_list],
+        "accounts": observe(state, recipients, observed_storage),
+    }
+
+
+# ---------------------------------------------------------------------------
+# VM-level vectors
+
+
+def vm_cases():
+    """Direct EVM messages covering the S2 execution surface on both networks."""
+    templates = [
+        {
+            "name": "ethereum_precompile",
+            "comment": "the ecrecover precompile charges its fixed frame gas",
+            "to": "0000000000000000000000000000000000000001",
+            "gas": 10000,
+            "pre_alloc": {},
+        },
+        {
+            "name": "call_return_data",
+            "comment": "a contract returns a word to its direct caller",
+            "to": A,
+            "gas": 100000,
+            "pre_alloc": {A: {"balances": {}, "code": ANSWER_RUNTIME}},
+        },
+        {
+            "name": "nested_call_state",
+            "comment": "a nested CALL reaches the child and commits its storage write",
+            "to": A,
+            "gas": 100000,
+            "pre_alloc": {
+                A: {"balances": {}, "code": call_runtime(B)},
+                B: {"balances": {}, "code": "0x602a60015500"},
+            },
+            "observe_storage": {B: ["0x01"]},
+        },
+        {
+            "name": "create2",
+            "comment": "CREATE2 deploys from a nested frame and advances its creator nonce",
+            "to": A,
+            "gas": 100000,
+            "pre_alloc": {A: {"balances": {}, "code": CREATE2_RUNTIME}},
+        },
+        {
+            "name": "out_of_gas",
+            "comment": "an infinite loop consumes its entire frame allowance",
+            "to": A,
+            "gas": 50000,
+            "pre_alloc": {A: {"balances": {}, "code": INFINITE_RUNTIME}},
+        },
+        {
+            "name": "return_data_copy",
+            "comment": "RETURNDATACOPY preserves a nested call's return word in storage",
+            "to": A,
+            "gas": 100000,
+            "pre_alloc": {
+                A: {"balances": {}, "code": returndatacopy_runtime(B, 32)},
+                B: {"balances": {}, "code": ANSWER_RUNTIME},
+            },
+            "observe_storage": {A: ["0x00"]},
+        },
+        {
+            "name": "log",
+            "comment": "LOG1 emits its address, topic, and zero-filled data",
+            "to": A,
+            "gas": 100000,
+            "pre_alloc": {A: {"balances": {}, "code": "0x7fbeef" + "00" * 30 + "60206000a100"}},
+        },
+    ]
+    cases = []
+    for network, full_shard_key, timestamp in (
+        ("devnet", 1, 1),
+        ("mainnet", 0x75B2, 1569567601),
+    ):
+        for template in templates:
+            case = dict(template)
+            case["name"] = network + "_" + template["name"]
+            case["network"] = network
+            case["full_shard_key"] = full_shard_key
+            case["timestamp"] = timestamp
+            case["sender"] = SENDER_A
+            case["value"] = 0
+            case["input"] = "0x"
+            case["pre_alloc"] = {
+                recipient + "{:08x}".format(full_shard_key): entry
+                for recipient, entry in template["pre_alloc"].items()
+            }
+            case["pre_alloc"][SENDER_A + "{:08x}".format(full_shard_key)] = {
+                "balances": {"QKC": "1000000"}
+            }
+            cases.append(case)
+    return cases
+
+
+def build_vm_case(networks, case):
+    cluster_config = networks[case["network"]]
+    state = make_evm_state(
+        cluster_config,
+        1,
+        timestamp=case["timestamp"],
+        gas_limit=12000000,
+        block_number=1,
+        block_coinbase=_recipient(C),
+        block_difficulty=1,
+    )
+    apply_alloc(state, case["pre_alloc"])
+    state.commit()
+    state.full_shard_key = case["full_shard_key"]
+
+    sender = _recipient(case["sender"])
+    to = _recipient(case["to"])
+    msg = vm.Message(
+        sender,
+        to,
+        value=case["value"],
+        gas=case["gas"],
+        data=bytes.fromhex(case["input"][2:]),
+        from_full_shard_key=case["full_shard_key"],
+        to_full_shard_key=case["full_shard_key"],
+        gas_token_id=token_id_encode("QKC"),
+        transfer_token_id=token_id_encode("QKC"),
+    )
+    result, gas_remaining, output = apply_msg(VMExt(state, sender, 0), msg)
+    logs = [
+        {
+            "address": _hex(log.address),
+            "topics": ["0x{:064x}".format(topic) for topic in log.topics],
+            "data": _hex(log.data),
+        }
+        for log in state.logs
+    ]
+    recipients = {case["sender"], case["to"]}
+    recipients.update(address[:40] for address in case["pre_alloc"])
+    observed_storage = case.get("observe_storage", {})
+    recipients.update(observed_storage)
+    state.commit()
+    return {
+        "name": case["name"],
+        "comment": case["comment"],
+        "network": case["network"],
+        "context": {
+            "timestamp": case["timestamp"],
+            "full_shard_key": case["full_shard_key"],
+        },
+        "pre_alloc": case["pre_alloc"],
+        "message": {
+            "sender": _hex(sender),
+            "to": _hex(to),
+            "gas": case["gas"],
+            "value": str(case["value"]),
+            "input": case["input"],
+        },
+        "result": {
+            "success": bool(result),
+            "output": _hex(bytes(output)),
+            "gas_remaining": gas_remaining,
+        },
+        "logs": logs,
+        "post_state_root": _hex(state.trie.root_hash),
         "accounts": observe(state, recipients, observed_storage),
     }
 
@@ -3151,6 +3311,18 @@ def main():
         ],
         source,
         message_vectors,
+    )
+
+    vm_vectors = [build_vm_case(networks, c) for c in vm_cases()]
+    write(
+        "vm_level.json",
+        [
+            "Direct EVM messages generated by qkc/testdata/gen_exec_golden.py against",
+            "pyquarkchain. Each case pins output, remaining gas, logs, state root,",
+            "and selected account reads for both shipped network configurations.",
+        ],
+        source,
+        vm_vectors,
     )
 
     block_vectors = [build_block_case(c) for c in block_cases()]

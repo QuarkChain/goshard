@@ -31,6 +31,7 @@ import (
 type StateDB interface {
 	CreateAccount(common.Address)
 	CreateContract(common.Address)
+	SetFullShardKey(uint32)
 
 	SubBalance(common.Address, *uint256.Int, tracing.BalanceChangeReason) uint256.Int
 	AddBalance(common.Address, *uint256.Int, tracing.BalanceChangeReason) uint256.Int
