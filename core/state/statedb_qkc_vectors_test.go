@@ -82,9 +82,9 @@ func loadStateGolden(t *testing.T) []goldenStateCase {
 
 func newTestState(t *testing.T) *corestate.StateDB {
 	t.Helper()
-	state, err := corestate.NewQKC(coretypes.EmptyRootHash, corestate.NewQKCDatabase(rawdb.NewMemoryDatabase()))
+	state, err := corestate.NewQKCStateDB(coretypes.EmptyRootHash, corestate.NewQKCDatabase(rawdb.NewMemoryDatabase()))
 	if err != nil {
-		t.Fatalf("NewQKC: %v", err)
+		t.Fatalf("NewQKCStateDB: %v", err)
 	}
 	return state
 }
@@ -96,7 +96,7 @@ func commitAndReopen(t *testing.T, state *corestate.StateDB, block uint64, fullS
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	reopened, err := corestate.NewQKC(root, db)
+	reopened, err := corestate.NewQKCStateDB(root, db)
 	if err != nil {
 		t.Fatalf("reopen state %s: %v", root, err)
 	}
@@ -111,14 +111,14 @@ func mustDeltaTokenBalance(t *testing.T, state *corestate.StateDB, addr account.
 	}
 }
 
-func TestNewQKCRejectsPathDatabase(t *testing.T) {
+func TestNewQKCStateDBRejectsPathDatabase(t *testing.T) {
 	disk := rawdb.NewMemoryDatabase()
 	db := corestate.NewDatabase(
 		triedb.NewDatabase(disk, &triedb.Config{PathDB: pathdb.Defaults}),
 		corestate.NewCodeDB(disk),
 	)
-	if _, err := corestate.NewQKC(coretypes.EmptyRootHash, db); err == nil {
-		t.Fatal("NewQKC accepted a path-based state database")
+	if _, err := corestate.NewQKCStateDB(coretypes.EmptyRootHash, db); err == nil {
+		t.Fatal("NewQKCStateDB accepted a path-based state database")
 	}
 }
 
@@ -351,9 +351,9 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 		}
 		t.Run(tc.Name, func(t *testing.T) {
 			db := corestate.NewQKCDatabase(rawdb.NewMemoryDatabase())
-			state, err := corestate.NewQKC(coretypes.EmptyRootHash, db)
+			state, err := corestate.NewQKCStateDB(coretypes.EmptyRootHash, db)
 			if err != nil {
-				t.Fatalf("NewQKC: %v", err)
+				t.Fatalf("NewQKCStateDB: %v", err)
 			}
 			applyAlloc(t, state, tc.PreAlloc)
 			root, err := state.Commit(0, true, false)
@@ -364,7 +364,7 @@ func TestGenesisAllocRoundTrip(t *testing.T) {
 				t.Fatalf("state root = %s, want %s", root, want)
 			}
 
-			reopened, err := corestate.NewQKC(root, db)
+			reopened, err := corestate.NewQKCStateDB(root, db)
 			if err != nil {
 				t.Fatalf("reopen: %v", err)
 			}
