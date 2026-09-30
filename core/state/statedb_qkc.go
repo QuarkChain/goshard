@@ -146,7 +146,8 @@ func (s *StateDB) GetBalanceByTokenID(addr common.Address, tokenID uint64) *uint
 
 // DeltaTokenBalance adds a signed amount, as delta_token_balance (state.py:461).
 // A zero delta reaches the credit path, which marks the account without creating
-// an entry. A negative result is returned rather than wrapped around.
+// an entry. A debit that would make the balance negative returns an underflow
+// error instead of wrapping around.
 func (s *StateDB) DeltaTokenBalance(addr common.Address, tokenID uint64, delta *big.Int) error {
 	if delta.Sign() >= 0 {
 		amount, overflow := uint256.FromBig(delta)
