@@ -71,11 +71,6 @@ type BlockContext struct {
 	// SenderDisallowMap contains the proof-of-staked-work lock for each sender.
 	// A transfer is rejected when it would spend a locked balance.
 	SenderDisallowMap map[common.Address]*uint256.Int
-	// EVMEnableTimestamp and MNTEnableTimestamp gate QuarkChain's system
-	// contracts. The comparison is strict: a contract is active after its
-	// configured timestamp.
-	EVMEnableTimestamp uint64
-	MNTEnableTimestamp uint64
 }
 
 // TxContext provides the EVM with information about a transaction.
@@ -142,14 +137,6 @@ type EVM struct {
 
 	readOnly   bool   // Whether to throw on stateful modifications
 	returnData []byte // Last CALL's return data for subsequent reuse
-
-	// qkcUnsupportedMNT is set by a nested MNT precompile call. Opcode handlers
-	// turn child errors into failure results, so the enclosing message checks it
-	// after Run and abandons the whole block.
-	qkcUnsupportedMNT error
-	// qkcExecution applies QKC's top-level CREATE nonce convention after
-	// QKCApplyMessage or QKCCreateContract has entered the VM.
-	qkcExecution bool
 
 	arena *stackArena
 }
@@ -241,9 +228,7 @@ func (evm *EVM) SetTxContext(txCtx TxContext) {
 		txCtx.AccessEvents = state.NewAccessEvents()
 	}
 	evm.TxContext = txCtx
-	evm.qkcUnsupportedMNT = nil
-	evm.qkcExecution = false
-	if evm.StateDB != nil {
+	if evm.Config.QKCConfig != nil && evm.StateDB != nil {
 		evm.StateDB.SetFullShardKey(txCtx.ToFullShardKey)
 	}
 }
@@ -344,9 +329,6 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			contract.SetCallCode(evm.resolveCodeHash(addr), code)
 			ret, err = evm.Run(contract, input, false)
 			gas = contract.Gas
-			if evm.qkcUnsupportedMNT != nil {
-				err = evm.qkcUnsupportedMNT
-			}
 		}
 	}
 	// When an error was returned by the EVM or when setting the creation code
@@ -411,9 +393,6 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
 		gas = contract.Gas
-		if evm.qkcUnsupportedMNT != nil {
-			err = evm.qkcUnsupportedMNT
-		}
 	}
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
@@ -464,9 +443,6 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
 		gas = contract.Gas
-		if evm.qkcUnsupportedMNT != nil {
-			err = evm.qkcUnsupportedMNT
-		}
 	}
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
@@ -528,9 +504,6 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 		// when we're in Homestead this also counts for code storage gas errors.
 		ret, err = evm.Run(contract, input, true)
 		gas = contract.Gas
-		if evm.qkcUnsupportedMNT != nil {
-			err = evm.qkcUnsupportedMNT
-		}
 	}
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
@@ -545,7 +518,7 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 }
 
 // create creates a new contract using code as deployment code.
-func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address, typ OpCode) (ret []byte, createAddress common.Address, leftOverGas GasBudget, err error) {
+func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address, typ OpCode, incrementNonce bool) (ret []byte, createAddress common.Address, leftOverGas GasBudget, err error) {
 	if evm.Config.Tracer != nil {
 		evm.captureBegin(evm.depth, typ, caller, address, code, gas.RegularGas, value.ToBig())
 		defer func(startGas uint64) {
@@ -563,10 +536,8 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	if evm.qkcPOSWDisallows(caller, value) {
 		return nil, common.Address{}, GasBudget{}, ErrQKCSenderDisallowed
 	}
-	// QKC apply_transaction increments the top-level sender's nonce before
-	// entering the VM (messages.py:430). Ordinary execution and nested CREATEs
-	// still increment it here.
-	if !evm.qkcExecution || evm.TxContext.Origin != caller {
+	// QKCCreateContract handles an already incremented top-level nonce.
+	if incrementNonce {
 		nonce := evm.StateDB.GetNonce(caller)
 		if nonce+1 < nonce {
 			return nil, common.Address{}, gas, ErrNonceUintOverflow
@@ -660,9 +631,6 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 // resulting code that is to be deployed, and consumes necessary gas.
 func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]byte, error) {
 	ret, err := evm.Run(contract, nil, false)
-	if evm.qkcUnsupportedMNT != nil {
-		return ret, evm.qkcUnsupportedMNT
-	}
 	if err != nil {
 		return ret, err
 	}
@@ -698,21 +666,12 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
-	if evm.qkcExecution {
-		nonce := evm.StateDB.GetNonce(caller)
-		// QKC apply_transaction has already incremented a top-level sender's
-		// nonce, so contract address derivation uses the preceding value.
-		if evm.TxContext.Origin == caller {
-			if nonce == 0 {
-				return nil, common.Address{}, gas, ErrNonceUintOverflow
-			}
-			nonce--
-		}
-		contractAddr = QKCContractAddress(caller, evm.TxContext.ToFullShardKey, nonce)
-		return evm.create(caller, code, gas, value, contractAddr, CREATE)
+	if evm.Config.QKCConfig != nil {
+		contractAddr = QKCContractAddress(caller, evm.TxContext.ToFullShardKey, evm.StateDB.GetNonce(caller))
+	} else {
+		contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
 	}
-	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
-	return evm.create(caller, code, gas, value, contractAddr, CREATE)
+	return evm.create(caller, code, gas, value, contractAddr, CREATE, true)
 }
 
 // Create2 creates a new contract using code as deployment code.
@@ -722,7 +681,7 @@ func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value 
 func (evm *EVM) Create2(caller common.Address, code []byte, gas GasBudget, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	inithash := crypto.Keccak256Hash(code)
 	contractAddr = crypto.CreateAddress2(caller, salt.Bytes32(), inithash[:])
-	return evm.create(caller, code, gas, endowment, contractAddr, CREATE2)
+	return evm.create(caller, code, gas, endowment, contractAddr, CREATE2, true)
 }
 
 // resolveCode returns the code associated with the provided account. After

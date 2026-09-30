@@ -17,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 )
@@ -180,6 +181,8 @@ func checkQKCVMGoldenLogs(t *testing.T, statedb *state.StateDB, expected []qkcVM
 func TestQKCVMGolden(t *testing.T) {
 	for _, tc := range loadQKCVMGolden(t) {
 		t.Run(tc.Name, func(t *testing.T) {
+			cfg, err := qkcconfig.LoadClusterConfig("../../qkc/config/singularity/" + tc.Network + ".json")
+			require.NoError(t, err)
 			statedb, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
 			require.NoError(t, err)
 			applyQKCVMGoldenAlloc(t, statedb, tc.PreAlloc)
@@ -188,7 +191,7 @@ func TestQKCVMGolden(t *testing.T) {
 			statedb, err = state.New(root, statedb.Database())
 			require.NoError(t, err)
 
-			evm := NewEVM(qkcTestBlockContext(BlockContext{BlockNumber: big.NewInt(1), Time: tc.Context.Timestamp}), statedb, petersburgOnlyChainConfig(), Config{})
+			evm := NewEVM(qkcTestBlockContext(BlockContext{BlockNumber: big.NewInt(1), Time: tc.Context.Timestamp}), statedb, petersburgOnlyChainConfig(), Config{QKCConfig: cfg.Quarkchain})
 			t.Cleanup(evm.Release)
 			output, gas, err := evm.QKCApplyMessage(
 				common.HexToAddress(tc.Message.Sender),

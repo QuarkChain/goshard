@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
@@ -23,11 +24,16 @@ var (
 var (
 	// ErrQKCSenderDisallowed rejects a transfer that would spend locked PoSW stake.
 	ErrQKCSenderDisallowed = errors.New("qkc: sender barred by proof-of-staked-work")
-	// ErrQKCUnsupportedMNT abandons a block that reaches multi-native-token execution.
+	// ErrQKCUnsupportedMNT signals unsupported multi-native-token execution.
 	ErrQKCUnsupportedMNT = errors.New("qkc: multi-native-token execution is unsupported")
+
+	errQKCConfigMissing = errors.New("qkc: missing chain configuration")
 )
 
 func (evm *EVM) qkcPOSWDisallows(sender common.Address, value *uint256.Int) bool {
+	if evm.Config.QKCConfig == nil {
+		return false
+	}
 	locked, ok := evm.Context.SenderDisallowMap[sender]
 	if !ok {
 		return false
@@ -37,24 +43,27 @@ func (evm *EVM) qkcPOSWDisallows(sender common.Address, value *uint256.Int) bool
 }
 
 // qkcPrecompile resolves addr using QuarkChain's precompile activation rules.
-// Ethereum precompiles are inactive at timestamp zero. QKC system precompiles
-// remain inactive through their enable timestamp; once active, they trigger the
-// sticky block-abandon error because multi-native-token execution is unsupported.
+// On QuarkChain, Ethereum precompiles are inactive at timestamp zero. System
+// precompiles remain inactive through their enable timestamp. Active system
+// precompiles return an error because they are not implemented yet.
 func (evm *EVM) qkcPrecompile(addr common.Address) (PrecompiledContract, bool, error) {
+	if evm.Config.QKCConfig == nil {
+		precompile, ok := evm.precompile(addr)
+		return precompile, ok, nil
+	}
 	var enableTimestamp uint64
 	switch addr {
 	case qkcCurrentMNTIDAddress, qkcTransferMNTAddress, qkcDeploySystemContractAddress:
-		enableTimestamp = evm.Context.EVMEnableTimestamp
+		enableTimestamp = evm.Config.QKCConfig.EnableEvmTimeStamp
 	case qkcMintMNTAddress, qkcBalanceMNTAddress:
-		enableTimestamp = evm.Context.MNTEnableTimestamp
+		enableTimestamp = evm.Config.QKCConfig.EnableNonReservedNativeTokenTimestamp
 	default:
 		precompile, ok := evm.precompile(addr)
 		return precompile, ok && evm.Context.Time > 0, nil
 	}
 	if evm.Context.Time > enableTimestamp {
-		// Keep the error visible to the top-level message even when an opcode
-		// converts a nested call failure into a false result.
-		evm.qkcUnsupportedMNT = ErrQKCUnsupportedMNT
+		// TODO: Implement the active QKC system precompiles.
+		log.Error("QKC precompile is active but not implemented", "address", addr, "block", evm.Context.BlockNumber)
 		return nil, true, ErrQKCUnsupportedMNT
 	}
 	return nil, false, nil
@@ -63,6 +72,9 @@ func (evm *EVM) qkcPrecompile(addr common.Address) (PrecompiledContract, bool, e
 // QKCApplyMessage enters the normal VM message path for a top-level QKC call.
 // The transaction layer uses the same path after it has performed admission.
 func (evm *EVM) QKCApplyMessage(sender, to common.Address, input []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64, toFullShardKey uint32) ([]byte, GasBudget, error) {
+	if evm.Config.QKCConfig == nil {
+		return nil, gas, errQKCConfigMissing
+	}
 	if transferTokenID != qkccommon.DefaultTokenID {
 		return nil, gas, ErrQKCUnsupportedMNT
 	}
@@ -70,13 +82,16 @@ func (evm *EVM) QKCApplyMessage(sender, to common.Address, input []byte, gas Gas
 	txContext.Origin = sender
 	txContext.ToFullShardKey = toFullShardKey
 	evm.SetTxContext(txContext)
-	evm.qkcExecution = true
 	return evm.Call(sender, to, input, gas, value)
 }
 
 // QKCCreateContract enters contract creation through the same normal CREATE
-// path used by the interpreter.
+// path used by the interpreter. Admission must have incremented the sender's
+// nonce already, unless recipient supplies a cross-shard contract address.
 func (evm *EVM) QKCCreateContract(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64, toFullShardKey uint32, recipient *common.Address) ([]byte, common.Address, GasBudget, error) {
+	if evm.Config.QKCConfig == nil {
+		return nil, common.Address{}, gas, errQKCConfigMissing
+	}
 	if transferTokenID != qkccommon.DefaultTokenID {
 		return nil, common.Address{}, gas, ErrQKCUnsupportedMNT
 	}
@@ -84,11 +99,17 @@ func (evm *EVM) QKCCreateContract(caller common.Address, code []byte, gas GasBud
 	txContext.Origin = caller
 	txContext.ToFullShardKey = toFullShardKey
 	evm.SetTxContext(txContext)
-	evm.qkcExecution = true
+	var address common.Address
 	if recipient == nil {
-		return evm.Create(caller, code, gas, value)
+		nonce := evm.StateDB.GetNonce(caller)
+		if nonce == 0 {
+			return nil, common.Address{}, gas, ErrNonceUintOverflow
+		}
+		address = QKCContractAddress(caller, toFullShardKey, nonce-1)
+	} else {
+		address = *recipient
 	}
-	return evm.create(caller, code, gas, value, *recipient, CREATE)
+	return evm.create(caller, code, gas, value, address, CREATE, false)
 }
 
 // QKCContractAddress is pyquarkchain's mk_contract_address.

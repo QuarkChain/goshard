@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"math"
 	"math/big"
 	"testing"
 
@@ -13,15 +14,21 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 )
 
 func newQKCDirectEVM(t *testing.T, block BlockContext, origin common.Address, shardKey uint32) (*EVM, *state.StateDB) {
 	t.Helper()
+	return newConfiguredEVM(t, block, origin, shardKey, qkcconfig.NewQuarkChainConfig())
+}
+
+func newConfiguredEVM(t *testing.T, block BlockContext, origin common.Address, shardKey uint32, cfg *qkcconfig.QuarkChainConfig) (*EVM, *state.StateDB) {
+	t.Helper()
 	statedb, err := state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
 	require.NoError(t, err)
-	evm := NewEVM(qkcTestBlockContext(block), statedb, petersburgOnlyChainConfig(), Config{})
+	evm := NewEVM(qkcTestBlockContext(block), statedb, petersburgOnlyChainConfig(), Config{QKCConfig: cfg})
 	evm.SetTxContext(TxContext{Origin: origin, ToFullShardKey: shardKey})
 	t.Cleanup(evm.Release)
 	return evm, statedb
@@ -126,7 +133,7 @@ func TestQKCNestedCreateRespectsPOSWLock(t *testing.T) {
 
 func TestNonQKCCreateRetainsGethNonceLifecycle(t *testing.T) {
 	caller := common.HexToAddress("0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a")
-	evm, statedb := newQKCDirectEVM(t, BlockContext{BlockNumber: big.NewInt(1)}, caller, 1)
+	evm, statedb := newConfiguredEVM(t, BlockContext{BlockNumber: big.NewInt(1)}, caller, 1, nil)
 	statedb.SetBalance(caller, uint256.NewInt(10), tracing.BalanceChangeUnspecified)
 
 	_, address, _, err := evm.Create(caller, common.FromHex("0x60006000f3"), NewGasBudget(100_000), new(uint256.Int))
@@ -201,71 +208,14 @@ func TestQKCNestedSelfdestructRevertsWithParent(t *testing.T) {
 	require.False(t, statedb.HasSelfDestructed(child))
 }
 
-func TestQKCActiveMNTPrecompileAbandonsMessage(t *testing.T) {
+func TestQKCActiveMNTPrecompileReturnsError(t *testing.T) {
 	caller := common.HexToAddress("0x5001")
-	evm, _ := newQKCDirectEVM(t, BlockContext{
-		BlockNumber:        big.NewInt(1),
-		Time:               1,
-		EVMEnableTimestamp: 0,
-	}, caller, 1)
+	cfg := qkcconfig.NewQuarkChainConfig()
+	cfg.EnableNonReservedNativeTokenTimestamp = 0
+	evm, _ := newConfiguredEVM(t, BlockContext{BlockNumber: big.NewInt(1), Time: 1}, caller, 1, cfg)
 
 	_, _, err := evm.Call(caller, qkcBalanceMNTAddress, nil, NewGasBudget(100_000), new(uint256.Int))
 	require.ErrorIs(t, err, ErrQKCUnsupportedMNT)
-}
-
-func TestQKCNestedMNTPrecompileAbandonsMessage(t *testing.T) {
-	caller := common.HexToAddress("0x7001")
-	parent := common.HexToAddress("0x7002")
-	block := BlockContext{
-		BlockNumber:        big.NewInt(1),
-		Time:               1,
-		EVMEnableTimestamp: 0,
-		MNTEnableTimestamp: 0,
-	}
-	tests := []struct {
-		name   string
-		opcode OpCode
-	}{
-		{name: "call", opcode: CALL},
-		{name: "delegatecall", opcode: DELEGATECALL},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			evm, statedb := newQKCDirectEVM(t, block, caller, 1)
-			code := []byte{byte(PUSH1), 1, byte(PUSH1), 0, byte(SSTORE)}
-			if test.opcode == CALL {
-				code = append(code, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0)
-			} else {
-				code = append(code, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0)
-			}
-			code = append(code, byte(PUSH20))
-			code = append(code, qkcBalanceMNTAddress.Bytes()...)
-			code = append(code, byte(PUSH2), 0xff, 0xff, byte(test.opcode), byte(STOP))
-			statedb.SetCode(parent, code, tracing.CodeChangeUnspecified)
-
-			_, _, err := evm.QKCApplyMessage(caller, parent, nil, NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, 1)
-			require.ErrorIs(t, err, ErrQKCUnsupportedMNT)
-			require.Equal(t, common.Hash{}, statedb.GetState(parent, common.Hash{}))
-		})
-	}
-}
-
-func TestQKCMNTPrecompileInInitCodeAbandonsMessage(t *testing.T) {
-	caller := common.HexToAddress("0x7101")
-	contract := common.HexToAddress("0x7102")
-	evm, statedb := newQKCDirectEVM(t, BlockContext{
-		BlockNumber:        big.NewInt(1),
-		Time:               1,
-		EVMEnableTimestamp: 0,
-		MNTEnableTimestamp: 0,
-	}, caller, 1)
-	initCode := []byte{byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH20)}
-	initCode = append(initCode, qkcBalanceMNTAddress.Bytes()...)
-	initCode = append(initCode, byte(PUSH2), 0xff, 0xff, byte(CALL), byte(STOP))
-
-	_, _, _, err := evm.QKCCreateContract(caller, initCode, NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, 1, &contract)
-	require.ErrorIs(t, err, ErrQKCUnsupportedMNT)
-	require.False(t, statedb.Exist(contract))
 }
 
 func TestQKCCreatePreservesPreexistingAccountStorage(t *testing.T) {
@@ -329,4 +279,114 @@ func TestQKCEthereumPrecompileRequiresTimestampAfterZero(t *testing.T) {
 	_, gas, err = active.Call(caller, precompile, nil, NewGasBudget(10_000), new(uint256.Int))
 	require.NoError(t, err)
 	require.Equal(t, uint64(7_000), gas.RegularGas)
+}
+
+func TestQKCPrecompileActivationUsesChainConfig(t *testing.T) {
+	cfg := qkcconfig.NewQuarkChainConfig()
+	cfg.EnableEvmTimeStamp = 10
+	cfg.EnableNonReservedNativeTokenTimestamp = 20
+	for _, tc := range []struct {
+		name      string
+		config    *qkcconfig.QuarkChainConfig
+		timestamp uint64
+		evmActive bool
+		mntActive bool
+	}{
+		{"before evm", cfg, 9, false, false},
+		{"at evm", cfg, 10, false, false},
+		{"after evm", cfg, 11, true, false},
+		{"before mnt", cfg, 19, true, false},
+		{"at mnt", cfg, 20, true, false},
+		{"after mnt", cfg, 21, true, true},
+		{"default mnt disabled", qkcconfig.NewQuarkChainConfig(), math.MaxUint64, true, false},
+		{"ethereum", nil, math.MaxUint64, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := common.HexToAddress("0x7401")
+			evm, statedb := newConfiguredEVM(t, BlockContext{BlockNumber: big.NewInt(1), Time: tc.timestamp}, caller, 1, tc.config)
+			for _, target := range []struct {
+				address common.Address
+				active  bool
+			}{
+				{qkcCurrentMNTIDAddress, tc.evmActive},
+				{qkcTransferMNTAddress, tc.evmActive},
+				{qkcDeploySystemContractAddress, tc.evmActive},
+				{qkcMintMNTAddress, tc.mntActive},
+				{qkcBalanceMNTAddress, tc.mntActive},
+			} {
+				// Inactive system addresses execute ordinary account code.
+				statedb.SetCode(target.address, common.FromHex("0x602a60005260206000f3"), tracing.CodeChangeUnspecified)
+				evm.SetTxContext(TxContext{Origin: caller, ToFullShardKey: 1})
+				output, _, err := evm.Call(caller, target.address, nil, NewGasBudget(100_000), new(uint256.Int))
+				if target.active {
+					require.ErrorIs(t, err, ErrQKCUnsupportedMNT, target.address)
+				} else {
+					require.NoError(t, err, target.address)
+					require.Equal(t, uint64(42), new(uint256.Int).SetBytes(output).Uint64(), target.address)
+				}
+			}
+		})
+	}
+}
+
+func TestQKCCreateThroughCallEntryPoints(t *testing.T) {
+	caller := common.HexToAddress("0x7501")
+	creator := common.HexToAddress("0x7502")
+	for _, entry := range []string{"call", "qkc message"} {
+		for _, opcode := range []OpCode{CREATE, CREATE2} {
+			t.Run(entry+"/"+opcode.String(), func(t *testing.T) {
+				evm, statedb := newQKCDirectEVM(t, BlockContext{BlockNumber: big.NewInt(1)}, caller, 1)
+				statedb.SetNonce(creator, 7, tracing.NonceChangeUnspecified)
+				for shardKey := uint32(1); shardKey <= 2; shardKey++ {
+					var code []byte
+					want := QKCContractAddress(creator, shardKey, statedb.GetNonce(creator))
+					if opcode == CREATE2 {
+						code = append(code, byte(PUSH1), byte(shardKey)) // salt
+						want = crypto.CreateAddress2(creator, uint256.NewInt(uint64(shardKey)).Bytes32(), crypto.Keccak256(nil))
+					}
+					code = append(code, byte(PUSH1), 0, byte(PUSH1), 0, byte(PUSH1), 0, byte(opcode))
+					code = append(code, byte(PUSH1), 0, byte(MSTORE), byte(PUSH1), 32, byte(PUSH1), 0, byte(RETURN))
+					statedb.SetCode(creator, code, tracing.CodeChangeUnspecified)
+					evm.SetTxContext(TxContext{Origin: caller, ToFullShardKey: shardKey})
+					var output []byte
+					var err error
+					if entry == "call" {
+						output, _, err = evm.Call(caller, creator, nil, NewGasBudget(100_000), new(uint256.Int))
+					} else {
+						output, _, err = evm.QKCApplyMessage(caller, creator, nil, NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, shardKey)
+					}
+					require.NoError(t, err)
+					require.Equal(t, want, common.BytesToAddress(output))
+					require.Equal(t, uint64(7+shardKey), statedb.GetNonce(creator))
+					require.True(t, statedb.Exist(want))
+				}
+			})
+		}
+	}
+}
+
+func TestNonQKCExecutionIgnoresQKCRules(t *testing.T) {
+	caller := common.HexToAddress("0x7601")
+	to := common.HexToAddress("0x7602")
+	evm, statedb := newConfiguredEVM(t, BlockContext{
+		BlockNumber:       big.NewInt(1),
+		SenderDisallowMap: map[common.Address]*uint256.Int{caller: uint256.NewInt(10)},
+	}, caller, 1, nil)
+	statedb.SetBalance(caller, uint256.NewInt(10), tracing.BalanceChangeUnspecified)
+	_, _, err := evm.Call(caller, to, nil, NewGasBudget(100_000), uint256.NewInt(1))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), statedb.GetBalance(to).Uint64())
+
+	// Ethereum precompiles are available even at timestamp zero.
+	_, gas, err := evm.Call(caller, common.HexToAddress("0x01"), nil, NewGasBudget(10_000), new(uint256.Int))
+	require.NoError(t, err)
+	require.Equal(t, uint64(7_000), gas.RegularGas)
+
+	_, _, err = evm.QKCApplyMessage(caller, to, nil, NewGasBudget(100_000), uint256.NewInt(1), qkccommon.DefaultTokenID, 2)
+	require.ErrorIs(t, err, errQKCConfigMissing)
+	_, _, _, err = evm.QKCCreateContract(caller, nil, NewGasBudget(100_000), new(uint256.Int), qkccommon.DefaultTokenID, 2, nil)
+	require.ErrorIs(t, err, errQKCConfigMissing)
+	require.Equal(t, uint64(9), statedb.GetBalance(caller).Uint64())
+	require.Zero(t, statedb.GetNonce(caller))
+	require.Equal(t, uint32(1), evm.TxContext.ToFullShardKey)
 }
