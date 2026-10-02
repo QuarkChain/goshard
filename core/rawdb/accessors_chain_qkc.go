@@ -200,3 +200,27 @@ func DeleteRootBlock(db ethdb.KeyValueWriter, hash common.Hash) {
 		log.Crit("Failed to delete root block", "err", err)
 	}
 }
+
+// WriteCrossShardTxList stores inbound deposits keyed by their source minor block.
+// An empty list is a received list, distinct from a missing database record.
+func WriteCrossShardTxList(db ethdb.KeyValueWriter, hash common.Hash, list *types.CrossShardTransactionList) error {
+	data, err := serialize.SerializeToBytes(list)
+	if err != nil {
+		return err
+	}
+	return db.Put(qkcXShardTxListKey(hash), data)
+}
+
+// ReadCrossShardTxList retrieves a versioned list received from another shard.
+func ReadCrossShardTxList(db ethdb.KeyValueReader, hash common.Hash) *types.CrossShardTransactionList {
+	data, _ := db.Get(qkcXShardTxListKey(hash))
+	if len(data) == 0 {
+		return nil
+	}
+	list, err := types.FromBytesToCrossShardTransactionList(data)
+	if err != nil {
+		log.Error("Invalid cross-shard transaction list", "hash", hash, "err", err)
+		return nil
+	}
+	return list
+}
