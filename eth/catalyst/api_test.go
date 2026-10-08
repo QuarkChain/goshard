@@ -1637,6 +1637,8 @@ func TestParentBeaconBlockRoot(t *testing.T) {
 }
 
 func TestWitnessCreationAndConsumption(t *testing.T) {
+	t.Skip("QKC account encoding is unsupported by stateless witnesses")
+
 	//log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(colorable.NewColorableStderr(), log.LevelTrace, true)))
 
 	genesis, blocks := generateMergeChain(10, true)

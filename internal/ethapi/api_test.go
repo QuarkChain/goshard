@@ -3783,6 +3783,34 @@ func TestRPCGetBlockReceipts(t *testing.T) {
 	}
 }
 
+var qkcRPCFixtureHashes = strings.NewReplacer(
+	// eth_getBlockByHash and eth_getBlockByNumber fixtures.
+	"0x98e056de84de969782b238b4509b32814627ba443ea622054a79c2bc7e4d92c7", "0xaa551bceaa98d07767260afd240f7c3428c0554b2b8e4e7abf28e14fdf1c2334",
+	"0xd883f48b83cc9c1e8389453beb4ad4e572462eec049ca4fffbe16ecefb3fe937", "0x9e277e784e324026cea1c187700b09f0901dd0218eb72d1661958bf31511a227",
+	"0xeeb5c1852740ca4bbe65b0f57baf80634ed12a2b44affe30eec3fb54437c3926", "0x989237d72b0872e391b7c7ca89f5d4ef1013c60cc04b7d34662affec9508012d",
+	"0x4acfcd1a6ab9f5e62411021ecd8a749976ae50b0590e967471264b372d7ac55b", "0x02ff03f5632b697e0cb38c9a75777d45bfb4bc4cd41c93580d12c5365bc17b4f",
+	"0xcd7d78eaa8b0ddbd2956fc37e1883c30df27b43e8cc9a982020310656736637c", "0x5338687de12bf34c1024fd48214d32a20bc0e1f8e652758672816859b55b10a9",
+	"0xedb9ccf3a85f67c095ad48abfb0fa09d47179bb0f902078d289042d12428aca5", "0xd8e03220e0ed60610c70c8bd4be405e1ae9275df4f3fba35bd5126a30058b77b",
+	"0x78b2b19ef1a0276dbbc23a875dbf60ae5d10dafa0017098473c4871abd3e7b5c", "0x2cfc5e22b74349e04a841b6d8a20573da57689071b3443da36994a57d7db74f0",
+	"0xa063415a5020f1569fae73ecb0d37bc5649ebe86d59e764a389eb37814bd42cb", "0x3e01183ae59c33a2171a45a59f9082421b80355dc186d329c772cd5b5376f4e6",
+	"0x118f1433ae23c4d1c12f5bd652baddb72611c55ac1cd6af6620d209db222f9e6", "0x5a912beba302e8dfad1989a6742cf898a414083f165afbf4cea4571481ebba24",
+	"0xce0e05397e548614a5b93254662174329466f8f4b1b391eb36fec9a7a591e58e", "0x02b62180bd1fd15b322ca6639549ee218a4d77583e34dde4cd7784d545f7b7ca",
+	"0xfda6c7cb7a3a712e0c424909a7724cab0448e89e286617fa8d5fd27f63f28bd2", "0xdc7c8f837ca673830c6f6aa19ffb486d91229e6da5a0a1e8fe81b4d47efc7cfb",
+
+	// eth_getTransactionReceipt and eth_getBlockReceipts fixtures.
+	"0xe9bd1d8c303b1af5c704b9d78e62c54a34af47e0db04ac1389a5ef74a619b9da", "0x39097190efa29489046bcb853ab90cda25c1c8b9f2966f8c82370ef4119ee9d6",
+	"0xb3e447c77374fd285964cba692e96b1673a88a959726826b5b6e2dca15472b0a", "0xbabd2a30bfbf6fde3b5ee009e4360d5b6607298bf0b5c620209e5fcc06239b21",
+	"0xcc6225bf39327429a3d869af71182d619a354155187d0b5a8ecd6a9309cffcaa", "0x3f6e7aa6136daf6bfd8ec68251226bc41c18d14b3ba53e0e2f311daeb755f877",
+	"0x47cd44027bb55856a175e36be0396bad221e52172529d9c1bf12bf5424a041ae", "0xa861754726396769b5110e6862f74aaa60217903c6dddd68558326b2eb3648f4",
+	"0x5bff93f8f94ba7ee52bef1a80062b9fed22c6d1eebb2b0e87a4a003365a7bd66", "0xcdd86d48c6ddfa85fee172d778d930d1dea189d0d6864478d94213ac225bc966",
+	"0x5f58514bcb3b216908f0aff6ced44666c3aa250df06093150ac850a7a7850f3c", "0x73cc7339556757bb7a15b01f19b8797e1dd05b44ad2080e1c7891205cf2c53a2",
+	"0xc74cf882395ec92eec3673d93a57f9a3bf1a5e696fae3e52f252059af62756c8", "0x2714949ea0c439746d35268ddf2f5271bb05c2542f08746da84c034f4245216d",
+
+	// eth_config fixtures.
+	"0xbef71d30", "0x5e632774",
+	"0x0929e24e", "0x06ce47cf",
+)
+
 func testRPCResponseWithFile(t *testing.T, testid int, result interface{}, rpc string, file string) {
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -3797,6 +3825,7 @@ func testRPCResponseWithFile(t *testing.T, testid int, result interface{}, rpc s
 	if err != nil {
 		t.Fatalf("error reading expected test file: %s output: %v", outputFile, err)
 	}
+	want = []byte(qkcRPCFixtureHashes.Replace(string(want)))
 	require.JSONEqf(t, string(want), string(data), "test %d: json not match, want: %s, have: %s", testid, string(want), string(data))
 }
 

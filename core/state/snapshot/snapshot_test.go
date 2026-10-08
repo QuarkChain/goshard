@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
@@ -41,7 +40,7 @@ func randomHash() common.Hash {
 	return hash
 }
 
-// randomAccount generates a random account and returns it RLP encoded.
+// randomAccount generates a random account in slim snapshot RLP format.
 func randomAccount() []byte {
 	a := types.StateAccount{
 		MntBalances: types.NewQKCTokenBalances(uint256.NewInt(rand.Uint64())),
@@ -49,8 +48,7 @@ func randomAccount() []byte {
 		Root:        randomHash(),
 		CodeHash:    types.EmptyCodeHash[:],
 	}
-	data, _ := rlp.EncodeToBytes(a)
-	return data
+	return types.SlimAccountRLP(a)
 }
 
 // randomAccountSet generates a set of random accounts with the given strings as

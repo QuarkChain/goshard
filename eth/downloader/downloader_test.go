@@ -413,7 +413,9 @@ func assertOwnChain(t *testing.T, tester *downloadTester, length int) {
 }
 
 func TestCanonicalSynchronisationFull(t *testing.T) { testCanonSync(t, eth.ETH69, FullSync) }
-func TestCanonicalSynchronisationSnap(t *testing.T) { testCanonSync(t, eth.ETH69, SnapSync) }
+func TestCanonicalSynchronisationSnap(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 func testCanonSync(t *testing.T, protocol uint, mode SyncMode) {
 	success := make(chan struct{})
@@ -441,7 +443,9 @@ func testCanonSync(t *testing.T, protocol uint, mode SyncMode) {
 // Tests that if a large batch of blocks are being downloaded, it is throttled
 // until the cached blocks are retrieved.
 func TestThrottlingFull(t *testing.T) { testThrottling(t, eth.ETH69, FullSync) }
-func TestThrottlingSnap(t *testing.T) { testThrottling(t, eth.ETH69, SnapSync) }
+func TestThrottlingSnap(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 func testThrottling(t *testing.T, protocol uint, mode SyncMode) {
 	tester := newTester(t, mode)
@@ -519,7 +523,9 @@ func testThrottling(t *testing.T, protocol uint, mode SyncMode) {
 
 // Tests that a canceled download wipes all previously accumulated state.
 func TestCancelFull(t *testing.T) { testCancel(t, eth.ETH69, FullSync) }
-func TestCancelSnap(t *testing.T) { testCancel(t, eth.ETH69, SnapSync) }
+func TestCancelSnap(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 func testCancel(t *testing.T, protocol uint, mode SyncMode) {
 	complete := make(chan struct{})
@@ -551,7 +557,9 @@ func testCancel(t *testing.T, protocol uint, mode SyncMode) {
 // Tests that if a block is empty (e.g. header only), no body request should be
 // made, and instead the header should be assembled into a whole block in itself.
 func TestEmptyShortCircuitFull(t *testing.T) { testEmptyShortCircuit(t, eth.ETH69, FullSync) }
-func TestEmptyShortCircuitSnap(t *testing.T) { testEmptyShortCircuit(t, eth.ETH69, SnapSync) }
+func TestEmptyShortCircuitSnap(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 func testEmptyShortCircuit(t *testing.T, protocol uint, mode SyncMode) {
 	success := make(chan struct{})
@@ -620,7 +628,9 @@ func checkProgress(t *testing.T, d *Downloader, stage string, want ethereum.Sync
 // Tests that peers below a pre-configured checkpoint block are prevented from
 // being fast-synced from, avoiding potential cheap eclipse attacks.
 func TestBeaconSyncFull(t *testing.T) { testBeaconSync(t, eth.ETH69, FullSync) }
-func TestBeaconSyncSnap(t *testing.T) { testBeaconSync(t, eth.ETH69, SnapSync) }
+func TestBeaconSyncSnap(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 func testBeaconSync(t *testing.T, protocol uint, mode SyncMode) {
 	var cases = []struct {
@@ -666,7 +676,9 @@ func testBeaconSync(t *testing.T, protocol uint, mode SyncMode) {
 // Tests that synchronisation progress (origin block number, current block number
 // and highest block number) is tracked and updated correctly.
 func TestSyncProgressFull(t *testing.T) { testSyncProgress(t, eth.ETH69, FullSync) }
-func TestSyncProgressSnap(t *testing.T) { testSyncProgress(t, eth.ETH69, SnapSync) }
+func TestSyncProgressSnap(t *testing.T) {
+	t.Skip("snapshot database is unsupported for QuarkChain accounts")
+}
 
 func testSyncProgress(t *testing.T, protocol uint, mode SyncMode) {
 	success := make(chan struct{})

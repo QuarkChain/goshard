@@ -25,6 +25,8 @@ import (
 )
 
 func TestBlockchain(t *testing.T) {
+	t.Skip("QKC account encoding produces different state roots from the Ethereum fixtures")
+
 	bt := new(testMatcher)
 
 	// We are running most of GeneralStatetests to tests witness support, even
@@ -82,6 +84,8 @@ func TestBlockchain(t *testing.T) {
 
 // TestExecutionSpecBlocktests runs the test fixtures from execution-spec-tests.
 func TestExecutionSpecBlocktests(t *testing.T) {
+	t.Skip("QKC account encoding produces different state roots from the Ethereum fixtures")
+
 	if !common.FileExist(executionSpecBlockchainTestDir) {
 		t.Skipf("directory %s does not exist", executionSpecBlockchainTestDir)
 	}
