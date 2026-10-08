@@ -42,6 +42,10 @@ type Contract struct {
 	IsDeployment bool
 	IsSystemCall bool
 
+	TransferTokenID uint64
+	ToFullShardKey  *uint32
+	TokenIDQueried  bool
+
 	Gas   GasBudget
 	value *uint256.Int
 }

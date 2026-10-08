@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/holiman/uint256"
@@ -139,6 +140,7 @@ type StateDB struct {
 
 	// fullShardKey is inherited by accounts first observed in the current message.
 	fullShardKey uint32
+	qkcConfig    *qkcconfig.QuarkChainConfig
 
 	// qkcAccountCache preserves the metadata of pyquarkchain's cached blank
 	// accounts without making those accounts exist in Go. It survives snapshots
@@ -202,6 +204,7 @@ func NewWithReader(root common.Hash, db Database, reader Reader) (*StateDB, erro
 		accessList:           newAccessList(),
 		transientStorage:     newTransientStorage(),
 		qkcAccountCache:      make(map[common.Address]qkcCachedAccount),
+		qkcConfig:            qkcconfig.NewQuarkChainConfig(),
 	}
 	if db.Type().Is(TypeUBT) {
 		sdb.accessEvents = NewAccessEvents()
@@ -720,6 +723,7 @@ func (s *StateDB) Copy() *StateDB {
 		logSize:              s.logSize,
 		preimages:            maps.Clone(s.preimages),
 		fullShardKey:         s.fullShardKey,
+		qkcConfig:            s.qkcConfig,
 		qkcAccountCache:      make(map[common.Address]qkcCachedAccount, len(s.qkcAccountCache)),
 
 		// Do we need to copy the access list and transient storage?

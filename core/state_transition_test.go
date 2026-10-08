@@ -18,13 +18,35 @@ package core
 
 import (
 	"bytes"
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 )
+
+func TestTransactionToMessageDefaultsToQKCToken(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := types.LatestSigner(params.AllEthashProtocolChanges)
+	tx := types.MustSignNewTx(key, signer, &types.LegacyTx{
+		Gas:      params.TxGas,
+		GasPrice: big.NewInt(1),
+	})
+	msg, err := TransactionToMessage(tx, signer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.GasTokenID != qkccommon.DefaultTokenID || msg.TransferTokenID != qkccommon.DefaultTokenID {
+		t.Fatalf("unexpected token defaults: gas %d transfer %d", msg.GasTokenID, msg.TransferTokenID)
+	}
+}
 
 func TestFloorDataGas(t *testing.T) {
 	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")

@@ -1,0 +1,1123 @@
+{
+  "source": {
+    "pyquarkchain_commit": "ce274f3dea984da64dc66ff253ee6696a3f4b5fb",
+    "module_sha256": {
+      "quarkchain/evm/messages.py": "7d6cb97202b0e5e7bbe69abb210304708e4c15a87f02b6a3fce4da96b0b676fd",
+      "quarkchain/evm/state.py": "de5216e6c10e606e00df124b8c3be46e29f5ea66509a94c03c457a5ecec6545d",
+      "quarkchain/evm/transactions.py": "573f578989e912a1a6f2426faeb69c17ade3eaa47db7f221743fc7bf7c9e522d",
+      "quarkchain/evm/specials.py": "c14638312c952401fbbad5a280bf14f17ed74bec491163d5ba26f3e5206bb46d",
+      "quarkchain/evm/vm.py": "f6df931df9130d696c843361d01844b26703481d34d2032a64c5959a8572e96f",
+      "quarkchain/evm/opcodes.py": "40d1eaab9bb6612adea1196e025f32c88d98a18471373ca34903c888729e1af8",
+      "quarkchain/config.py": "cda1b5ca536bb8af61b09621a4f44315e9696b9d90a5aed75c352cac9fe65fe9",
+      "quarkchain/constants.py": "d9007dc130ca7a1543618d24a90d285c4cdd1aaa2f33046e34c5c989dbb994f6"
+    }
+  },
+  "cases": {
+    "execution": [
+      {
+        "name": "vm_return_42",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x602a60005260206000f3",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x3333333333333333333333333333333333333333",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 99982,
+          "output": "0x000000000000000000000000000000000000000000000000000000000000002a",
+          "logs": [],
+          "post_state_root": "0xa7309993977813aa36877175489dd751a43d6971a726e1b0e6a1b2bdf2fce516",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x602a60005260206000f3",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_revert",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x60006000fd",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x3333333333333333333333333333333333333333",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": false,
+          "remaining_gas": 99994,
+          "output": "0x",
+          "logs": [],
+          "post_state_root": "0xc8cea3635ac5340e1ca27516ec376e58e3a3ee27fd574fb0d36aa0d5445b2d03",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x60006000fd",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_log_one",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x602a600052600160206000a100",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x3333333333333333333333333333333333333333",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 98973,
+          "output": "0x",
+          "logs": [
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "topics": [
+                "0x0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "data": "0x000000000000000000000000000000000000000000000000000000000000002a"
+            }
+          ],
+          "post_state_root": "0x1332178420006ee8aa5357bc4160a370d2f67de1a0c72497a1e5d3a3f4bc78cf",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x602a600052600160206000a100",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_log_out_of_gas",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x602a600052600160206000a100",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x3333333333333333333333333333333333333333",
+          "value": "0",
+          "gas": 1000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": false,
+          "remaining_gas": 0,
+          "output": "0x",
+          "logs": [],
+          "post_state_root": "0x1332178420006ee8aa5357bc4160a370d2f67de1a0c72497a1e5d3a3f4bc78cf",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x602a600052600160206000a100",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_mnt_acknowledgement_failure",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "1280249": "10",
+              "35760": "100"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x00",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x3333333333333333333333333333333333333333",
+          "value": "1",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 1280249,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": false,
+          "remaining_gas": 100000,
+          "output": "0x",
+          "logs": [],
+          "post_state_root": "0x8be6573c49b16157a17789a7db2b3f47091c6ea2803772b6566161aa8ab49535",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "100",
+                "1280249": "10"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x00",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_current_mnt",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x000000000000000000000000000000514b430001",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 1280249,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 99997,
+          "output": "0x00000000000000000000000000000000000000000000000000000000001388f9",
+          "logs": [],
+          "post_state_root": "0x10a4104584d3cf2cbfc5cd66284fbffd41296e9d21e14d311e8a456a6c6f5b61",
+          "accounts": [
+            {
+              "address": "0x000000000000000000000000000000514b430001",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_current_mnt_at_boundary_disabled",
+        "context": {
+          "timestamp": 0,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x000000000000000000000000000000514b430001",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 1280249,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 100000,
+          "output": "0x",
+          "logs": [],
+          "post_state_root": "0x10a4104584d3cf2cbfc5cd66284fbffd41296e9d21e14d311e8a456a6c6f5b61",
+          "accounts": [
+            {
+              "address": "0x000000000000000000000000000000514b430001",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_balance_mnt",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "1280249": "777",
+              "35760": "100"
+            },
+            "code": "0x",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x000000000000000000000000000000514b430005",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x00000000000000000000000019e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000000000000000000000000000000000000000000000000000000001388f9"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 99600,
+          "output": "0x0000000000000000000000000000000000000000000000000000000000000309",
+          "logs": [],
+          "post_state_root": "0xa2a4fe29eb7a53ad1ea56db4b472899f6361aa7c5bebc797d3c47636a9d5b9d3",
+          "accounts": [
+            {
+              "address": "0x000000000000000000000000000000514b430005",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "100",
+                "1280249": "777"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_transfer_mnt",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "1280249": "10",
+              "35760": "100"
+            },
+            "code": "0x",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0x000000000000000000000000000000514b430002",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x000000000000000000000000222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000001388f90000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 68300,
+          "output": "0x",
+          "logs": [],
+          "post_state_root": "0x4e47ee24ba26e0ae50cf1b101ce2e92a576939650da31ab4411359e50585d061",
+          "accounts": [
+            {
+              "address": "0x000000000000000000000000000000514b430002",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "100",
+                "1280249": "7"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "3"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_mint_mnt",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [],
+        "message": {
+          "from": "0x514b430000000000000000000000000000000002",
+          "to": "0x000000000000000000000000000000514b430004",
+          "value": "0",
+          "gas": 100000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x000000000000000000000000222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000001388f90000000000000000000000000000000000000000000000000000000000000007"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 66000,
+          "output": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "logs": [],
+          "post_state_root": "0xec5da664f5a335c07a49ba123d20c1d745613e79ca868df6a5d3905287b228f7",
+          "accounts": [
+            {
+              "address": "0x000000000000000000000000000000514b430004",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "7"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x514b430000000000000000000000000000000002",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_create2",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x6009600060006000f560005260206000f3",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "value": "0",
+          "gas": 200000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": true,
+          "remaining_gas": 167973,
+          "output": "0x000000000000000000000000c412674c1c6ca3789ed420684f8e979edae841de",
+          "logs": [],
+          "post_state_root": "0x08c7cab70c207c5458181d5e8475a9d7730ef6eb3b76bb136be3f00381f71b59",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "exists": true,
+              "nonce": 2,
+              "code": "0x6009600060006000f560005260206000f3",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0xc412674c1c6ca3789ed420684f8e979edae841de",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      },
+      {
+        "name": "vm_create2_out_of_gas",
+        "context": {
+          "timestamp": 1,
+          "full_shard_key": 1,
+          "enable_evm_timestamp": 0,
+          "enable_non_reserved_native_token_timestamp": 0,
+          "enable_general_native_token_timestamp": 0
+        },
+        "pre_alloc": [
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000"
+            },
+            "code": "0x",
+            "storage": {}
+          },
+          {
+            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "full_shard_key": 1,
+            "balances": {},
+            "code": "0x6009600060006000f560005260206000f3",
+            "storage": {}
+          }
+        ],
+        "message": {
+          "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "to": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "value": "0",
+          "gas": 32000,
+          "gas_token_id": 35760,
+          "transfer_token_id": 35760,
+          "to_full_shard_key": null,
+          "data": "0x"
+        },
+        "result": {
+          "success": false,
+          "remaining_gas": 0,
+          "output": "0x",
+          "logs": [],
+          "post_state_root": "0x20f351caee9ac2b7978d29c943f1e048d9fc3978b83fba9a66399900bc4b90a5",
+          "accounts": [
+            {
+              "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+              "exists": true,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "1000000000000000000",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x2222222222222222222222222222222222222222",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0x3333333333333333333333333333333333333333",
+              "exists": false,
+              "nonce": 0,
+              "code": "0x",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            },
+            {
+              "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "exists": true,
+              "nonce": 1,
+              "code": "0x6009600060006000f560005260206000f3",
+              "full_shard_key": 1,
+              "balances": {
+                "35760": "0",
+                "1280249": "0"
+              },
+              "storage": {}
+            }
+          ]
+        }
+      }
+    ],
+    "create_addresses": [
+      {
+        "name": "legacy_create",
+        "sender": "0x1234567890abcdef1234567890abcdef12345678",
+        "nonce": 7,
+        "address": "0x7fa04a5a7fd31c6215c1d980514db5e173d09e69"
+      }
+    ],
+    "create2": {
+      "sender": "0x1234567890abcdef1234567890abcdef12345678",
+      "salt": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "init_code_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "address": "0xeaf7e32cecd89592b516410e68582cd01f1ff682"
+    },
+    "current_mnt": [
+      {
+        "name": "current_mnt",
+        "input_gas": 10,
+        "transfer_token_id": 1234,
+        "success": true,
+        "remaining_gas": 7,
+        "output": "0x00000000000000000000000000000000000000000000000000000000000004d2",
+        "token_id_queried": true
+      },
+      {
+        "name": "current_mnt_oog",
+        "input_gas": 2,
+        "transfer_token_id": 1234,
+        "success": false,
+        "remaining_gas": 0,
+        "output": "0x",
+        "token_id_queried": true
+      }
+    ],
+    "system_contracts": [
+      {
+        "name": "non_reserved_native_token",
+        "length": 7173,
+        "sha256": "5d8ffead89bd579c83016d8ff1dc6da810366aa3dc02882930071cd0a55e0508"
+      },
+      {
+        "name": "general_native_token",
+        "length": 6508,
+        "sha256": "c019c6cae10e46007435f35e44d2ae375129b31bf4ba511150513819c8b1976c"
+      }
+    ]
+  }
+}

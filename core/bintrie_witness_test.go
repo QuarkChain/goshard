@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/triedb"
 )
 
@@ -203,6 +204,9 @@ func TestProcessParentBlockHash(t *testing.T) {
 			vmContext := NewEVMBlockContext(header, nil, new(common.Address))
 			evm := vm.NewEVM(vmContext, statedb, chainConfig, vm.Config{})
 			ProcessParentBlockHash(header.ParentHash, evm)
+			if evm.GasTokenID != qkccommon.DefaultTokenID || evm.TransferTokenID != qkccommon.DefaultTokenID {
+				t.Fatalf("unexpected system-call token defaults: gas %d transfer %d", evm.GasTokenID, evm.TransferTokenID)
+			}
 		}
 		// Read block hashes for block 0 .. num-1
 		for i := 0; i < num; i++ {

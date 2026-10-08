@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 )
@@ -493,6 +494,10 @@ func (args *TransactionArgs) ToMessage(baseFee *big.Int, skipNonceCheck bool) *c
 		BlobGasFeeCap:         blobFeeCap,
 		BlobHashes:            args.BlobHashes,
 		SetCodeAuthorizations: args.AuthorizationList,
+		// Ethereum JSON-RPC arguments do not expose QKC token fields. QKC-only
+		// execution therefore uses QKC instead of treating token ID 0 as unspecified.
+		GasTokenID:            qkccommon.DefaultTokenID,
+		TransferTokenID:       qkccommon.DefaultTokenID,
 		SkipNonceChecks:       skipNonceCheck,
 		SkipTransactionChecks: true,
 	}

@@ -1,0 +1,2001 @@
+{
+  "source": {
+    "pyquarkchain_commit": "ce274f3dea984da64dc66ff253ee6696a3f4b5fb",
+    "module_sha256": {
+      "quarkchain/evm/messages.py": "7d6cb97202b0e5e7bbe69abb210304708e4c15a87f02b6a3fce4da96b0b676fd",
+      "quarkchain/evm/state.py": "de5216e6c10e606e00df124b8c3be46e29f5ea66509a94c03c457a5ecec6545d",
+      "quarkchain/evm/transactions.py": "573f578989e912a1a6f2426faeb69c17ade3eaa47db7f221743fc7bf7c9e522d",
+      "quarkchain/evm/specials.py": "c14638312c952401fbbad5a280bf14f17ed74bec491163d5ba26f3e5206bb46d",
+      "quarkchain/evm/vm.py": "f6df931df9130d696c843361d01844b26703481d34d2032a64c5959a8572e96f",
+      "quarkchain/evm/opcodes.py": "40d1eaab9bb6612adea1196e025f32c88d98a18471373ca34903c888729e1af8",
+      "quarkchain/config.py": "cda1b5ca536bb8af61b09621a4f44315e9696b9d90a5aed75c352cac9fe65fe9",
+      "quarkchain/constants.py": "d9007dc130ca7a1543618d24a90d285c4cdd1aaa2f33046e34c5c989dbb994f6"
+    }
+  },
+  "cases": [
+    {
+      "name": "default_transfer",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "100",
+        "gas_limit": 30000,
+        "gas_price": "1000000000",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x",
+        "used_gas": 21000,
+        "gas_pool_remaining": 11979000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x7c568144f673ab48d8ef6907907f97eedac62766e54046267fdfabc137fa1468",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999978999999999900",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "100",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "10500000000000",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "nonce_too_high_rejected",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 5,
+        "value": "100",
+        "gas_limit": 30000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": false,
+        "error_type": "InvalidNonce",
+        "success": false,
+        "output": "0x",
+        "used_gas": 0,
+        "gas_pool_remaining": 12000000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x10a4104584d3cf2cbfc5cd66284fbffd41296e9d21e14d311e8a456a6c6f5b61",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "intrinsic_gas_rejected",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 21000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x01"
+      },
+      "result": {
+        "accepted": false,
+        "error_type": "InsufficientStartGas",
+        "success": false,
+        "output": "0x",
+        "used_gas": 0,
+        "gas_pool_remaining": 12000000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x10a4104584d3cf2cbfc5cd66284fbffd41296e9d21e14d311e8a456a6c6f5b61",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "combined_native_balance_rejected",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "30000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "1",
+        "gas_limit": 30000,
+        "gas_price": "1",
+        "gas_token_id": 1280249,
+        "transfer_token_id": 1280249,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": false,
+        "error_type": "InsufficientBalance",
+        "success": false,
+        "output": "0x",
+        "used_gas": 0,
+        "gas_pool_remaining": 12000000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x1d8237b8354f331b96aac5837c7958384a796381e0e5424abb6ae7002b636c29",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "30000"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "block_gas_pool_rejected",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 25000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 30000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": false,
+        "error_type": "BlockGasLimitReached",
+        "success": false,
+        "output": "0x",
+        "used_gas": 0,
+        "gas_pool_remaining": 25000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x10a4104584d3cf2cbfc5cd66284fbffd41296e9d21e14d311e8a456a6c6f5b61",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_transfer_default_gas",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "99999",
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "12345",
+        "gas_limit": 30000,
+        "gas_price": "1000000000",
+        "gas_token_id": 35760,
+        "transfer_token_id": 1280249,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x",
+        "used_gas": 21000,
+        "gas_pool_remaining": 11979000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x4c7b8fe933a87742a8cafb186df7fce28cb0a363e05eb9e316d1d3efb2202eda",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999979000000000000",
+              "1280249": "87654"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "12345"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "10500000000000",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_gas_conversion",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "10000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0x514b430000000000000000000000000000000003",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x6000546001016000556050600052600260205260406000f3",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "12345",
+        "gas_limit": 30000,
+        "gas_price": "3",
+        "gas_token_id": 1280249,
+        "transfer_token_id": 1280249,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x",
+        "used_gas": 21000,
+        "gas_pool_remaining": 11979000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0xeb7d0183670ab417b08417d755c7f45c7be56a4ee688dc388094eab459205d67",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "3600",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "14400",
+              "1280249": "9897655"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "12345"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x6000546001016000556050600052600260205260406000f3",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999940000",
+              "1280249": "90000"
+            },
+            "storage": {
+              "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000001"
+            }
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "21000",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "zero_price_native_gas_skips_conversion",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "1"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 30000,
+        "gas_price": "0",
+        "gas_token_id": 1280249,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x",
+        "used_gas": 21000,
+        "gas_pool_remaining": 11979000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x53837b74fe77ddd799385c08597ce602e45c14936b300546b9456aee813c9d86",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "1"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_gas_conversion_user_revert",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "10000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0x3333333333333333333333333333333333333333",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x60006000fd",
+          "storage": {}
+        },
+        {
+          "address": "0x514b430000000000000000000000000000000003",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x6000546001016000556050600052600260205260406000f3",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x3333333333333333333333333333333333333333",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 200000,
+        "gas_price": "3",
+        "gas_token_id": 1280249,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": false,
+        "output": "0x",
+        "used_gas": 21006,
+        "gas_pool_remaining": 11978994,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0xd73736f6c5b4f20d10af478357aa489f3ef1072c21dc5d9ba558564bae477ecd",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "71598",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "286390",
+              "1280249": "9400000"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x60006000fd",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x6000546001016000556050600052600260205260406000f3",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999600000",
+              "1280249": "600000"
+            },
+            "storage": {
+              "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000001"
+            }
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "21006",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_gas_zero_price_rejected",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "10000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0x514b430000000000000000000000000000000003",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x6000546001016000556064600052600060205260406000f3",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "12345",
+        "gas_limit": 30000,
+        "gas_price": "3",
+        "gas_token_id": 1280249,
+        "transfer_token_id": 1280249,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": false,
+        "error_type": "InvalidNativeToken",
+        "success": false,
+        "output": "0x",
+        "used_gas": 0,
+        "gas_pool_remaining": 12000000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x41de5e593bc8579d52b7e9fea691e90748191326a5740092027cff7da61fca44",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "10000000"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x6000546001016000556064600052600060205260406000f3",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000000000000000000",
+              "1280249": "0"
+            },
+            "storage": {
+              "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_gas_reserve_rejected",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "10000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0x514b430000000000000000000000000000000003",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000"
+          },
+          "code": "0x6000546001016000556050600052600260205260406000f3",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x2222222222222222222222222222222222222222",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 30000,
+        "gas_price": "3",
+        "gas_token_id": 1280249,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": false,
+        "error_type": "InvalidNativeToken",
+        "success": false,
+        "output": "0x",
+        "used_gas": 0,
+        "gas_pool_remaining": 12000000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x0c5574b56fea475ffe233fb41a317203f0b43320a7d07882812f99b2b86102a3",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "10000000"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x2222222222222222222222222222222222222222",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x6000546001016000556050600052600260205260406000f3",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "1000",
+              "1280249": "0"
+            },
+            "storage": {
+              "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "contract_revert",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0x3333333333333333333333333333333333333333",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x60006000fd",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x3333333333333333333333333333333333333333",
+        "nonce": 0,
+        "value": "1000",
+        "gas_limit": 200000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": false,
+        "output": "0x",
+        "used_gas": 21006,
+        "gas_pool_remaining": 11978994,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x9d9e747268dbf3e3c53b100a1d3e63c2f3ba1c3abf6e70e0b9e3ca1941bb8893",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999978994",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x60006000fd",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "10503",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "native_value_requires_acknowledgement",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "10",
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0x3333333333333333333333333333333333333333",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x00",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x3333333333333333333333333333333333333333",
+        "nonce": 0,
+        "value": "1",
+        "gas_limit": 30000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 1280249,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": false,
+        "output": "0x",
+        "used_gas": 21000,
+        "gas_pool_remaining": 11979000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x7c04a13c9778d886f30f36c111beadf6d5ad6d46975e8d3d003b972ec8bae9b4",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999979000",
+              "1280249": "10"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x3333333333333333333333333333333333333333",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x00",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "10500",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "contract_out_of_gas",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x5b600056",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nonce": 0,
+        "value": "1000",
+        "gas_limit": 50000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": false,
+        "output": "0x",
+        "used_gas": 50000,
+        "gas_pool_remaining": 11950000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0xf4a159a8c16ca77db269a186a54a95ce197e38a83aeef716056252f759aa34c8",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999950000",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x5b600056",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "25000",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "legacy_refund_cap",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x600060005500",
+          "storage": {
+            "0x0": "0x1"
+          }
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 200000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x",
+        "used_gas": 13003,
+        "gas_pool_remaining": 11986997,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x7e2547f746918d0d2ea7b3bd364d0391ce78abf2ab389b77565e376863b9186b",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999986997",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x600060005500",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {
+              "0x0000000000000000000000000000000000000000000000000000000000000000": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "6501",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "balance_mnt",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "1280249": "777",
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x000000000000000000000000000000514b430005",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 100000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x00000000000000000000000019e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000000000000000000000000000000000000000000000000000000001388f9"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x0000000000000000000000000000000000000000000000000000000000000309",
+        "used_gas": 23128,
+        "gas_pool_remaining": 11976872,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0xe95357fe57ef42d6235f5a007c768b9457c54610558a7c80f4bdeb70e095f19d",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x000000000000000000000000000000514b430005",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999976872",
+              "1280249": "777"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "11564",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "mint_mnt_rejects_foreign_sender",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0x000000000000000000000000000000514b430004",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 100000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x00000000000000000000000019e7e376e7c213b7e7e7e46cc70a5dd086daff2a00000000000000000000000000000000000000000000000000000000001388f900000000000000000000000000000000000000000000000000000000000003e8"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": false,
+        "output": "0x",
+        "used_gas": 100000,
+        "gas_pool_remaining": 11900000,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0x08fe96fecaea603d479b0c0391207960118c316798022cf495bee8b1917a829f",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x000000000000000000000000000000514b430004",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999900000",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "50000",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "transfer_mnt_clears_child_shard_key",
+      "context": {
+        "timestamp": 1,
+        "block_gas_limit": 12000000,
+        "coinbase": "0xcccccccccccccccccccccccccccccccccccccccc"
+      },
+      "pre_alloc": [
+        {
+          "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "full_shard_key": 1,
+          "balances": {
+            "35760": "1000000000000000000"
+          },
+          "code": "0x",
+          "storage": {}
+        },
+        {
+          "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x73bbbb0000000000000000000000000000000000bb600052618bb060205260006040526020608060606000600073000000000000000000000000000000514b43000262030d40f160005560206080f3",
+          "storage": {}
+        },
+        {
+          "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "full_shard_key": 1,
+          "balances": {},
+          "code": "0x600060006000f060005260206000f3",
+          "storage": {}
+        }
+      ],
+      "message": {
+        "from": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+        "to": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nonce": 0,
+        "value": "0",
+        "gas_limit": 500000,
+        "gas_price": "1",
+        "gas_token_id": 35760,
+        "transfer_token_id": 35760,
+        "to_full_shard_key": 1,
+        "data": "0x"
+      },
+      "result": {
+        "accepted": true,
+        "error_type": "",
+        "success": true,
+        "output": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "used_gas": 41772,
+        "gas_pool_remaining": 11958228,
+        "full_shard_key": 1,
+        "logs": [],
+        "post_state_root": "0xbefc53f77b5e27d274fb599c90af1daf5216166d955570d5c692650f3ab58ce5",
+        "accounts": [
+          {
+            "address": "0x0000000000000000000000000000000000000000",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "999999999999958228",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0x514b430000000000000000000000000000000003",
+            "exists": false,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x73bbbb0000000000000000000000000000000000bb600052618bb060205260006040526020608060606000600073000000000000000000000000000000514b43000262030d40f160005560206080f3",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "exists": true,
+            "nonce": 1,
+            "code": "0x600060006000f060005260206000f3",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "0",
+              "1280249": "0"
+            },
+            "storage": {}
+          },
+          {
+            "address": "0xcccccccccccccccccccccccccccccccccccccccc",
+            "exists": true,
+            "nonce": 0,
+            "code": "0x",
+            "full_shard_key": 1,
+            "balances": {
+              "35760": "20886",
+              "1280249": "0"
+            },
+            "storage": {}
+          }
+        ]
+      }
+    }
+  ]
+}

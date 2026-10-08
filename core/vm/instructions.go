@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 func opAdd(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
@@ -665,7 +666,10 @@ func opCreate(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 	scope.Contract.UseGas(GasCosts{RegularGas: gas}, evm.Config.Tracer, tracing.GasChangeCallContractCreation)
 
-	res, addr, returnGas, suberr := evm.Create(scope.Contract.Address(), input, NewGasBudget(gas), &value)
+	contractAddr := crypto.CreateAddress(scope.Contract.Address(), evm.StateDB.GetNonce(scope.Contract.Address()))
+	res, addr, returnGas, suberr := evm.create(
+		scope.Contract.Address(), input, NewGasBudget(gas), &value, contractAddr, CREATE, scope.Contract.ToFullShardKey,
+	)
 	// Push item on the stack based on the returned error. If the ruleset is
 	// homestead we must check for CodeStoreOutOfGasError (homestead only
 	// rule) and treat as an error, if the ruleset is frontier we must
@@ -706,8 +710,11 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	scope.Contract.UseGas(GasCosts{RegularGas: gas}, evm.Config.Tracer, tracing.GasChangeCallContractCreation2)
 	// reuse size int for stackvalue
 	stackvalue := size
-	res, addr, returnGas, suberr := evm.Create2(scope.Contract.Address(), input, NewGasBudget(gas),
-		&endowment, &salt)
+	inithash := crypto.Keccak256Hash(input)
+	contractAddr := crypto.CreateAddress2(scope.Contract.Address(), salt.Bytes32(), inithash[:])
+	res, addr, returnGas, suberr := evm.create(
+		scope.Contract.Address(), input, NewGasBudget(gas), &endowment, contractAddr, CREATE2, scope.Contract.ToFullShardKey,
+	)
 	// Push item on the stack based on the returned error.
 	if suberr != nil {
 		stackvalue.Clear()
@@ -743,7 +750,26 @@ func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if !value.IsZero() {
 		gas += params.CallStipend
 	}
-	ret, returnGas, err := evm.Call(scope.Contract.Address(), toAddr, args, NewGasBudget(gas), &value)
+	var ret []byte
+	returnGas := NewGasBudget(gas)
+	var err error
+	attempted := false
+	// Pyquarkchain performs this opcode-level check against the default token
+	// before _apply_msg performs the actual transfer-token check. Consequently a
+	// nested MNT value call requires both balances, while a top-level call only
+	// performs the transfer-token check.
+	if evm.StateDB.GetBalanceByTokenID(scope.Contract.Address(), qkccommon.DefaultTokenID).Cmp(&value) < 0 {
+		err = ErrInsufficientBalance
+	} else {
+		attempted = true
+		ret, returnGas, err = evm.call(
+			scope.Contract.Address(), toAddr, args, NewGasBudget(gas), &value,
+			scope.Contract.TransferTokenID, scope.Contract.ToFullShardKey,
+		)
+	}
+	if attempted && err != ErrDepth && toAddr == currentMntIDAddr {
+		scope.Contract.TokenIDQueried = true
+	}
 
 	if err != nil {
 		temp.Clear()
@@ -777,7 +803,17 @@ func opCallCode(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 		gas += params.CallStipend
 	}
 
-	ret, returnGas, err := evm.CallCode(scope.Contract.Address(), toAddr, args, NewGasBudget(gas), &value)
+	var ret []byte
+	returnGas := NewGasBudget(gas)
+	var err error
+	if evm.StateDB.GetBalanceByTokenID(scope.Contract.Address(), qkccommon.DefaultTokenID).Cmp(&value) < 0 {
+		err = ErrInsufficientBalance
+	} else {
+		ret, returnGas, err = evm.callCode(
+			scope.Contract.Address(), toAddr, args, NewGasBudget(gas), &value,
+			scope.Contract.TransferTokenID, scope.Contract.ToFullShardKey,
+		)
+	}
 	if err != nil {
 		temp.Clear()
 	} else {
@@ -806,7 +842,10 @@ func opDelegateCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(inOffset.Uint64(), inSize.Uint64())
 
-	ret, returnGas, err := evm.DelegateCall(scope.Contract.Caller(), scope.Contract.Address(), toAddr, args, NewGasBudget(gas), scope.Contract.value)
+	ret, returnGas, err := evm.delegateCall(
+		scope.Contract.Caller(), scope.Contract.Address(), toAddr, args, NewGasBudget(gas), scope.Contract.value,
+		scope.Contract.TransferTokenID, scope.Contract.ToFullShardKey,
+	)
 	if err != nil {
 		temp.Clear()
 	} else {
@@ -835,7 +874,13 @@ func opStaticCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(inOffset.Uint64(), inSize.Uint64())
 
-	ret, returnGas, err := evm.StaticCall(scope.Contract.Address(), toAddr, args, NewGasBudget(gas))
+	ret, returnGas, err := evm.staticCall(
+		scope.Contract.Address(), toAddr, args, NewGasBudget(gas),
+		scope.Contract.TransferTokenID, scope.Contract.ToFullShardKey,
+	)
+	if err != ErrDepth && toAddr == currentMntIDAddr {
+		scope.Contract.TokenIDQueried = true
+	}
 	if err != nil {
 		temp.Clear()
 	} else {

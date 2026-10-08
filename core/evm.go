@@ -86,11 +86,22 @@ func NewEVMBlockContext(header *types.Header, chain ChainContext, author *common
 // NewEVMTxContext creates a new transaction context for a single transaction.
 func NewEVMTxContext(msg *Message) vm.TxContext {
 	ctx := vm.TxContext{
-		Origin:     msg.From,
-		GasPrice:   msg.GasPrice,
-		BlobHashes: msg.BlobHashes,
+		Origin:          msg.From,
+		GasPrice:        msg.GasPrice,
+		BlobHashes:      msg.BlobHashes,
+		GasTokenID:      msg.GasTokenID,
+		TransferTokenID: msg.TransferTokenID,
+		ToFullShardKey:  cloneFullShardKey(msg.ToFullShardKey),
 	}
 	return ctx
+}
+
+func cloneFullShardKey(key *uint32) *uint32 {
+	if key == nil {
+		return nil
+	}
+	cloned := *key
+	return &cloned
 }
 
 // GetHashFn returns a GetHashFunc which retrieves header hashes by number

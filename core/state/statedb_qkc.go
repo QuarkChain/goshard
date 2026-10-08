@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 )
 
@@ -24,6 +25,20 @@ func NewQKCStateDB(root common.Hash, db Database) (*StateDB, error) {
 		return nil, fmt.Errorf("open state %s: %w", root, err)
 	}
 	return sdb, nil
+}
+
+// GetQuarkChainConfig returns the QKC execution configuration associated with
+// this state. StateDB copies retain the same read-only configuration pointer.
+func (s *StateDB) GetQuarkChainConfig() *qkcconfig.QuarkChainConfig {
+	return s.qkcConfig
+}
+
+// SetQuarkChainConfig replaces the QKC execution configuration for this state.
+func (s *StateDB) SetQuarkChainConfig(config *qkcconfig.QuarkChainConfig) {
+	if config == nil {
+		panic("nil QuarkChain config")
+	}
+	s.qkcConfig = config
 }
 
 // ===== QuarkChain account lifetime =====
