@@ -11,6 +11,7 @@ var (
 	ErrMinorChainUnavailable       = errors.New("minor block chain is unavailable")
 	ErrConnManagerUnavailable      = errors.New("connection manager is unavailable")
 	ErrNoGenesis                   = errors.New("minor block chain genesis is missing")
+	ErrGenesisRootMismatch         = errors.New("root block does not match minor genesis root")
 	ErrUnknownBlock                = errors.New("unknown minor block")
 	ErrUnknownParent               = errors.New("unknown minor block parent")
 	ErrStateRootMismatch           = errors.New("processed state root does not match minor block")
