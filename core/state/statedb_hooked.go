@@ -28,6 +28,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 )
 
@@ -61,6 +63,30 @@ func (s *hookedStateDB) IsNewContract(addr common.Address) bool {
 
 func (s *hookedStateDB) GetBalance(addr common.Address) *uint256.Int {
 	return s.inner.GetBalance(addr)
+}
+
+func (s *hookedStateDB) GetBalanceByTokenID(addr common.Address, tokenID uint64) *uint256.Int {
+	return s.inner.GetBalanceByTokenID(addr, tokenID)
+}
+
+func (s *hookedStateDB) AddBalanceByTokenID(addr common.Address, amount *uint256.Int, tokenID uint64, reason tracing.BalanceChangeReason) {
+	if tokenID == qkccommon.DefaultTokenID {
+		s.AddBalance(addr, amount, reason)
+		return
+	}
+	s.inner.AddBalanceByTokenID(addr, amount, tokenID, reason)
+}
+
+func (s *hookedStateDB) SubBalanceByTokenID(addr common.Address, amount *uint256.Int, tokenID uint64, reason tracing.BalanceChangeReason) {
+	if tokenID == qkccommon.DefaultTokenID {
+		s.SubBalance(addr, amount, reason)
+		return
+	}
+	s.inner.SubBalanceByTokenID(addr, amount, tokenID, reason)
+}
+
+func (s *hookedStateDB) GetQuarkChainConfig() *qkcconfig.QuarkChainConfig {
+	return s.inner.GetQuarkChainConfig()
 }
 
 func (s *hookedStateDB) GetMntBalance(addr common.Address, tokenID uint64) *uint256.Int {

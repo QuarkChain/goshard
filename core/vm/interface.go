@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/params"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 )
 
@@ -35,6 +36,11 @@ type StateDB interface {
 	SubBalance(common.Address, *uint256.Int, tracing.BalanceChangeReason) uint256.Int
 	AddBalance(common.Address, *uint256.Int, tracing.BalanceChangeReason) uint256.Int
 	GetBalance(common.Address) *uint256.Int
+	GetBalanceByTokenID(common.Address, uint64) *uint256.Int
+	AddBalanceByTokenID(common.Address, *uint256.Int, uint64, tracing.BalanceChangeReason)
+	SubBalanceByTokenID(common.Address, *uint256.Int, uint64, tracing.BalanceChangeReason)
+
+	GetQuarkChainConfig() *qkcconfig.QuarkChainConfig
 
 	GetNonce(common.Address) uint64
 	SetNonce(common.Address, uint64, tracing.NonceChangeReason)

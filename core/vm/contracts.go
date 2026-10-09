@@ -53,6 +53,17 @@ type PrecompiledContract interface {
 	Name() string
 }
 
+// PrecompiledContractWithEVM extends a normal precompile with access to the
+// active EVM and call frame. QKC MNT precompiles implement both interfaces so
+// they remain part of the regular precompile registry and dispatch path.
+//
+// TODO: The QKC MNT implementations that consume the frame's token, static,
+// and depth context will be implemented in follow-up PRs.
+type PrecompiledContractWithEVM interface {
+	PrecompiledContract
+	RunWithEVM(input []byte, evm *EVM, contract *Contract) ([]byte, error)
+}
+
 // PrecompiledContracts contains the precompiled contracts supported at the given fork.
 type PrecompiledContracts map[common.Address]PrecompiledContract
 
