@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 )
 
@@ -24,6 +25,25 @@ func NewQKCStateDB(root common.Hash, db Database) (*StateDB, error) {
 		return nil, fmt.Errorf("open state %s: %w", root, err)
 	}
 	return sdb, nil
+}
+
+// GetQuarkChainConfig returns the QKC execution configuration injected by the
+// state owner. It is nil until injection. StateDB copies retain the same
+// configuration pointer, matching pyquarkchain's ephemeral state clones.
+//
+// TODO: QKC shard execution will inject its shared configuration before EVM
+// execution when that integration is implemented in a follow-up PR.
+func (s *StateDB) GetQuarkChainConfig() *qkcconfig.QuarkChainConfig {
+	return s.qkcConfig
+}
+
+// SetQuarkChainConfig associates the state with its owner's QKC execution
+// configuration. The owner must not mutate it during execution.
+func (s *StateDB) SetQuarkChainConfig(config *qkcconfig.QuarkChainConfig) {
+	if config == nil {
+		panic("nil QuarkChain config")
+	}
+	s.qkcConfig = config
 }
 
 // ===== QuarkChain account lifetime =====

@@ -41,6 +41,8 @@ type Contract struct {
 	// is the execution frame represented by this object a contract deployment
 	IsDeployment bool
 	IsSystemCall bool
+	IsStatic     bool
+	Depth        int
 
 	Gas   GasBudget
 	value *uint256.Int

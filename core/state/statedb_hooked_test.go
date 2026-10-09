@@ -19,11 +19,14 @@ package state
 import (
 	"fmt"
 	"math/big"
+	"reflect"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
+	qkcconfig "github.com/ethereum/go-ethereum/qkc/config"
 	"github.com/holiman/uint256"
 )
 
@@ -133,6 +136,53 @@ func TestHooks(t *testing.T) {
 		if have := result[i]; have != want {
 			t.Fatalf("error event %d\nhave: %v\nwant: %v", i, have, want)
 		}
+	}
+}
+
+func TestQKCDefaultTokenBalanceHooks(t *testing.T) {
+	inner, err := New(types.EmptyRootHash, NewDatabaseForTesting())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr := common.Address{0xaa}
+	var changes [][2]string
+	hooked := NewHookedState(inner, &tracing.Hooks{
+		OnBalanceChange: func(_ common.Address, prev, next *big.Int, _ tracing.BalanceChangeReason) {
+			changes = append(changes, [2]string{prev.String(), next.String()})
+		},
+	})
+
+	hooked.AddBalanceByTokenID(addr, uint256.NewInt(9), qkccommon.DefaultTokenID, tracing.BalanceChangeUnspecified)
+	hooked.SubBalanceByTokenID(addr, uint256.NewInt(4), qkccommon.DefaultTokenID, tracing.BalanceChangeTransfer)
+	hooked.AddBalanceByTokenID(addr, uint256.NewInt(3), 1, tracing.BalanceChangeUnspecified)
+
+	if want := [][2]string{{"0", "9"}, {"9", "5"}}; !reflect.DeepEqual(changes, want) {
+		t.Fatalf("balance changes mismatch: have %v want %v", changes, want)
+	}
+	if got := hooked.GetBalanceByTokenID(addr, 1); !got.Eq(uint256.NewInt(3)) {
+		t.Fatalf("non-default token balance = %s, want 3", got)
+	}
+}
+
+func TestQuarkChainConfigIsInjectedByStateOwner(t *testing.T) {
+	inner, err := New(types.EmptyRootHash, NewDatabaseForTesting())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if config := inner.GetQuarkChainConfig(); config != nil {
+		t.Fatalf("new state has QuarkChain config %p, want nil before owner injection", config)
+	}
+
+	config := qkcconfig.NewQuarkChainConfig()
+	inner.SetQuarkChainConfig(config)
+	if got := inner.GetQuarkChainConfig(); got != config {
+		t.Fatalf("injected config = %p, want %p", got, config)
+	}
+	if got := inner.Copy().GetQuarkChainConfig(); got != config {
+		t.Fatalf("copied config = %p, want shared owner config %p", got, config)
+	}
+	if got := NewHookedState(inner, nil).GetQuarkChainConfig(); got != config {
+		t.Fatalf("hooked config = %p, want forwarded owner config %p", got, config)
 	}
 }
 
