@@ -68,7 +68,7 @@ func TestShardNewAndReopen(t *testing.T) {
 			datadir := t.TempDir()
 			branch := account.NewBranch(firstShardID)
 
-			s, err := New(ctx, branch, root, datadir, Options{})
+			s, err := New(ctx, branch, root, datadir, Options{}, nil)
 			if err != nil {
 				t.Fatalf("shard.New: %v", err)
 			}
@@ -119,7 +119,7 @@ func TestShardNewAndReopen(t *testing.T) {
 			}
 
 			// Reopen the same directory: Reconcile passes on the exact match.
-			s, err = New(ctx, branch, root, datadir, Options{})
+			s, err = New(ctx, branch, root, datadir, Options{}, nil)
 			if err != nil {
 				t.Fatalf("shard.New(reopen): %v", err)
 			}
@@ -137,7 +137,7 @@ func TestShardMemDB(t *testing.T) {
 	ctx, root := bootEnv(t, fixtureMainnet)
 	branch := account.NewBranch(firstShardID)
 
-	s, err := New(ctx, branch, root, "", Options{})
+	s, err := New(ctx, branch, root, "", Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New(mem): %v", err)
 	}
@@ -163,7 +163,7 @@ func TestShardReopenGenesisMismatch(t *testing.T) {
 	datadir := t.TempDir()
 	branch := account.NewBranch(firstShardID)
 
-	s, err := New(ctx, branch, root, datadir, Options{})
+	s, err := New(ctx, branch, root, datadir, Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestShardReopenGenesisMismatch(t *testing.T) {
 	}
 
 	ctx.Quarkchain.GetShardConfigByFullShardID(firstShardID).Genesis.Timestamp++
-	_, err = New(ctx, branch, root, datadir, Options{})
+	_, err = New(ctx, branch, root, datadir, Options{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "does not match config genesis") ||
 		!strings.Contains(err.Error(), "cluster config changed since initialization") ||
 		!strings.Contains(err.Error(), datadir) {
@@ -187,7 +187,7 @@ func TestShardReopenRootGenesisMismatch(t *testing.T) {
 	datadir := t.TempDir()
 	branch := account.NewBranch(firstShardID)
 
-	s, err := New(ctx, branch, root, datadir, Options{})
+	s, err := New(ctx, branch, root, datadir, Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestShardReopenRootGenesisMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRootBlock: %v", err)
 	}
-	_, err = New(ctx, branch, root2, datadir, Options{})
+	_, err = New(ctx, branch, root2, datadir, Options{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "cluster config changed since initialization") {
 		t.Fatalf("reopen err = %v, want loud genesis mismatch", err)
 	}
@@ -217,7 +217,7 @@ func TestShardReopenMissingGenesisState(t *testing.T) {
 	datadir := t.TempDir()
 	branch := account.NewBranch(firstShardID)
 
-	s, err := New(ctx, branch, root, datadir, Options{})
+	s, err := New(ctx, branch, root, datadir, Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestShardReopenMissingGenesisState(t *testing.T) {
 		rawdb.DeleteLegacyTrieNode(db, genesis.Root())
 	})
 
-	_, err = New(ctx, branch, root, datadir, Options{})
+	_, err = New(ctx, branch, root, datadir, Options{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "its state is missing") ||
 		!strings.Contains(err.Error(), "corrupt chaindb") ||
 		!strings.Contains(err.Error(), datadir) {
@@ -275,7 +275,7 @@ func TestShardNewRejectsUnknownShard(t *testing.T) {
 				ctx.Slave.FullShardList = append(ctx.Slave.FullShardList, unknownShardID)
 			}
 
-			_, err := New(ctx, account.NewBranch(unknownShardID), root, datadir, Options{})
+			_, err := New(ctx, account.NewBranch(unknownShardID), root, datadir, Options{}, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("shard.New(unknown) err = %v, want %q", err, tc.want)
 			}
@@ -299,7 +299,7 @@ func TestShardNewRejectsForeignShard(t *testing.T) {
 	datadir := t.TempDir()
 	const foreignShardID = uint32(0x00010001)
 
-	_, err := New(ctx, account.NewBranch(foreignShardID), root, datadir, Options{})
+	_, err := New(ctx, account.NewBranch(foreignShardID), root, datadir, Options{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not assigned to slave \"S0\"") {
 		t.Fatalf("shard.New(foreign) err = %v, want a rejected assignment naming S0", err)
 	}
@@ -327,7 +327,7 @@ func TestShardFailedFirstBootLeavesNoGenesis(t *testing.T) {
 	datadir := t.TempDir()
 	branch := account.NewBranch(firstShardID)
 
-	if _, err := New(ctx, branch, root, datadir, Options{Chain: failingChainService{}}); err == nil ||
+	if _, err := New(ctx, branch, root, datadir, Options{Chain: failingChainService{}}, nil); err == nil ||
 		!strings.Contains(err.Error(), "injected chain failure") {
 		t.Fatalf("New(failing chain) err = %v, want the injected failure", err)
 	}
@@ -345,7 +345,7 @@ func TestShardFailedFirstBootLeavesNoGenesis(t *testing.T) {
 	}
 
 	// The retry succeeds and stores the genesis.
-	s, err := New(ctx, branch, root, datadir, Options{})
+	s, err := New(ctx, branch, root, datadir, Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New(retry): %v", err)
 	}
@@ -386,7 +386,7 @@ func TestShardReopenIncompatibleForkSchedule(t *testing.T) {
 	datadir := t.TempDir()
 	branch := account.NewBranch(firstShardID)
 
-	s, err := New(ctx, branch, root, datadir, Options{})
+	s, err := New(ctx, branch, root, datadir, Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestShardReopenIncompatibleForkSchedule(t *testing.T) {
 
 	// Above that fork, the config from the cluster file is a break with the
 	// executed history.
-	if _, err := New(ctx, branch, root, datadir, Options{Chain: chainAtHeight{height: 200}}); err == nil ||
+	if _, err := New(ctx, branch, root, datadir, Options{Chain: chainAtHeight{height: 200}}, nil); err == nil ||
 		!strings.Contains(err.Error(), "incompatible chain config") ||
 		!strings.Contains(err.Error(), datadir) {
 		t.Fatalf("reopen at head 200 err = %v, want a loud incompatibility naming the db path", err)
@@ -422,7 +422,7 @@ func TestShardReopenIncompatibleForkSchedule(t *testing.T) {
 	// The same datadir at genesis has executed nothing under the old rules, so
 	// the change is adopted instead — geth's rule, and the reason the head must
 	// be the real one.
-	s, err = New(ctx, branch, root, datadir, Options{Chain: chainAtHeight{height: 0}})
+	s, err = New(ctx, branch, root, datadir, Options{Chain: chainAtHeight{height: 0}}, nil)
 	if err != nil {
 		t.Fatalf("shard.New(head 0): %v", err)
 	}
@@ -450,7 +450,7 @@ func withDB(t *testing.T, datadir string, fn func(ethdb.Database)) {
 
 func TestShardStopIdempotent(t *testing.T) {
 	ctx, root := bootEnv(t, fixtureMainnet)
-	s, err := New(ctx, account.NewBranch(firstShardID), root, t.TempDir(), Options{})
+	s, err := New(ctx, account.NewBranch(firstShardID), root, t.TempDir(), Options{}, nil)
 	if err != nil {
 		t.Fatalf("shard.New: %v", err)
 	}
