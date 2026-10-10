@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/telemetry"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
@@ -253,13 +254,15 @@ func ProcessBeaconBlockRoot(beaconRoot common.Hash, evm *vm.EVM) {
 		}
 	}
 	msg := &Message{
-		From:      params.SystemAddress,
-		GasLimit:  30_000_000,
-		GasPrice:  uint256.NewInt(0),
-		GasFeeCap: uint256.NewInt(0),
-		GasTipCap: uint256.NewInt(0),
-		To:        &params.BeaconRootsAddress,
-		Data:      beaconRoot[:],
+		From:            params.SystemAddress,
+		GasTokenID:      qkccommon.DefaultTokenID,
+		TransferTokenID: qkccommon.DefaultTokenID,
+		GasLimit:        30_000_000,
+		GasPrice:        uint256.NewInt(0),
+		GasFeeCap:       uint256.NewInt(0),
+		GasTipCap:       uint256.NewInt(0),
+		To:              &params.BeaconRootsAddress,
+		Data:            beaconRoot[:],
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
 	evm.StateDB.AddAddressToAccessList(params.BeaconRootsAddress)
@@ -280,13 +283,15 @@ func ProcessParentBlockHash(prevHash common.Hash, evm *vm.EVM) {
 		}
 	}
 	msg := &Message{
-		From:      params.SystemAddress,
-		GasLimit:  30_000_000,
-		GasPrice:  uint256.NewInt(0),
-		GasFeeCap: uint256.NewInt(0),
-		GasTipCap: uint256.NewInt(0),
-		To:        &params.HistoryStorageAddress,
-		Data:      prevHash.Bytes(),
+		From:            params.SystemAddress,
+		GasTokenID:      qkccommon.DefaultTokenID,
+		TransferTokenID: qkccommon.DefaultTokenID,
+		GasLimit:        30_000_000,
+		GasPrice:        uint256.NewInt(0),
+		GasFeeCap:       uint256.NewInt(0),
+		GasTipCap:       uint256.NewInt(0),
+		To:              &params.HistoryStorageAddress,
+		Data:            prevHash.Bytes(),
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
 	evm.StateDB.AddAddressToAccessList(params.HistoryStorageAddress)
@@ -320,12 +325,14 @@ func processRequestsSystemCall(requests *[][]byte, evm *vm.EVM, requestType byte
 		}
 	}
 	msg := &Message{
-		From:      params.SystemAddress,
-		GasLimit:  30_000_000,
-		GasPrice:  uint256.NewInt(0),
-		GasFeeCap: uint256.NewInt(0),
-		GasTipCap: uint256.NewInt(0),
-		To:        &addr,
+		From:            params.SystemAddress,
+		GasTokenID:      qkccommon.DefaultTokenID,
+		TransferTokenID: qkccommon.DefaultTokenID,
+		GasLimit:        30_000_000,
+		GasPrice:        uint256.NewInt(0),
+		GasFeeCap:       uint256.NewInt(0),
+		GasTipCap:       uint256.NewInt(0),
+		To:              &addr,
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
 	evm.StateDB.AddAddressToAccessList(addr)

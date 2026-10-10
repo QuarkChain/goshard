@@ -41,6 +41,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto/keccak"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/hashdb"
@@ -480,6 +481,8 @@ func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (*core.Mess
 		To:                    to,
 		Nonce:                 tx.Nonce,
 		Value:                 uint256.MustFromBig(value),
+		GasTokenID:            qkccommon.DefaultTokenID,
+		TransferTokenID:       qkccommon.DefaultTokenID,
 		GasLimit:              gasLimit,
 		GasPrice:              uint256.MustFromBig(gasPrice),
 		GasFeeCap:             uint256.MustFromBig(tx.MaxFeePerGas),

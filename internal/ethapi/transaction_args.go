@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/holiman/uint256"
 )
@@ -483,6 +484,8 @@ func (args *TransactionArgs) ToMessage(baseFee *big.Int, skipNonceCheck bool) *c
 		From:                  args.from(),
 		To:                    args.To,
 		Value:                 value,
+		GasTokenID:            qkccommon.DefaultTokenID,
+		TransferTokenID:       qkccommon.DefaultTokenID,
 		Nonce:                 uint64(*args.Nonce),
 		GasLimit:              uint64(*args.Gas),
 		GasPrice:              gasPrice,

@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
@@ -211,6 +212,8 @@ type Message struct {
 	From                  common.Address
 	Nonce                 uint64
 	Value                 *uint256.Int
+	GasTokenID            uint64 // TODO: Use for payAsGas and gas settlement in a follow-up PR.
+	TransferTokenID       uint64
 	GasLimit              uint64
 	GasPrice              *uint256.Int
 	GasFeeCap             *uint256.Int
@@ -268,9 +271,13 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		return nil, fmt.Errorf("blobGasFeeCap exceeds 256 bits: address %v", from.Hex())
 	}
 
+	// TODO: A separate QKC transaction-to-message feature will populate the
+	// original GasTokenID and TransferTokenID.
 	msg := &Message{
 		From:                  from,
 		Nonce:                 tx.Nonce(),
+		GasTokenID:            qkccommon.DefaultTokenID,
+		TransferTokenID:       qkccommon.DefaultTokenID,
 		GasLimit:              tx.Gas(),
 		GasPrice:              gasPrice,
 		GasFeeCap:             gasFeeCap,

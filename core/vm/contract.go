@@ -43,6 +43,11 @@ type Contract struct {
 	IsSystemCall bool
 	IsStatic     bool
 	Depth        int
+	// TransferTokenID is inherited by child call frames.
+	// TODO: Apply it to balance transfers when MNT value transfer is implemented.
+	TransferTokenID uint64
+	// TokenIDQueried records whether this frame queried its transfer token ID.
+	TokenIDQueried bool
 
 	Gas   GasBudget
 	value *uint256.Int

@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
@@ -77,6 +78,8 @@ type TxContext struct {
 	GasPrice     *uint256.Int        // Provides information for GASPRICE (and is used to zero the basefee if NoBaseFee is set)
 	BlobHashes   []common.Hash       // Provides information for BLOBHASH
 	AccessEvents *state.AccessEvents // Capture all state accesses for this tx
+	// TransferTokenID is the native token carried by QKC value transfers.
+	TransferTokenID uint64
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
@@ -145,7 +148,11 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		jumpDests:   newMapJumpDests(),
 		arena:       newArena(),
 	}
-	evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	if statedb == nil {
+		evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	} else {
+		evm.precompiles = activeQKCPrecompiledContracts(evm.chainRules, blockCtx.Time, statedb.GetQuarkChainConfig())
+	}
 
 	switch {
 	case evm.chainRules.IsAmsterdam:
@@ -241,11 +248,25 @@ func isSystemCall(caller common.Address) bool {
 	return caller == params.SystemAddress
 }
 
+// checkTokenIDQueried mirrors goquarkchain's post-execution MNT check. A
+// contract receiving a non-default token must query its transfer token ID.
+func (evm *EVM) checkTokenIDQueried(err error, codeAddr common.Address, value *uint256.Int, transferTokenID uint64, tokenIDQueried bool) error {
+	if err == nil && !tokenIDQueried && transferTokenID != qkccommon.DefaultTokenID && !value.IsZero() &&
+		evm.StateDB != nil && evm.StateDB.GetQuarkChainConfig() != nil && evm.StateDB.GetCodeSize(codeAddr) != 0 {
+		return ErrExecutionReverted
+	}
+	return err
+}
+
 // Call executes the contract associated with the addr with the given input as
 // parameters. It also handles any necessary value transfer required and takse
 // the necessary steps to create accounts and reverses the state in case of an
 // execution error or failed value transfer.
 func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, gas GasBudget, value *uint256.Int) (ret []byte, leftOverGas GasBudget, err error) {
+	return evm.call(caller, addr, input, gas, value, evm.TransferTokenID)
+}
+
+func (evm *EVM) call(caller common.Address, addr common.Address, input []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64) (ret []byte, leftOverGas GasBudget, err error) {
 	// Capture the tracer start/end events in debug mode
 	if evm.Config.Tracer != nil {
 		evm.captureBegin(evm.depth, CALL, caller, addr, input, gas.RegularGas, value.ToBig())
@@ -295,11 +316,14 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 		evm.Context.Transfer(evm.StateDB, caller, addr, value, &evm.chainRules)
 	}
 
+	tokenIDQueried := false
 	if isPrecompile {
 		if precompileWithEVM, ok := p.(PrecompiledContractWithEVM); ok {
 			contract := NewContract(caller, addr, value, gas, evm.jumpDests)
+			contract.TransferTokenID = transferTokenID
 			ret, err = evm.runPrecompiledContractWithEVM(precompileWithEVM, input, contract)
 			gas = contract.Gas
+			tokenIDQueried = contract.TokenIDQueried
 		} else {
 			ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 		}
@@ -312,11 +336,14 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 			// The contract is a scoped environment for this execution context only.
 			contract := NewContract(caller, addr, value, gas, evm.jumpDests)
 			contract.IsSystemCall = isSystemCall(caller)
+			contract.TransferTokenID = transferTokenID
 			contract.SetCallCode(evm.resolveCodeHash(addr), code)
 			ret, err = evm.Run(contract, input, false)
 			gas = contract.Gas
+			tokenIDQueried = contract.TokenIDQueried
 		}
 	}
+	err = evm.checkTokenIDQueried(err, addr, value, transferTokenID, tokenIDQueried)
 	// When an error was returned by the EVM or when setting the creation code
 	// above we revert to the snapshot and consume any gas remaining. Additionally,
 	// when we're in homestead this also counts for code storage gas errors.
@@ -343,6 +370,10 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 // CallCode differs from Call in the sense that it executes the given address'
 // code with the caller as context.
 func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byte, gas GasBudget, value *uint256.Int) (ret []byte, leftOverGas GasBudget, err error) {
+	return evm.callCode(caller, addr, input, gas, value, evm.TransferTokenID)
+}
+
+func (evm *EVM) callCode(caller common.Address, addr common.Address, input []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64) (ret []byte, leftOverGas GasBudget, err error) {
 	// Invoke tracer hooks that signal entering/exiting a call frame
 	if evm.Config.Tracer != nil {
 		evm.captureBegin(evm.depth, CALLCODE, caller, addr, input, gas.RegularGas, value.ToBig())
@@ -363,12 +394,15 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	}
 	var snapshot = evm.StateDB.Snapshot()
 
+	tokenIDQueried := false
 	// It is allowed to call precompiles, even via delegatecall
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
 		if precompileWithEVM, ok := p.(PrecompiledContractWithEVM); ok {
 			contract := NewContract(caller, caller, value, gas, evm.jumpDests)
+			contract.TransferTokenID = transferTokenID
 			ret, err = evm.runPrecompiledContractWithEVM(precompileWithEVM, input, contract)
 			gas = contract.Gas
+			tokenIDQueried = contract.TokenIDQueried
 		} else {
 			ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 		}
@@ -376,10 +410,13 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
 		contract := NewContract(caller, caller, value, gas, evm.jumpDests)
+		contract.TransferTokenID = transferTokenID
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
 		gas = contract.Gas
+		tokenIDQueried = contract.TokenIDQueried
 	}
+	err = evm.checkTokenIDQueried(err, addr, value, transferTokenID, tokenIDQueried)
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		if err != ErrExecutionReverted {
@@ -398,6 +435,10 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 // DelegateCall differs from CallCode in the sense that it executes the given address'
 // code with the caller as context and the caller is set to the caller of the caller.
 func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address, addr common.Address, input []byte, gas GasBudget, value *uint256.Int) (ret []byte, leftOverGas GasBudget, err error) {
+	return evm.delegateCall(originCaller, caller, addr, input, gas, value, evm.TransferTokenID)
+}
+
+func (evm *EVM) delegateCall(originCaller common.Address, caller common.Address, addr common.Address, input []byte, gas GasBudget, value *uint256.Int, transferTokenID uint64) (ret []byte, leftOverGas GasBudget, err error) {
 	// Invoke tracer hooks that signal entering/exiting a call frame
 	if evm.Config.Tracer != nil {
 		// DELEGATECALL inherits value from parent call
@@ -412,12 +453,15 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 	}
 	var snapshot = evm.StateDB.Snapshot()
 
+	tokenIDQueried := false
 	// It is allowed to call precompiles, even via delegatecall
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
 		if precompileWithEVM, ok := p.(PrecompiledContractWithEVM); ok {
 			contract := NewContract(originCaller, caller, value, gas, evm.jumpDests)
+			contract.TransferTokenID = transferTokenID
 			ret, err = evm.runPrecompiledContractWithEVM(precompileWithEVM, input, contract)
 			gas = contract.Gas
+			tokenIDQueried = contract.TokenIDQueried
 		} else {
 			ret, gas, err = RunPrecompiledContract(evm.StateDB, p, addr, input, gas, evm.Config.Tracer, evm.chainRules)
 		}
@@ -426,10 +470,13 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 		//
 		// Note: The value refers to the original value from the parent call.
 		contract := NewContract(originCaller, caller, value, gas, evm.jumpDests)
+		contract.TransferTokenID = transferTokenID
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
 		gas = contract.Gas
+		tokenIDQueried = contract.TokenIDQueried
 	}
+	err = evm.checkTokenIDQueried(err, addr, value, transferTokenID, tokenIDQueried)
 	if err != nil {
 		evm.StateDB.RevertToSnapshot(snapshot)
 		if err != ErrExecutionReverted {
@@ -447,6 +494,10 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 // Opcodes that attempt to perform such modifications will result in exceptions
 // instead of performing the modifications.
 func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []byte, gas GasBudget) (ret []byte, leftOverGas GasBudget, err error) {
+	return evm.staticCall(caller, addr, input, gas, evm.TransferTokenID)
+}
+
+func (evm *EVM) staticCall(caller common.Address, addr common.Address, input []byte, gas GasBudget, transferTokenID uint64) (ret []byte, leftOverGas GasBudget, err error) {
 	// Invoke tracer hooks that signal entering/exiting a call frame
 	if evm.Config.Tracer != nil {
 		evm.captureBegin(evm.depth, STATICCALL, caller, addr, input, gas.RegularGas, nil)
@@ -474,6 +525,7 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	if p, isPrecompile := evm.precompile(addr); isPrecompile {
 		if precompileWithEVM, ok := p.(PrecompiledContractWithEVM); ok {
 			contract := NewContract(caller, addr, new(uint256.Int), gas, evm.jumpDests)
+			contract.TransferTokenID = transferTokenID
 			wasReadOnly := evm.readOnly
 			evm.readOnly = true
 			ret, err = evm.runPrecompiledContractWithEVM(precompileWithEVM, input, contract)
@@ -486,6 +538,7 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
 		contract := NewContract(caller, addr, new(uint256.Int), gas, evm.jumpDests)
+		contract.TransferTokenID = transferTokenID
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 
 		// When an error was returned by the EVM or when setting the creation code
@@ -507,7 +560,7 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 }
 
 // create creates a new contract using code as deployment code.
-func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address, typ OpCode) (ret []byte, createAddress common.Address, leftOverGas GasBudget, err error) {
+func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int, address common.Address, typ OpCode, transferTokenID uint64) (ret []byte, createAddress common.Address, leftOverGas GasBudget, err error) {
 	if evm.Config.Tracer != nil {
 		evm.captureBegin(evm.depth, typ, caller, address, code, gas.RegularGas, value.ToBig())
 		defer func(startGas uint64) {
@@ -521,6 +574,9 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	}
 	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
+	}
+	if transferTokenID != qkccommon.DefaultTokenID {
+		return nil, common.Address{}, gas, ErrExecutionReverted
 	}
 	nonce := evm.StateDB.GetNonce(caller)
 	if nonce+1 < nonce {
@@ -594,6 +650,7 @@ func (evm *EVM) create(caller common.Address, code []byte, gas GasBudget, value 
 	// Initialise a new contract and set the code that is to be used by the EVM.
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, address, value, gas, evm.jumpDests)
+	contract.TransferTokenID = transferTokenID
 
 	// Explicitly set the code to a null hash to prevent caching of jump analysis
 	// for the initialization code.
@@ -650,7 +707,7 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	contractAddr = crypto.CreateAddress(caller, evm.StateDB.GetNonce(caller))
-	return evm.create(caller, code, gas, value, contractAddr, CREATE)
+	return evm.create(caller, code, gas, value, contractAddr, CREATE, evm.TransferTokenID)
 }
 
 // Create2 creates a new contract using code as deployment code.
@@ -660,7 +717,7 @@ func (evm *EVM) Create(caller common.Address, code []byte, gas GasBudget, value 
 func (evm *EVM) Create2(caller common.Address, code []byte, gas GasBudget, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas GasBudget, err error) {
 	inithash := crypto.Keccak256Hash(code)
 	contractAddr = crypto.CreateAddress2(caller, salt.Bytes32(), inithash[:])
-	return evm.create(caller, code, gas, endowment, contractAddr, CREATE2)
+	return evm.create(caller, code, gas, endowment, contractAddr, CREATE2, evm.TransferTokenID)
 }
 
 // resolveCode returns the code associated with the provided account. After
