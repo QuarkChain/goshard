@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 )
@@ -48,6 +49,7 @@ func TestCreate2AfterRevertedTransferPythonRoot(t *testing.T) {
 				Transfer: transfer, BlockNumber: big.NewInt(0), Difficulty: big.NewInt(1),
 			}, s, petersburgOnlyChainConfig(), Config{})
 			defer evm.Release()
+			evm.SetTxContext(TxContext{TransferTokenID: qkccommon.DefaultTokenID})
 			_, deployed, _, err := evm.Create2(caller, code, NewGasBudget(1000000), new(uint256.Int), new(uint256.Int))
 			require.NoError(t, err)
 			require.Equal(t, address, deployed)

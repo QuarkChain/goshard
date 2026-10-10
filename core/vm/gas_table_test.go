@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 )
@@ -182,6 +183,7 @@ func TestCreateGas(t *testing.T) {
 			}
 
 			evm := NewEVM(vmctx, statedb, chainConfig, config)
+			evm.SetTxContext(TxContext{TransferTokenID: qkccommon.DefaultTokenID})
 			initialGas := NewGasBudget(uint64(testGas))
 			ret, leftOver, err := evm.Call(common.Address{}, address, nil, initialGas.Copy(), new(uint256.Int))
 			if err != nil {

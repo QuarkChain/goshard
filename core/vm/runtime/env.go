@@ -19,14 +19,16 @@ package runtime
 import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/vm"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/holiman/uint256"
 )
 
 func NewEnv(cfg *Config) *vm.EVM {
 	txContext := vm.TxContext{
-		Origin:     cfg.Origin,
-		GasPrice:   uint256.MustFromBig(cfg.GasPrice),
-		BlobHashes: cfg.BlobHashes,
+		Origin:          cfg.Origin,
+		GasPrice:        uint256.MustFromBig(cfg.GasPrice),
+		BlobHashes:      cfg.BlobHashes,
+		TransferTokenID: qkccommon.DefaultTokenID,
 	}
 	blockContext := vm.BlockContext{
 		CanTransfer: core.CanTransfer,
