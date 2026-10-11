@@ -9,6 +9,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/qkc/account"
+	common0 "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 var _ = (*headerMarshaling)(nil)
@@ -16,30 +18,39 @@ var _ = (*headerMarshaling)(nil)
 // MarshalJSON marshals as JSON.
 func (h Header) MarshalJSON() ([]byte, error) {
 	type Header struct {
-		ParentHash          common.Hash     `json:"parentHash"       gencodec:"required"`
-		UncleHash           common.Hash     `json:"sha3Uncles"       gencodec:"required"`
-		Coinbase            common.Address  `json:"miner"`
-		Root                common.Hash     `json:"stateRoot"        gencodec:"required"`
-		TxHash              common.Hash     `json:"transactionsRoot" gencodec:"required"`
-		ReceiptHash         common.Hash     `json:"receiptsRoot"     gencodec:"required"`
-		Bloom               Bloom           `json:"logsBloom"        gencodec:"required"`
-		Difficulty          *hexutil.Big    `json:"difficulty"       gencodec:"required"`
-		Number              *hexutil.Big    `json:"number"           gencodec:"required"`
-		GasLimit            hexutil.Uint64  `json:"gasLimit"         gencodec:"required"`
-		GasUsed             hexutil.Uint64  `json:"gasUsed"          gencodec:"required"`
-		Time                hexutil.Uint64  `json:"timestamp"        gencodec:"required"`
-		Extra               hexutil.Bytes   `json:"extraData"        gencodec:"required"`
-		MixDigest           common.Hash     `json:"mixHash"`
-		Nonce               BlockNonce      `json:"nonce"`
-		BaseFee             *hexutil.Big    `json:"baseFeePerGas" rlp:"optional"`
-		WithdrawalsHash     *common.Hash    `json:"withdrawalsRoot" rlp:"optional"`
-		BlobGasUsed         *hexutil.Uint64 `json:"blobGasUsed" rlp:"optional"`
-		ExcessBlobGas       *hexutil.Uint64 `json:"excessBlobGas" rlp:"optional"`
-		ParentBeaconRoot    *common.Hash    `json:"parentBeaconBlockRoot" rlp:"optional"`
-		RequestsHash        *common.Hash    `json:"requestsHash" rlp:"optional"`
-		BlockAccessListHash *common.Hash    `json:"balHash" rlp:"optional"`
-		SlotNumber          *hexutil.Uint64 `json:"slotNumber" rlp:"optional"`
-		Hash                common.Hash     `json:"hash"`
+		ParentHash           common.Hash            `json:"parentHash"       gencodec:"required"`
+		UncleHash            common.Hash            `json:"sha3Uncles"       gencodec:"required"`
+		Coinbase             common.Address         `json:"miner"`
+		Root                 common.Hash            `json:"stateRoot"        gencodec:"required"`
+		TxHash               common.Hash            `json:"transactionsRoot" gencodec:"required"`
+		ReceiptHash          common.Hash            `json:"receiptsRoot"     gencodec:"required"`
+		Bloom                Bloom                  `json:"logsBloom"        gencodec:"required"`
+		Difficulty           *hexutil.Big           `json:"difficulty"       gencodec:"required"`
+		Number               *hexutil.Big           `json:"number"           gencodec:"required"`
+		GasLimit             hexutil.Uint64         `json:"gasLimit"         gencodec:"required"`
+		GasUsed              hexutil.Uint64         `json:"gasUsed"          gencodec:"required"`
+		Time                 hexutil.Uint64         `json:"timestamp"        gencodec:"required"`
+		Extra                hexutil.Bytes          `json:"extraData"        gencodec:"required"`
+		MixDigest            common.Hash            `json:"mixHash"`
+		Nonce                BlockNonce             `json:"nonce"`
+		Version              uint32                 `json:"version"`
+		Branch               account.Branch         `json:"branch"`
+		CoinbaseFullShardKey uint32                 `json:"coinbaseFullShardKey"`
+		CoinbaseAmount       *common0.TokenBalances `json:"coinbaseAmount" rlp:"nilString"`
+		PrevRootBlockHash    common.Hash            `json:"prevRootBlockHash"`
+		MetaHash             common.Hash            `json:"metaHash"`
+		CrossShardGasUsed    uint64                 `json:"crossShardGasUsed"`
+		XShardTxCursorInfo   *XShardTxCursorInfo    `json:"xShardTxCursorInfo"`
+		XShardGasLimit       uint64                 `json:"xShardGasLimit"`
+		BaseFee              *hexutil.Big           `json:"baseFeePerGas" rlp:"optional"`
+		WithdrawalsHash      *common.Hash           `json:"withdrawalsRoot" rlp:"optional"`
+		BlobGasUsed          *hexutil.Uint64        `json:"blobGasUsed" rlp:"optional"`
+		ExcessBlobGas        *hexutil.Uint64        `json:"excessBlobGas" rlp:"optional"`
+		ParentBeaconRoot     *common.Hash           `json:"parentBeaconBlockRoot" rlp:"optional"`
+		RequestsHash         *common.Hash           `json:"requestsHash" rlp:"optional"`
+		BlockAccessListHash  *common.Hash           `json:"balHash" rlp:"optional"`
+		SlotNumber           *hexutil.Uint64        `json:"slotNumber" rlp:"optional"`
+		Hash                 common.Hash            `json:"hash"`
 	}
 	var enc Header
 	enc.ParentHash = h.ParentHash
@@ -57,6 +68,15 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.Extra = h.Extra
 	enc.MixDigest = h.MixDigest
 	enc.Nonce = h.Nonce
+	enc.Version = h.Version
+	enc.Branch = h.Branch
+	enc.CoinbaseFullShardKey = h.CoinbaseFullShardKey
+	enc.CoinbaseAmount = h.CoinbaseAmount
+	enc.PrevRootBlockHash = h.PrevRootBlockHash
+	enc.MetaHash = h.MetaHash
+	enc.CrossShardGasUsed = h.CrossShardGasUsed
+	enc.XShardTxCursorInfo = h.XShardTxCursorInfo
+	enc.XShardGasLimit = h.XShardGasLimit
 	enc.BaseFee = (*hexutil.Big)(h.BaseFee)
 	enc.WithdrawalsHash = h.WithdrawalsHash
 	enc.BlobGasUsed = (*hexutil.Uint64)(h.BlobGasUsed)
@@ -72,29 +92,38 @@ func (h Header) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON unmarshals from JSON.
 func (h *Header) UnmarshalJSON(input []byte) error {
 	type Header struct {
-		ParentHash          *common.Hash    `json:"parentHash"       gencodec:"required"`
-		UncleHash           *common.Hash    `json:"sha3Uncles"       gencodec:"required"`
-		Coinbase            *common.Address `json:"miner"`
-		Root                *common.Hash    `json:"stateRoot"        gencodec:"required"`
-		TxHash              *common.Hash    `json:"transactionsRoot" gencodec:"required"`
-		ReceiptHash         *common.Hash    `json:"receiptsRoot"     gencodec:"required"`
-		Bloom               *Bloom          `json:"logsBloom"        gencodec:"required"`
-		Difficulty          *hexutil.Big    `json:"difficulty"       gencodec:"required"`
-		Number              *hexutil.Big    `json:"number"           gencodec:"required"`
-		GasLimit            *hexutil.Uint64 `json:"gasLimit"         gencodec:"required"`
-		GasUsed             *hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
-		Time                *hexutil.Uint64 `json:"timestamp"        gencodec:"required"`
-		Extra               *hexutil.Bytes  `json:"extraData"        gencodec:"required"`
-		MixDigest           *common.Hash    `json:"mixHash"`
-		Nonce               *BlockNonce     `json:"nonce"`
-		BaseFee             *hexutil.Big    `json:"baseFeePerGas" rlp:"optional"`
-		WithdrawalsHash     *common.Hash    `json:"withdrawalsRoot" rlp:"optional"`
-		BlobGasUsed         *hexutil.Uint64 `json:"blobGasUsed" rlp:"optional"`
-		ExcessBlobGas       *hexutil.Uint64 `json:"excessBlobGas" rlp:"optional"`
-		ParentBeaconRoot    *common.Hash    `json:"parentBeaconBlockRoot" rlp:"optional"`
-		RequestsHash        *common.Hash    `json:"requestsHash" rlp:"optional"`
-		BlockAccessListHash *common.Hash    `json:"balHash" rlp:"optional"`
-		SlotNumber          *hexutil.Uint64 `json:"slotNumber" rlp:"optional"`
+		ParentHash           *common.Hash           `json:"parentHash"       gencodec:"required"`
+		UncleHash            *common.Hash           `json:"sha3Uncles"       gencodec:"required"`
+		Coinbase             *common.Address        `json:"miner"`
+		Root                 *common.Hash           `json:"stateRoot"        gencodec:"required"`
+		TxHash               *common.Hash           `json:"transactionsRoot" gencodec:"required"`
+		ReceiptHash          *common.Hash           `json:"receiptsRoot"     gencodec:"required"`
+		Bloom                *Bloom                 `json:"logsBloom"        gencodec:"required"`
+		Difficulty           *hexutil.Big           `json:"difficulty"       gencodec:"required"`
+		Number               *hexutil.Big           `json:"number"           gencodec:"required"`
+		GasLimit             *hexutil.Uint64        `json:"gasLimit"         gencodec:"required"`
+		GasUsed              *hexutil.Uint64        `json:"gasUsed"          gencodec:"required"`
+		Time                 *hexutil.Uint64        `json:"timestamp"        gencodec:"required"`
+		Extra                *hexutil.Bytes         `json:"extraData"        gencodec:"required"`
+		MixDigest            *common.Hash           `json:"mixHash"`
+		Nonce                *BlockNonce            `json:"nonce"`
+		Version              *uint32                `json:"version"`
+		Branch               *account.Branch        `json:"branch"`
+		CoinbaseFullShardKey *uint32                `json:"coinbaseFullShardKey"`
+		CoinbaseAmount       *common0.TokenBalances `json:"coinbaseAmount" rlp:"nilString"`
+		PrevRootBlockHash    *common.Hash           `json:"prevRootBlockHash"`
+		MetaHash             *common.Hash           `json:"metaHash"`
+		CrossShardGasUsed    *uint64                `json:"crossShardGasUsed"`
+		XShardTxCursorInfo   *XShardTxCursorInfo    `json:"xShardTxCursorInfo"`
+		XShardGasLimit       *uint64                `json:"xShardGasLimit"`
+		BaseFee              *hexutil.Big           `json:"baseFeePerGas" rlp:"optional"`
+		WithdrawalsHash      *common.Hash           `json:"withdrawalsRoot" rlp:"optional"`
+		BlobGasUsed          *hexutil.Uint64        `json:"blobGasUsed" rlp:"optional"`
+		ExcessBlobGas        *hexutil.Uint64        `json:"excessBlobGas" rlp:"optional"`
+		ParentBeaconRoot     *common.Hash           `json:"parentBeaconBlockRoot" rlp:"optional"`
+		RequestsHash         *common.Hash           `json:"requestsHash" rlp:"optional"`
+		BlockAccessListHash  *common.Hash           `json:"balHash" rlp:"optional"`
+		SlotNumber           *hexutil.Uint64        `json:"slotNumber" rlp:"optional"`
 	}
 	var dec Header
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -156,6 +185,33 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 	}
 	if dec.Nonce != nil {
 		h.Nonce = *dec.Nonce
+	}
+	if dec.Version != nil {
+		h.Version = *dec.Version
+	}
+	if dec.Branch != nil {
+		h.Branch = *dec.Branch
+	}
+	if dec.CoinbaseFullShardKey != nil {
+		h.CoinbaseFullShardKey = *dec.CoinbaseFullShardKey
+	}
+	if dec.CoinbaseAmount != nil {
+		h.CoinbaseAmount = dec.CoinbaseAmount
+	}
+	if dec.PrevRootBlockHash != nil {
+		h.PrevRootBlockHash = *dec.PrevRootBlockHash
+	}
+	if dec.MetaHash != nil {
+		h.MetaHash = *dec.MetaHash
+	}
+	if dec.CrossShardGasUsed != nil {
+		h.CrossShardGasUsed = *dec.CrossShardGasUsed
+	}
+	if dec.XShardTxCursorInfo != nil {
+		h.XShardTxCursorInfo = dec.XShardTxCursorInfo
+	}
+	if dec.XShardGasLimit != nil {
+		h.XShardGasLimit = *dec.XShardGasLimit
 	}
 	if dec.BaseFee != nil {
 		h.BaseFee = (*big.Int)(dec.BaseFee)

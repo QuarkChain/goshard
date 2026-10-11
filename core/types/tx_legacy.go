@@ -21,17 +21,24 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 )
 
 // LegacyTx is the transaction data of the original Ethereum transactions.
 type LegacyTx struct {
-	Nonce    uint64          // nonce of sender account
-	GasPrice *big.Int        // wei per gas
-	Gas      uint64          // gas limit
-	To       *common.Address `rlp:"nil"` // nil means contract creation
-	Value    *big.Int        // wei amount
-	Data     []byte          // contract invocation input data
-	V, R, S  *big.Int        // signature values
+	Nonce            uint64          // nonce of sender account
+	GasPrice         *big.Int        // gas price in the selected gas token
+	Gas              uint64          // gas limit
+	To               *common.Address `rlp:"nil"` // nil means contract creation
+	Value            *big.Int        // transfer-token amount
+	Data             []byte          // contract invocation input data
+	NetworkID        uint32
+	FromFullShardKey *qkccommon.Uint32
+	ToFullShardKey   *qkccommon.Uint32
+	GasTokenID       uint64
+	TransferTokenID  uint64
+	Version          uint32
+	V, R, S          *big.Int // signature values
 }
 
 // NewTransaction creates an unsigned legacy transaction.
@@ -62,10 +69,14 @@ func NewContractCreation(nonce uint64, amount *big.Int, gasLimit uint64, gasPric
 // copy creates a deep copy of the transaction data and initializes all fields.
 func (tx *LegacyTx) copy() TxData {
 	cpy := &LegacyTx{
-		Nonce: tx.Nonce,
-		To:    copyAddressPtr(tx.To),
-		Data:  common.CopyBytes(tx.Data),
-		Gas:   tx.Gas,
+		Nonce:           tx.Nonce,
+		To:              copyAddressPtr(tx.To),
+		Data:            common.CopyBytes(tx.Data),
+		Gas:             tx.Gas,
+		NetworkID:       tx.NetworkID,
+		GasTokenID:      tx.GasTokenID,
+		TransferTokenID: tx.TransferTokenID,
+		Version:         tx.Version,
 		// These are initialized below.
 		Value:    new(big.Int),
 		GasPrice: new(big.Int),
@@ -87,6 +98,14 @@ func (tx *LegacyTx) copy() TxData {
 	}
 	if tx.S != nil {
 		cpy.S.Set(tx.S)
+	}
+	if tx.FromFullShardKey != nil {
+		key := *tx.FromFullShardKey
+		cpy.FromFullShardKey = &key
+	}
+	if tx.ToFullShardKey != nil {
+		key := *tx.ToFullShardKey
+		cpy.ToFullShardKey = &key
 	}
 	return cpy
 }

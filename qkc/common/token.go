@@ -315,6 +315,10 @@ func (t *TokenBalances) SerializeToBytes() ([]byte, error) {
 }
 
 func (t *TokenBalances) EncodeRLP(w io.Writer) error {
+	if t == nil {
+		_, err := w.Write(rlp.EmptyString)
+		return err
+	}
 	dataSer, err := t.SerializeToBytes()
 	if err != nil {
 		return err

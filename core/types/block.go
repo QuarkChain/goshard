@@ -31,6 +31,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types/bal"
+	"github.com/ethereum/go-ethereum/qkc/account"
+	qkccommon "github.com/ethereum/go-ethereum/qkc/common"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -82,6 +84,19 @@ type Header struct {
 	MixDigest   common.Hash    `json:"mixHash"`
 	Nonce       BlockNonce     `json:"nonce"`
 
+	// QuarkChain minor-header and meta fields. The gas-related meta values stay
+	// uint64 internally so geth's EVM and GasPool can be reused. Their external
+	// QKC protocol projections use uint256 and are checked on decode.
+	Version              uint32                   `json:"version"`
+	Branch               account.Branch           `json:"branch"`
+	CoinbaseFullShardKey uint32                   `json:"coinbaseFullShardKey"`
+	CoinbaseAmount       *qkccommon.TokenBalances `json:"coinbaseAmount" rlp:"nilString"`
+	PrevRootBlockHash    common.Hash              `json:"prevRootBlockHash"`
+	MetaHash             common.Hash              `json:"metaHash"`
+	CrossShardGasUsed    uint64                   `json:"crossShardGasUsed"`
+	XShardTxCursorInfo   *XShardTxCursorInfo      `json:"xShardTxCursorInfo"`
+	XShardGasLimit       uint64                   `json:"xShardGasLimit"`
+
 	// BaseFee was added by EIP-1559 and is ignored in legacy headers.
 	BaseFee *big.Int `json:"baseFeePerGas" rlp:"optional"`
 
@@ -122,10 +137,14 @@ type headerMarshaling struct {
 	SlotNumber    *hexutil.Uint64
 }
 
-// Hash returns the block hash of the header, which is simply the keccak256 hash of its
-// RLP encoding.
+// Hash returns the QKC minor-header hash computed from the
+// pyquarkchain-compatible header encoding.
 func (h *Header) Hash() common.Hash {
-	return rlpHash(h)
+	header, err := h.ToMinorBlockHeader()
+	if err != nil {
+		panic(err)
+	}
+	return header.Hash()
 }
 
 var headerSize = common.StorageSize(reflect.TypeFor[Header]().Size())
@@ -184,6 +203,7 @@ type Body struct {
 	Transactions []*Transaction
 	Uncles       []*Header
 	Withdrawals  []*Withdrawal `rlp:"optional"`
+	TrackingData []byte        `rlp:"optional"`
 }
 
 // Block represents an Ethereum block.
@@ -209,6 +229,7 @@ type Block struct {
 	transactions Transactions
 	withdrawals  Withdrawals
 	accessList   *bal.BlockAccessList
+	trackingData []byte
 
 	// caches
 	hash atomic.Pointer[common.Hash]
@@ -222,10 +243,11 @@ type Block struct {
 
 // "external" block encoding. used for eth protocol, etc.
 type extblock struct {
-	Header      *Header
-	Txs         []*Transaction
-	Uncles      []*Header
-	Withdrawals []*Withdrawal `rlp:"optional"`
+	Header       *Header
+	Txs          []*Transaction
+	Uncles       []*Header
+	Withdrawals  []*Withdrawal `rlp:"optional"`
+	TrackingData []byte        `rlp:"optional"`
 }
 
 // NewBlock creates a new block. The input data is copied, changes to header and to the
@@ -248,15 +270,16 @@ func NewBlock(header *Header, body *Body, receipts []*Receipt, hasher ListHasher
 	)
 
 	if len(txs) == 0 {
-		b.header.TxHash = EmptyTxsHash
+		b.header.TxHash = CalculateMerkleRoot(Transactions{})
 	} else {
-		b.header.TxHash = DeriveSha(Transactions(txs), hasher)
+		b.header.TxHash = CalculateMerkleRoot(Transactions(txs))
 		b.transactions = make(Transactions, len(txs))
 		copy(b.transactions, txs)
 	}
 
 	if len(receipts) == 0 {
 		b.header.ReceiptHash = EmptyReceiptsHash
+		b.header.Bloom = Bloom{}
 	} else {
 		b.header.ReceiptHash = DeriveSha(Receipts(receipts), hasher)
 		// Receipts must go through MakeReceipt to calculate the receipt's bloom
@@ -285,6 +308,12 @@ func NewBlock(header *Header, body *Body, receipts []*Receipt, hasher ListHasher
 		b.header.WithdrawalsHash = &hash
 		b.withdrawals = slices.Clone(withdrawals)
 	}
+	b.trackingData = common.CopyBytes(body.TrackingData)
+	meta, err := b.header.ToMinorBlockMeta()
+	if err != nil {
+		panic(err)
+	}
+	b.header.MetaHash = meta.Hash()
 
 	return b
 }
@@ -297,6 +326,13 @@ func CopyHeader(h *Header) *Header {
 	}
 	if cpy.Number = new(big.Int); h.Number != nil {
 		cpy.Number.Set(h.Number)
+	}
+	if h.CoinbaseAmount != nil {
+		cpy.CoinbaseAmount = h.CoinbaseAmount.Copy()
+	}
+	if h.XShardTxCursorInfo != nil {
+		cursor := *h.XShardTxCursorInfo
+		cpy.XShardTxCursorInfo = &cursor
 	}
 	if h.BaseFee != nil {
 		cpy.BaseFee = new(big.Int).Set(h.BaseFee)
@@ -343,7 +379,8 @@ func (b *Block) DecodeRLP(s *rlp.Stream) error {
 	if err := s.Decode(&eb); err != nil {
 		return err
 	}
-	b.header, b.uncles, b.transactions, b.withdrawals = eb.Header, eb.Uncles, eb.Txs, eb.Withdrawals
+	b.header, b.uncles, b.transactions, b.withdrawals, b.trackingData = eb.Header, eb.Uncles, eb.Txs, eb.Withdrawals, common.CopyBytes(eb.TrackingData)
+	b.hash.Store(nil)
 	b.size.Store(rlp.ListSize(size))
 	return nil
 }
@@ -351,17 +388,23 @@ func (b *Block) DecodeRLP(s *rlp.Stream) error {
 // EncodeRLP serializes a block as RLP.
 func (b *Block) EncodeRLP(w io.Writer) error {
 	return rlp.Encode(w, &extblock{
-		Header:      b.header,
-		Txs:         b.transactions,
-		Uncles:      b.uncles,
-		Withdrawals: b.withdrawals,
+		Header:       b.header,
+		Txs:          b.transactions,
+		Uncles:       b.uncles,
+		Withdrawals:  b.withdrawals,
+		TrackingData: b.trackingData,
 	})
 }
 
 // Body returns the non-header content of the block.
 // Note the returned data is not an independent copy.
 func (b *Block) Body() *Body {
-	return &Body{b.transactions, b.uncles, b.withdrawals}
+	return &Body{
+		Transactions: b.transactions,
+		Uncles:       b.uncles,
+		Withdrawals:  b.withdrawals,
+		TrackingData: common.CopyBytes(b.trackingData),
+	}
 }
 
 // Accessors for body data. These do not return a copy because the content
@@ -371,6 +414,7 @@ func (b *Block) Uncles() []*Header                { return b.uncles }
 func (b *Block) Transactions() Transactions       { return b.transactions }
 func (b *Block) Withdrawals() Withdrawals         { return b.withdrawals }
 func (b *Block) AccessList() *bal.BlockAccessList { return b.accessList }
+func (b *Block) TrackingData() []byte             { return common.CopyBytes(b.trackingData) }
 
 func (b *Block) Transaction(hash common.Hash) *Transaction {
 	for _, transaction := range b.transactions {
@@ -405,6 +449,29 @@ func (b *Block) TxHash() common.Hash      { return b.header.TxHash }
 func (b *Block) ReceiptHash() common.Hash { return b.header.ReceiptHash }
 func (b *Block) UncleHash() common.Hash   { return b.header.UncleHash }
 func (b *Block) Extra() []byte            { return common.CopyBytes(b.header.Extra) }
+
+func (b *Block) Version() uint32                { return b.header.Version }
+func (b *Block) Branch() account.Branch         { return b.header.Branch }
+func (b *Block) PrevRootBlockHash() common.Hash { return b.header.PrevRootBlockHash }
+func (b *Block) MetaHash() common.Hash          { return b.header.MetaHash }
+func (b *Block) CrossShardGasUsed() uint64      { return b.header.CrossShardGasUsed }
+func (b *Block) XShardGasLimit() uint64         { return b.header.XShardGasLimit }
+func (b *Block) CoinbaseAmount() *qkccommon.TokenBalances {
+	if b.header.CoinbaseAmount == nil {
+		return qkccommon.NewEmptyTokenBalances()
+	}
+	return b.header.CoinbaseAmount.Copy()
+}
+func (b *Block) CoinbaseAddress() account.Address {
+	return account.Address{Recipient: b.header.Coinbase, FullShardKey: b.header.CoinbaseFullShardKey}
+}
+func (b *Block) XShardCursorInfo() *XShardTxCursorInfo {
+	if b.header.XShardTxCursorInfo == nil {
+		return nil
+	}
+	cursor := *b.header.XShardTxCursorInfo
+	return &cursor
+}
 
 func (b *Block) BaseFee() *big.Int {
 	if b.header.BaseFee == nil {
@@ -506,6 +573,7 @@ func (b *Block) WithSeal(header *Header) *Block {
 		uncles:       b.uncles,
 		withdrawals:  b.withdrawals,
 		accessList:   b.accessList,
+		trackingData: common.CopyBytes(b.trackingData),
 	}
 }
 
@@ -518,6 +586,7 @@ func (b *Block) WithBody(body Body) *Block {
 		uncles:       make([]*Header, len(body.Uncles)),
 		withdrawals:  slices.Clone(body.Withdrawals),
 		accessList:   b.accessList,
+		trackingData: common.CopyBytes(body.TrackingData),
 	}
 	for i := range body.Uncles {
 		block.uncles[i] = CopyHeader(body.Uncles[i])
@@ -540,6 +609,7 @@ func (b *Block) WithAccessListUnsafe(accessList *bal.BlockAccessList) *Block {
 		uncles:       b.uncles,
 		withdrawals:  b.withdrawals,
 		accessList:   accessList,
+		trackingData: common.CopyBytes(b.trackingData),
 	}
 }
 

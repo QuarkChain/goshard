@@ -108,17 +108,10 @@ type TxData interface {
 
 // EncodeRLP implements rlp.Encoder
 func (tx *Transaction) EncodeRLP(w io.Writer) error {
-	if tx.Type() == LegacyTxType {
-		return rlp.Encode(w, tx.inner)
+	if tx.Type() != LegacyTxType {
+		return ErrTxTypeNotSupported
 	}
-	// It's an EIP-2718 typed TX envelope.
-	buf := encodeBufferPool.Get().(*bytes.Buffer)
-	defer encodeBufferPool.Put(buf)
-	buf.Reset()
-	if err := tx.encodeTyped(buf); err != nil {
-		return err
-	}
-	return rlp.Encode(w, buf.Bytes())
+	return rlp.Encode(w, tx.inner)
 }
 
 // encodeTyped writes the canonical encoding of a typed transaction to w.
@@ -127,16 +120,10 @@ func (tx *Transaction) encodeTyped(w *bytes.Buffer) error {
 	return tx.inner.encode(w)
 }
 
-// MarshalBinary returns the canonical encoding of the transaction.
-// For legacy transactions, it returns the RLP encoding. For EIP-2718 typed
-// transactions, it returns the type and payload.
+// MarshalBinary returns the complete QKC transaction encoding:
+// type byte, uint32 payload length, and payload RLP.
 func (tx *Transaction) MarshalBinary() ([]byte, error) {
-	if tx.Type() == LegacyTxType {
-		return rlp.EncodeToBytes(tx.inner)
-	}
-	var buf bytes.Buffer
-	err := tx.encodeTyped(&buf)
-	return buf.Bytes(), err
+	return tx.qkcEncode()
 }
 
 // DecodeRLP implements rlp.Decoder
@@ -150,73 +137,19 @@ func (tx *Transaction) DecodeRLP(s *rlp.Stream) error {
 		var inner LegacyTx
 		err := s.Decode(&inner)
 		if err == nil {
-			tx.setDecoded(&inner, rlp.ListSize(size))
+			// Blocks persist the inner payload RLP, while Size reports the full
+			// external QKC envelope: type byte + uint32 payload length + payload.
+			tx.setDecoded(&inner, rlp.ListSize(size)+qkcTransactionEnvelopeSize)
 		}
 		return err
-	case kind == rlp.Byte:
-		return errShortTypedTx
 	default:
-		// It's an EIP-2718 typed TX envelope.
-		// First read the tx payload bytes into a temporary buffer.
-		b, buf, err := getPooledBuffer(size)
-		if err != nil {
-			return err
-		}
-		defer encodeBufferPool.Put(buf)
-		if err := s.ReadBytes(b); err != nil {
-			return err
-		}
-		// Now decode the inner transaction.
-		inner, err := tx.decodeTyped(b)
-		if err == nil {
-			tx.setDecoded(inner, size)
-		}
-		return err
+		return ErrTxTypeNotSupported
 	}
 }
 
-// UnmarshalBinary decodes the canonical encoding of transactions.
-// It supports legacy RLP transactions and EIP-2718 typed transactions.
+// UnmarshalBinary decodes the complete QKC transaction encoding.
 func (tx *Transaction) UnmarshalBinary(b []byte) error {
-	if len(b) > 0 && b[0] > 0x7f {
-		// It's a legacy transaction.
-		var data LegacyTx
-		err := rlp.DecodeBytes(b, &data)
-		if err != nil {
-			return err
-		}
-		tx.setDecoded(&data, uint64(len(b)))
-		return nil
-	}
-	// It's an EIP-2718 typed transaction envelope.
-	inner, err := tx.decodeTyped(b)
-	if err != nil {
-		return err
-	}
-	tx.setDecoded(inner, uint64(len(b)))
-	return nil
-}
-
-// decodeTyped decodes a typed transaction from the canonical format.
-func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
-	if len(b) <= 1 {
-		return nil, errShortTypedTx
-	}
-	var inner TxData
-	switch b[0] {
-	case AccessListTxType:
-		inner = new(AccessListTx)
-	case DynamicFeeTxType:
-		inner = new(DynamicFeeTx)
-	case BlobTxType:
-		inner = new(BlobTx)
-	case SetCodeTxType:
-		inner = new(SetCodeTx)
-	default:
-		return nil, ErrTxTypeNotSupported
-	}
-	err := inner.decode(b[1:])
-	return inner, err
+	return tx.qkcDecode(b)
 }
 
 // setDecoded sets the inner transaction and size after decoding.
@@ -267,7 +200,7 @@ func isProtectedV(V *big.Int) bool {
 func (tx *Transaction) Protected() bool {
 	switch tx := tx.inner.(type) {
 	case *LegacyTx:
-		return tx.V != nil && isProtectedV(tx.V)
+		return tx.Version == 2
 	default:
 		return true
 	}
@@ -282,6 +215,12 @@ func (tx *Transaction) Type() uint8 {
 // non-nil. For legacy transactions which are not replay-protected, the return value is
 // zero.
 func (tx *Transaction) ChainId() *big.Int {
+	if inner, ok := tx.inner.(*LegacyTx); ok {
+		if inner.Version == 2 {
+			return new(big.Int).SetUint64(uint64(inner.NetworkID))
+		}
+		return new(big.Int)
+	}
 	return tx.inner.chainID()
 }
 
@@ -581,40 +520,27 @@ func (tx *Transaction) Hash() common.Hash {
 		return *hash
 	}
 
-	var h common.Hash
-	if tx.Type() == LegacyTxType {
-		h = rlpHash(tx.inner)
-	} else {
-		h = prefixedRlpHash(tx.Type(), tx.inner)
+	encoded, err := tx.qkcEncode()
+	if err != nil {
+		panic(err)
 	}
+	h := crypto.Keccak256Hash(encoded)
 	tx.hash.Store(&h)
 	return h
 }
 
-// Size returns the true encoded storage size of the transaction, either by encoding
-// and returning it, or returning a previously cached value.
+// Size returns the size of the complete QKC transaction encoding, either by
+// encoding and returning it or returning a previously cached value.
 func (tx *Transaction) Size() uint64 {
 	if size := tx.size.Load(); size > 0 {
 		return size
 	}
 
-	// Cache miss, encode and cache.
-	// Note we rely on the assumption that all tx.inner values are RLP-encoded!
-	c := writeCounter(0)
-	rlp.Encode(&c, &tx.inner)
-	size := uint64(c)
-
-	// For blob transactions, add the size of the blob content and the outer list of the
-	// tx + sidecar encoding.
-	if sc := tx.BlobTxSidecar(); sc != nil {
-		size += rlp.ListSize(sc.encodedSize())
+	encoded, err := tx.qkcEncode()
+	if err != nil {
+		panic(err)
 	}
-
-	// For typed transactions, the encoding also includes the leading type byte.
-	if tx.Type() != LegacyTxType {
-		size += 1
-	}
-
+	size := uint64(len(encoded))
 	tx.size.Store(size)
 	return size
 }

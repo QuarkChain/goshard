@@ -108,6 +108,11 @@ func LatestSignerForChainID(chainID *big.Int) Signer {
 
 // SignTx signs the transaction using the given signer and private key.
 func SignTx(tx *Transaction, s Signer, prv *ecdsa.PrivateKey) (*Transaction, error) {
+	if validator, ok := s.(interface{ Validate(*Transaction) error }); ok {
+		if err := validator.Validate(tx); err != nil {
+			return nil, err
+		}
+	}
 	h := s.Hash(tx)
 	sig, err := crypto.Sign(h[:], prv)
 	if err != nil {

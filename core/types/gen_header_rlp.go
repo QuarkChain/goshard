@@ -37,15 +37,36 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 	w.WriteBytes(obj.Extra)
 	w.WriteBytes(obj.MixDigest[:])
 	w.WriteBytes(obj.Nonce[:])
-	_tmp1 := obj.BaseFee != nil
-	_tmp2 := obj.WithdrawalsHash != nil
-	_tmp3 := obj.BlobGasUsed != nil
-	_tmp4 := obj.ExcessBlobGas != nil
-	_tmp5 := obj.ParentBeaconRoot != nil
-	_tmp6 := obj.RequestsHash != nil
-	_tmp7 := obj.BlockAccessListHash != nil
-	_tmp8 := obj.SlotNumber != nil
-	if _tmp1 || _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 {
+	w.WriteUint64(uint64(obj.Version))
+	_tmp1 := w.List()
+	w.WriteUint64(uint64(obj.Branch.Value))
+	w.ListEnd(_tmp1)
+	w.WriteUint64(uint64(obj.CoinbaseFullShardKey))
+	if err := obj.CoinbaseAmount.EncodeRLP(w); err != nil {
+		return err
+	}
+	w.WriteBytes(obj.PrevRootBlockHash[:])
+	w.WriteBytes(obj.MetaHash[:])
+	w.WriteUint64(obj.CrossShardGasUsed)
+	if obj.XShardTxCursorInfo == nil {
+		w.Write([]byte{0xC0})
+	} else {
+		_tmp2 := w.List()
+		w.WriteUint64(obj.XShardTxCursorInfo.RootBlockHeight)
+		w.WriteUint64(obj.XShardTxCursorInfo.MinorBlockIndex)
+		w.WriteUint64(obj.XShardTxCursorInfo.XShardDepositIndex)
+		w.ListEnd(_tmp2)
+	}
+	w.WriteUint64(obj.XShardGasLimit)
+	_tmp3 := obj.BaseFee != nil
+	_tmp4 := obj.WithdrawalsHash != nil
+	_tmp5 := obj.BlobGasUsed != nil
+	_tmp6 := obj.ExcessBlobGas != nil
+	_tmp7 := obj.ParentBeaconRoot != nil
+	_tmp8 := obj.RequestsHash != nil
+	_tmp9 := obj.BlockAccessListHash != nil
+	_tmp10 := obj.SlotNumber != nil
+	if _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 {
 		if obj.BaseFee == nil {
 			w.Write(rlp.EmptyString)
 		} else {
@@ -55,49 +76,49 @@ func (obj *Header) EncodeRLP(_w io.Writer) error {
 			w.WriteBigInt(obj.BaseFee)
 		}
 	}
-	if _tmp2 || _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 {
+	if _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 {
 		if obj.WithdrawalsHash == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.WithdrawalsHash[:])
 		}
 	}
-	if _tmp3 || _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 {
+	if _tmp5 || _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 {
 		if obj.BlobGasUsed == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.BlobGasUsed))
 		}
 	}
-	if _tmp4 || _tmp5 || _tmp6 || _tmp7 || _tmp8 {
+	if _tmp6 || _tmp7 || _tmp8 || _tmp9 || _tmp10 {
 		if obj.ExcessBlobGas == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteUint64((*obj.ExcessBlobGas))
 		}
 	}
-	if _tmp5 || _tmp6 || _tmp7 || _tmp8 {
+	if _tmp7 || _tmp8 || _tmp9 || _tmp10 {
 		if obj.ParentBeaconRoot == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.ParentBeaconRoot[:])
 		}
 	}
-	if _tmp6 || _tmp7 || _tmp8 {
+	if _tmp8 || _tmp9 || _tmp10 {
 		if obj.RequestsHash == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.RequestsHash[:])
 		}
 	}
-	if _tmp7 || _tmp8 {
+	if _tmp9 || _tmp10 {
 		if obj.BlockAccessListHash == nil {
 			w.Write([]byte{0x80})
 		} else {
 			w.WriteBytes(obj.BlockAccessListHash[:])
 		}
 	}
-	if _tmp8 {
+	if _tmp10 {
 		if obj.SlotNumber == nil {
 			w.Write([]byte{0x80})
 		} else {
