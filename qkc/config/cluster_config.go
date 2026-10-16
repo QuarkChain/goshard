@@ -165,6 +165,8 @@ type QuarkChainConfig struct {
 	chainIdToShardSize                    map[uint32]uint32
 	chainIdToShardIds                     map[uint32][]uint32
 	defaultChainTokenID                   uint64
+	EnableTxTimeStamp                     uint64      `json:"ENABLE_TX_TIMESTAMP"`
+	TxWhitelistSenders                    []string    `json:"TX_WHITELIST_SENDERS"`
 	EnableEvmTimeStamp                    uint64      `json:"ENABLE_EVM_TIMESTAMP"`
 	EnableQkcHashXHeight                  uint64      `json:"ENABLE_QKCHASHX_HEIGHT"`
 	EnableNonReservedNativeTokenTimestamp uint64      `json:"ENABLE_NON_RESERVED_NATIVE_TOKEN_TIMESTAMP"`

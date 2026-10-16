@@ -96,6 +96,31 @@ func TestLoadClusterConfigFixture(t *testing.T) {
 	}
 }
 
+func TestLoadTransactionAdmissionSwitches(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		path      string
+		enableTx  uint64
+		whitelist bool
+	}{
+		{"mainnet", fixtureMainnet, 1561791600, true},
+		{"devnet", fixtureDevnet, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadClusterConfig(tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Quarkchain.EnableTxTimeStamp; got != tc.enableTx {
+				t.Errorf("ENABLE_TX_TIMESTAMP = %d, want %d", got, tc.enableTx)
+			}
+			if got := len(cfg.Quarkchain.TxWhitelistSenders) > 0; got != tc.whitelist {
+				t.Errorf("TX_WHITELIST_SENDERS nonempty = %t, want %t", got, tc.whitelist)
+			}
+		})
+	}
+}
+
 func TestResolveSlave(t *testing.T) {
 	for _, nw := range networks {
 		t.Run(nw.name, func(t *testing.T) {
